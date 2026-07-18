@@ -19,6 +19,7 @@ class CohortFlushTracker:
         self.label = label
         self._flushed_names = set()
         self._recorded_cohort_ids = None
+        self._ever_flushed = False
 
     @property
     def flushed_names(self):
@@ -43,12 +44,27 @@ class CohortFlushTracker:
     def mark_flushed(self, property_names):
         self._flushed_names.update(property_names)
 
+    def record_flush(self, cohort_ids):
+        """Record `cohort_ids` for a real flush_properties call, raising if
+        they differ from an earlier flush's ids. Marks this tracker as
+        having a real flush baseline, so later check_drift() calls (at
+        final export) know there is something to re-verify against."""
+        if self._ever_flushed and cohort_ids != self._recorded_cohort_ids:
+            raise RuntimeError(
+                f"{self.label!r} cohort changed since its earlier "
+                f"flush_properties step ({len(self._recorded_cohort_ids)} "
+                f"members then, {len(cohort_ids)} now): flushed columns "
+                f"would not share a row order."
+            )
+        self._recorded_cohort_ids = cohort_ids
+        self._ever_flushed = True
+
     def check_drift(self, cohort_ids):
         """Raise if `cohort_ids` differs from the ids recorded by an
-        earlier call; otherwise record them (first call) or confirm no
-        drift (later calls, including the final-export re-verify)."""
-        if self._recorded_cohort_ids is None:
-            self._recorded_cohort_ids = cohort_ids
+        earlier real flush_properties call (final-export re-verify). No-op
+        if no flush ever happened: nothing was flushed, so there is
+        nothing to re-verify against."""
+        if not self._ever_flushed:
             return
         if cohort_ids != self._recorded_cohort_ids:
             raise RuntimeError(

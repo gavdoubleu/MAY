@@ -94,7 +94,7 @@ class WorldSerializer:
         # Cohort must match any earlier flush: columns from both steps share
         # one row order (see docs/adr/0003).
         cohort_ids = [person.id for person in people_sorted]
-        self._population_flush.check_drift(cohort_ids)
+        self._population_flush.record_flush(cohort_ids)
 
         with h5py.File(self._core_output_file, 'r+') as f:
             props_group = f['population'].require_group('properties')
@@ -129,7 +129,7 @@ class WorldSerializer:
         # Cohort must match any earlier flush: columns from both steps share
         # one row order (see docs/adr/0003).
         cohort_ids = [unit.id for unit in units_list]
-        self._geography_flush.check_drift(cohort_ids)
+        self._geography_flush.record_flush(cohort_ids)
 
         with h5py.File(self._core_output_file, 'r+') as f:
             props_group = f['geography'].require_group('properties')
@@ -173,7 +173,7 @@ class WorldSerializer:
         # Cohort must match any earlier partial flush of the same type:
         # columns from both steps share one row order.
         cohort_ids = [venue.id for venue in cohort_sorted]
-        tracker.check_drift(cohort_ids)
+        tracker.record_flush(cohort_ids)
 
         with h5py.File(self._core_output_file, 'r+') as f:
             type_group = f.require_group('venues').require_group('properties').require_group(venue_type)

@@ -14,7 +14,7 @@ class TestCheckDrift:
 
     def test_first_call_records_cohort_without_raising(self):
         tracker = CohortFlushTracker("population")
-        tracker.check_drift([1, 2, 3])  # no raise
+        tracker.record_flush([1, 2, 3])  # no raise
 
     def test_fully_removed_cohort_still_raises(self):
         """The cohort must be checked even when the 'current' ids are now
@@ -22,7 +22,7 @@ class TestCheckDrift:
         class fixed in c6d6e4b for venues; the shared tracker must guarantee
         it for every flush target, not just venues."""
         tracker = CohortFlushTracker("household")
-        tracker.check_drift([1, 2, 3])
+        tracker.record_flush([1, 2, 3])
 
         with pytest.raises(RuntimeError, match="household"):
             tracker.check_drift([])
@@ -31,8 +31,29 @@ class TestCheckDrift:
         """Two flush steps for the same cohort (splitting properties across
         calls) must not spuriously conflict with each other."""
         tracker = CohortFlushTracker("geo_units")
-        tracker.check_drift([1, 2, 3])
+        tracker.record_flush([1, 2, 3])
+        tracker.record_flush([1, 2, 3])  # no raise
+
+    def test_check_drift_without_any_flush_does_not_raise(self):
+        """No flush_properties call ever happened, so a final-export
+        check_drift() call has nothing to re-verify against — must be a
+        no-op, not a spurious raise (see mission_statement_cohort_drift_reexport)."""
+        tracker = CohortFlushTracker("population")
         tracker.check_drift([1, 2, 3])  # no raise
+
+    def test_check_drift_without_flush_ignores_later_cohort_change(self):
+        """Second export() call on a never-flushed serializer, with cohort
+        membership changed in between — must not raise, since no flush ever
+        happened to establish a baseline worth re-verifying."""
+        tracker = CohortFlushTracker("geo_units")
+        tracker.check_drift([1, 2, 3])
+        tracker.check_drift([1, 2])  # no raise: never flushed
+
+    def test_check_drift_after_real_flush_still_raises_on_drift(self):
+        tracker = CohortFlushTracker("population")
+        tracker.record_flush([1, 2, 3])
+        with pytest.raises(RuntimeError, match="population"):
+            tracker.check_drift([1, 2])
 
 
 class TestValidate:
