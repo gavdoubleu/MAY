@@ -379,6 +379,35 @@ class TestFlushPropertiesPopulation:
         with pytest.raises(ValueError, match="twice"):
             world.flush_properties(target="population", properties=["ethnicity"])
 
+    def test_cohort_drift_after_flush_fails_loud_at_export(self, world_with_ethnicity):
+        """The population cohort must be closed at flush: adding a person
+        afterwards would misalign the flushed column with /population/ids."""
+        from may.population import Person
+        world, canonical_path = world_with_ethnicity
+        world.flush_properties(target="population", properties=["ethnicity"])
+
+        sgu = world.geography.units_by_id[3]
+        world.population.add_person(Person(age=40, sex="male", geographical_unit=sgu))
+
+        with pytest.raises(RuntimeError, match="cohort"):
+            world.export_to_hdf5(canonical_path, config_file=None)
+
+    def test_cohort_drift_between_partial_flushes_fails_loud(self, world_with_ethnicity):
+        """Two flush steps may split population properties, but the cohort
+        must not change between them: the second flush re-verifies the
+        Person.id sequence recorded by the first."""
+        from may.population import Person
+        world, _ = world_with_ethnicity
+        for person in world.population.people:
+            person.properties["work_mode"] = f"mode_{person.id % 2}"
+        world.flush_properties(target="population", properties=["ethnicity"])
+
+        sgu = world.geography.units_by_id[3]
+        world.population.add_person(Person(age=40, sex="male", geographical_unit=sgu))
+
+        with pytest.raises(RuntimeError, match="cohort"):
+            world.flush_properties(target="population", properties=["work_mode"])
+
 
 class TestFlushPropertiesGeoUnits:
     """Mid-timeline flush of geographical unit properties to the canonical
@@ -464,6 +493,47 @@ class TestFlushPropertiesGeoUnits:
         world.flush_properties(target="geo_units", properties=[self.GEO_PROPERTY])
         with pytest.raises(ValueError, match="twice"):
             world.flush_properties(target="geo_units", properties=[self.GEO_PROPERTY])
+
+    def test_cohort_drift_after_flush_fails_loud_at_export(self, world_with_geo_property):
+        """The geography cohort must be closed at flush: adding a unit
+        afterwards would misalign the flushed column with /geography/ids."""
+        from may.geography import GeographicalUnit
+        world, canonical_path = world_with_geo_property
+        world.flush_properties(target="geo_units", properties=[self.GEO_PROPERTY])
+
+        mgu = world.geography.units_by_id[2]
+        world.geography.add_geo_unit(
+            GeographicalUnit(id=4, name="sgu_2", level="SGU", parent=mgu))
+
+        with pytest.raises(RuntimeError, match="cohort"):
+            world.export_to_hdf5(canonical_path, config_file=None)
+
+    def test_cohort_drift_between_partial_flushes_fails_loud(self, minimal_world, tmp_path):
+        """Two flush steps may split geography properties, but the cohort
+        must not change between them: the second flush re-verifies the
+        GeographicalUnit.id sequence recorded by the first."""
+        import yaml
+        from may.geography import GeographicalUnit
+        second_property = "second_code"
+        with open("configs/2021/serialization_config.yaml") as f:
+            config = yaml.safe_load(f)
+        config["geography"]["properties"] = [self.GEO_PROPERTY, second_property]
+        config_path = tmp_path / "serialization_config_geo_two.yaml"
+        config_path.write_text(yaml.safe_dump(config))
+
+        for unit in minimal_world.geography.units_by_id.values():
+            unit.properties[self.GEO_PROPERTY] = f"code_{unit.id}"
+            unit.properties[second_property] = f"second_{unit.id}"
+        canonical_path = str(tmp_path / "canonical.h5")
+        minimal_world.create_canonical_file(canonical_path, config_file=str(config_path))
+        minimal_world.flush_properties(target="geo_units", properties=[self.GEO_PROPERTY])
+
+        mgu = minimal_world.geography.units_by_id[2]
+        minimal_world.geography.add_geo_unit(
+            GeographicalUnit(id=4, name="sgu_2", level="SGU", parent=mgu))
+
+        with pytest.raises(RuntimeError, match="cohort"):
+            minimal_world.flush_properties(target="geo_units", properties=[second_property])
 
 
 class TestFlushPropertiesVenues:

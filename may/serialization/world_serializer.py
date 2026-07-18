@@ -46,6 +46,11 @@ class WorldSerializer:
         # venue_type -> Venue.id sequence at flush; final export re-verifies
         # the cohort order against this and fails loud on drift.
         self._flushed_venue_cohort_ids = {}
+        # Person.id / GeographicalUnit.id sequence at first flush; every
+        # later flush call and final export re-verify against this and fail
+        # loud on drift (see docs/adr/0003).
+        self._flushed_population_cohort_ids = None
+        self._flushed_geography_cohort_ids = None
 
     def export_core(self, world, output_file):
         """
@@ -100,6 +105,19 @@ class WorldSerializer:
             )
 
         people_sorted, _ = self._sorted_people(world)
+
+        # Cohort must match any earlier flush: columns from both steps share
+        # one row order (see docs/adr/0003).
+        recorded_cohort_ids = self._flushed_population_cohort_ids
+        cohort_ids = [person.id for person in people_sorted]
+        if recorded_cohort_ids is not None and cohort_ids != recorded_cohort_ids:
+            raise RuntimeError(
+                f"Population cohort changed since its earlier flush_properties "
+                f"step ({len(recorded_cohort_ids)} people then, "
+                f"{len(cohort_ids)} now): flushed columns would not share a "
+                f"row order."
+            )
+
         with h5py.File(self._core_output_file, 'r+') as f:
             props_group = f['population'].require_group('properties')
             for prop_name in property_names:
@@ -110,6 +128,7 @@ class WorldSerializer:
                 logger.info(f"  Flushed population property '{prop_name}'")
 
         self.flushed_person_properties.update(property_names)
+        self._flushed_population_cohort_ids = cohort_ids
 
     def flush_geography_properties(self, world, property_names):
         """
@@ -139,6 +158,19 @@ class WorldSerializer:
             )
 
         units_list = sorted(world.geography.units_by_id.values(), key=lambda u: u.id)
+
+        # Cohort must match any earlier flush: columns from both steps share
+        # one row order (see docs/adr/0003).
+        recorded_cohort_ids = self._flushed_geography_cohort_ids
+        cohort_ids = [unit.id for unit in units_list]
+        if recorded_cohort_ids is not None and cohort_ids != recorded_cohort_ids:
+            raise RuntimeError(
+                f"Geography cohort changed since its earlier flush_properties "
+                f"step ({len(recorded_cohort_ids)} units then, "
+                f"{len(cohort_ids)} now): flushed columns would not share a "
+                f"row order."
+            )
+
         with h5py.File(self._core_output_file, 'r+') as f:
             props_group = f['geography'].require_group('properties')
             for prop_name in property_names:
@@ -149,6 +181,7 @@ class WorldSerializer:
                 logger.info(f"  Flushed geography property '{prop_name}'")
 
         self.flushed_geography_properties.update(property_names)
+        self._flushed_geography_cohort_ids = cohort_ids
 
     def flush_venue_properties(self, world, venue_type, property_names):
         """
@@ -388,6 +421,20 @@ class WorldSerializer:
 
     def _write_geography_properties(self, f, world):
         """Write configured geography property datasets to HDF5."""
+        units_list = sorted(world.geography.units_by_id.values(), key=lambda u: u.id)
+
+        # Flushed cohort must not have drifted: columns written at flush
+        # time are aligned to the cohort order recorded then.
+        if self._flushed_geography_cohort_ids is not None:
+            current_cohort_ids = [unit.id for unit in units_list]
+            if current_cohort_ids != self._flushed_geography_cohort_ids:
+                raise RuntimeError(
+                    f"Geography cohort changed after its flush_properties "
+                    f"step ({len(self._flushed_geography_cohort_ids)} units "
+                    f"at flush, {len(current_cohort_ids)} now): flushed "
+                    f"columns no longer align with /geography/ids."
+                )
+
         geo_settings = self.config.get_geography_settings()
         # Columns already written by flush_properties steps are skipped:
         # their in-memory values are tombstoned (may/flushing.py).
@@ -397,8 +444,6 @@ class WorldSerializer:
         ]
         if not properties_to_include:
             return
-
-        units_list = sorted(world.geography.units_by_id.values(), key=lambda u: u.id)
         if not units_list:
             return
 
@@ -477,6 +522,18 @@ class WorldSerializer:
 
     def _write_population_properties(self, f, world):
         """Write configured person property datasets to HDF5."""
+        # Flushed cohort must not have drifted: columns written at flush
+        # time are aligned to the cohort order recorded then.
+        if self._flushed_population_cohort_ids is not None:
+            current_cohort_ids = [person.id for person in (self._people_sorted or [])]
+            if current_cohort_ids != self._flushed_population_cohort_ids:
+                raise RuntimeError(
+                    f"Population cohort changed after its flush_properties "
+                    f"step ({len(self._flushed_population_cohort_ids)} people "
+                    f"at flush, {len(current_cohort_ids)} now): flushed "
+                    f"columns no longer align with /population/ids."
+                )
+
         # Columns already written by flush_properties steps are skipped:
         # their in-memory values are tombstoned (may/flushing.py).
         properties_to_include = [
