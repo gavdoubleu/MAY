@@ -972,20 +972,28 @@ class WorldSerializer:
         # For each type, write configured properties
         props_group = venues_group.require_group('properties')
 
-        for venue_type, venues in venues_by_type.items():
-            # Flushed cohorts must not have drifted: columns written at flush
-            # time are aligned to the cohort order recorded then.
-            recorded_cohort_ids = self._flushed_venue_cohort_ids.get(venue_type)
-            if recorded_cohort_ids is not None:
-                current_cohort_ids = [venue.id for venue in venues]
-                if current_cohort_ids != recorded_cohort_ids:
+        # Flushed cohorts must not have drifted: columns written at flush
+        # time are aligned to the cohort order recorded then. Checked over
+        # every flushed type up front, independent of venues_by_type, so a
+        # type with zero current venues (fully removed post-flush) is still
+        # caught rather than silently skipped.
+        for venue_type, recorded_cohort_ids in self._flushed_venue_cohort_ids.items():
+            current_cohort_ids = [venue.id for venue in venues_by_type.get(venue_type, [])]
+            if current_cohort_ids != recorded_cohort_ids:
+                if not current_cohort_ids:
                     raise RuntimeError(
-                        f"Venue cohort {venue_type!r} changed after its "
+                        f"Venue cohort {venue_type!r} fully removed after its "
                         f"flush_properties step ({len(recorded_cohort_ids)} venues "
-                        f"at flush, {len(current_cohort_ids)} now): flushed "
-                        f"columns no longer align with ranks_in_type."
+                        f"at flush, 0 now): flushed columns are orphaned."
                     )
+                raise RuntimeError(
+                    f"Venue cohort {venue_type!r} changed after its "
+                    f"flush_properties step ({len(recorded_cohort_ids)} venues "
+                    f"at flush, {len(current_cohort_ids)} now): flushed "
+                    f"columns no longer align with ranks_in_type."
+                )
 
+        for venue_type, venues in venues_by_type.items():
             # Columns already written by flush_properties steps are skipped:
             # their in-memory values are tombstoned (may/flushing.py).
             flushed = self.flushed_venue_properties.get(venue_type, set())

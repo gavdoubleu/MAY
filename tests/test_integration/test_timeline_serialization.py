@@ -584,6 +584,21 @@ class TestFlushPropertiesVenues:
         with pytest.raises(RuntimeError, match="cohort"):
             world.export_to_hdf5(canonical_path, config_file=None)
 
+    def test_cohort_fully_removed_after_flush_fails_loud_at_export(self, world_with_venue_properties):
+        """If every venue of a flushed type is later removed, the type has
+        no current members and would otherwise be skipped by the per-type
+        export loop, leaving orphaned flushed columns on disk undetected."""
+        world, canonical_path = world_with_venue_properties
+        world.flush_properties(target="venues", venue_type=self.VENUE_TYPE,
+                               properties=["capacity", "sector"])
+
+        for venue in list(world.venues.get_all_venues_list()):
+            if venue.type == self.VENUE_TYPE:
+                world.venues.remove_venue(venue)
+
+        with pytest.raises(RuntimeError, match="cohort"):
+            world.export_to_hdf5(canonical_path, config_file=None)
+
     def test_cohort_drift_between_partial_flushes_fails_loud(self, world_with_venue_properties):
         """Two flush steps may split a type's properties, but the cohort
         must not change between them: the second flush re-verifies the
