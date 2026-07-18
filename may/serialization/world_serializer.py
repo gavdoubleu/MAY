@@ -40,6 +40,7 @@ class WorldSerializer:
         # Person properties already written by flush_properties steps; the
         # final export() must skip these (their in-memory values are gone).
         self.flushed_person_properties = set()
+        self.flushed_geography_properties = set()
 
     def export_core(self, world, output_file):
         """
@@ -104,6 +105,45 @@ class WorldSerializer:
                 logger.info(f"  Flushed population property '{prop_name}'")
 
         self.flushed_person_properties.update(property_names)
+
+    def flush_geography_properties(self, world, property_names):
+        """
+        Write geographical unit property columns to the canonical file
+        mid-timeline. Mirrors flush_population_properties(): lazy datasets
+        under /geography/properties in the id-sorted row order used by
+        _write_geography_core(), stamped with a 'flushed_by_step' attr; the
+        authoritative skip list for the final export is the in-memory
+        flushed_geography_properties set.
+        """
+        if self._core_output_file is None:
+            raise RuntimeError(
+                "flush_geography_properties() requires the canonical file: "
+                "call export_core() first."
+            )
+        configured = self.config.get_geography_settings()['properties']
+        unknown = [name for name in property_names if name not in configured]
+        if unknown:
+            raise ValueError(
+                f"Cannot flush unknown geography properties {unknown}: not "
+                f"listed in the serialization config ({configured})."
+            )
+        already_flushed = self.flushed_geography_properties.intersection(property_names)
+        if already_flushed:
+            raise ValueError(
+                f"Geography properties flushed twice: {sorted(already_flushed)}."
+            )
+
+        units_list = sorted(world.geography.units_by_id.values(), key=lambda u: u.id)
+        with h5py.File(self._core_output_file, 'r+') as f:
+            props_group = f['geography'].require_group('properties')
+            for prop_name in property_names:
+                self._write_property_array(props_group, prop_name, units_list)
+                if prop_name in props_group:  # absent if every value was None
+                    props_group[prop_name].attrs['flushed_by_step'] = \
+                        'flush_properties(target=geo_units)'
+                logger.info(f"  Flushed geography property '{prop_name}'")
+
+        self.flushed_geography_properties.update(property_names)
 
     def export(self, world, output_file):
         """
@@ -278,7 +318,12 @@ class WorldSerializer:
     def _write_geography_properties(self, f, world):
         """Write configured geography property datasets to HDF5."""
         geo_settings = self.config.get_geography_settings()
-        properties_to_include = geo_settings['properties']
+        # Columns already written by flush_properties steps are skipped:
+        # their in-memory values are tombstoned (may/flushing.py).
+        properties_to_include = [
+            name for name in geo_settings['properties']
+            if name not in self.flushed_geography_properties
+        ]
         if not properties_to_include:
             return
 
@@ -287,7 +332,7 @@ class WorldSerializer:
             return
 
         geo_group = f['geography']
-        props_group = geo_group.create_group('properties')
+        props_group = geo_group.require_group('properties')
         for prop_name in properties_to_include:
             self._write_property_array(props_group, prop_name, units_list)
         logger.info(f"  Wrote geography properties: {properties_to_include}")

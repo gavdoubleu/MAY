@@ -380,8 +380,94 @@ class TestFlushPropertiesPopulation:
             world.flush_properties(target="population", properties=["ethnicity"])
 
     def test_unimplemented_targets_fail_loud(self, world_with_ethnicity):
-        """geo_units and venues arrive in later phases; until then declaring
-        them must not silently no-op."""
+        """venues arrives in a later phase; until then declaring it must not
+        silently no-op."""
         world, _ = world_with_ethnicity
         with pytest.raises(NotImplementedError):
-            world.flush_properties(target="geo_units", properties=["ethnicity"])
+            world.flush_properties(target="venues", properties=["ethnicity"])
+
+
+class TestFlushPropertiesGeoUnits:
+    """Mid-timeline flush of geographical unit properties to the canonical
+    file (`flush_properties` step, target: geo_units). See tmp/plans phase 3."""
+
+    GEO_PROPERTY = "region_code"
+
+    @pytest.fixture
+    def geo_config_file(self, tmp_path):
+        """The 2021 serialization config lists no geography properties, so
+        derive one that does."""
+        import yaml
+        with open("configs/2021/serialization_config.yaml") as f:
+            config = yaml.safe_load(f)
+        config["geography"]["properties"] = [self.GEO_PROPERTY]
+        config_path = tmp_path / "serialization_config_geo.yaml"
+        config_path.write_text(yaml.safe_dump(config))
+        return str(config_path)
+
+    @pytest.fixture
+    def world_with_geo_property(self, minimal_world, geo_config_file, tmp_path):
+        """Canonical file created; every geo unit carries a 'region_code'."""
+        for unit in minimal_world.geography.units_by_id.values():
+            unit.properties[self.GEO_PROPERTY] = f"code_{unit.id}"
+        canonical_path = str(tmp_path / "canonical.h5")
+        minimal_world.create_canonical_file(canonical_path, config_file=geo_config_file)
+        return minimal_world, canonical_path
+
+    def test_flush_writes_geo_property_column_in_id_order(self, world_with_geo_property):
+        world, canonical_path = world_with_geo_property
+        expected = {unit.id: unit.properties[self.GEO_PROPERTY]
+                    for unit in world.geography.units_by_id.values()}
+
+        world.flush_properties(target="geo_units", properties=[self.GEO_PROPERTY])
+
+        with h5py.File(canonical_path, 'r') as f:
+            dataset = f[f'geography/properties/{self.GEO_PROPERTY}']
+            unit_ids = f['geography/ids'][:]
+            values = [v.decode() for v in dataset[:]]
+            assert dataset.attrs['flushed_by_step'] == 'flush_properties(target=geo_units)'
+            for unit_id, value in zip(unit_ids, values):
+                assert value == expected[unit_id]
+
+    def test_flushed_property_is_tombstoned_on_every_geo_unit(self, world_with_geo_property):
+        from may.flushing import FlushedPropertyError
+        world, _ = world_with_geo_property
+
+        world.flush_properties(target="geo_units", properties=[self.GEO_PROPERTY])
+
+        for unit in world.geography.units_by_id.values():
+            assert self.GEO_PROPERTY in unit.properties
+            with pytest.raises(FlushedPropertyError):
+                unit.properties[self.GEO_PROPERTY]
+            with pytest.raises(FlushedPropertyError):
+                unit.properties.get(self.GEO_PROPERTY)
+
+    def test_final_export_after_flush_matches_no_flush_baseline(self, minimal_world, geo_config_file, tmp_path):
+        """Flushing geo properties mid-run must not change the on-disk
+        format: flushed columns are written once at flush time and skipped
+        by the final export."""
+        for unit in minimal_world.geography.units_by_id.values():
+            unit.properties[self.GEO_PROPERTY] = f"code_{unit.id}"
+
+        baseline_path = str(tmp_path / "baseline.h5")
+        stats_baseline = minimal_world.export_to_hdf5(baseline_path, config_file=geo_config_file)
+
+        flushed_path = str(tmp_path / "flushed.h5")
+        minimal_world.create_canonical_file(flushed_path, config_file=geo_config_file)
+        minimal_world.flush_properties(target="geo_units", properties=[self.GEO_PROPERTY])
+        stats_flushed = minimal_world.export_to_hdf5(flushed_path, config_file=geo_config_file)
+
+        assert stats_baseline == stats_flushed
+        _assert_h5_equivalent(baseline_path, flushed_path)
+
+    def test_unknown_geo_property_fails_loud(self, world_with_geo_property):
+        """Property not in serialization config would never reach the export."""
+        world, _ = world_with_geo_property
+        with pytest.raises(ValueError, match="not_a_property"):
+            world.flush_properties(target="geo_units", properties=["not_a_property"])
+
+    def test_double_flush_fails_loud(self, world_with_geo_property):
+        world, _ = world_with_geo_property
+        world.flush_properties(target="geo_units", properties=[self.GEO_PROPERTY])
+        with pytest.raises(ValueError, match="twice"):
+            world.flush_properties(target="geo_units", properties=[self.GEO_PROPERTY])

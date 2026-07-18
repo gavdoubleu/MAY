@@ -50,6 +50,7 @@ class World:
         # Shared tombstone registry for flushed person properties — every
         # Person's TombstonedProperties consults this one set (may/flushing.py).
         self._flushed_person_property_names = set()
+        self._flushed_geo_unit_property_names = set()
 
         # Register residence types from venue configuration with Person class
         if venues:
@@ -272,6 +273,13 @@ class World:
             tombstone_objects(
                 self.population.people, properties,
                 self._flushed_person_property_names,
+            )
+        elif target == "geo_units":
+            from may.flushing import tombstone_objects
+            self._serializer.flush_geography_properties(self, properties)
+            tombstone_objects(
+                self.geography.units_by_id.values(), properties,
+                self._flushed_geo_unit_property_names,
             )
         else:
             raise NotImplementedError(
