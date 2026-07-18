@@ -5,6 +5,12 @@ step, its in-memory values are freed. The key stays visible to `in` so
 membership checks (e.g. may/venue_distributor/filtering.py) don't silently
 fall through, but reading or writing the value fails loud: the value now
 lives only on disk, and a post-flush write could never reach the export.
+
+Whole-dict reads fail loud too: `keys()`, `items()`, `values()`, `__iter__`,
+`__len__` raise as soon as any property has ever been flushed for the
+cohort, since a flushed key's absence from the live dict is otherwise
+indistinguishable from a key that was simply never assigned. See
+docs/adr/0004-tombstoned-properties-enumeration-fails-loud-cohort-wide.md.
 """
 
 
@@ -37,6 +43,16 @@ class TombstonedProperties(dict):
                 f"access happens before the flush_properties step."
             )
 
+    def _refuse_if_any_flushed(self):
+        if self._flushed_keys:
+            raise FlushedPropertyError(
+                f"Properties {sorted(self._flushed_keys)!r} were flushed to "
+                f"the canonical HDF5 file; their in-memory values are gone, "
+                f"so this properties dict cannot be enumerated as a whole. "
+                f"Reorder the timeline so this access happens before the "
+                f"flush_properties step."
+            )
+
     def __contains__(self, key):
         return key in self._flushed_keys or dict.__contains__(self, key)
 
@@ -67,6 +83,26 @@ class TombstonedProperties(dict):
         for key in merged:
             self._refuse_if_flushed(key)
         dict.update(self, merged)
+
+    def keys(self):
+        self._refuse_if_any_flushed()
+        return dict.keys(self)
+
+    def items(self):
+        self._refuse_if_any_flushed()
+        return dict.items(self)
+
+    def values(self):
+        self._refuse_if_any_flushed()
+        return dict.values(self)
+
+    def __iter__(self):
+        self._refuse_if_any_flushed()
+        return dict.__iter__(self)
+
+    def __len__(self):
+        self._refuse_if_any_flushed()
+        return dict.__len__(self)
 
 
 def tombstone_objects(objects, property_names, flushed_keys):

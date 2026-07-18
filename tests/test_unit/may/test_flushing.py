@@ -63,6 +63,56 @@ class TestTombstonedProperties:
         with pytest.raises(FlushedPropertyError):
             properties["ethnicity"]
 
+    def test_keys_raises_when_any_key_flushed(self, tombstoned):
+        with pytest.raises(FlushedPropertyError, match="ethnicity"):
+            tombstoned.keys()
+
+    def test_items_raises_when_any_key_flushed(self, tombstoned):
+        with pytest.raises(FlushedPropertyError, match="ethnicity"):
+            tombstoned.items()
+
+    def test_values_raises_when_any_key_flushed(self, tombstoned):
+        with pytest.raises(FlushedPropertyError, match="ethnicity"):
+            tombstoned.values()
+
+    def test_iter_raises_when_any_key_flushed(self, tombstoned):
+        with pytest.raises(FlushedPropertyError, match="ethnicity"):
+            iter(tombstoned)
+
+    def test_len_raises_when_any_key_flushed(self, tombstoned):
+        with pytest.raises(FlushedPropertyError, match="ethnicity"):
+            len(tombstoned)
+
+    def test_dict_copy_raises_when_any_key_flushed(self, tombstoned):
+        """dict(x) routes through keys()/__getitem__ for non-exact-dict
+        subclasses, so it inherits the same fail-loud guarantee for free."""
+        with pytest.raises(FlushedPropertyError, match="ethnicity"):
+            dict(tombstoned)
+
+    def test_enumeration_raises_even_for_object_that_never_held_flushed_key(self):
+        """Cohort-wide registry: raises regardless of whether this specific
+        object ever had the flushed property, mirroring `in`."""
+        flushed_keys = {"ethnicity"}
+        properties = TombstonedProperties({"work_mode": "cycle"}, flushed_keys)
+        assert "ethnicity" not in dict.keys(properties)
+        with pytest.raises(FlushedPropertyError, match="ethnicity"):
+            properties.keys()
+
+    def test_enumeration_works_normally_before_any_flush(self):
+        flushed_keys = set()
+        properties = TombstonedProperties({"work_mode": "cycle"}, flushed_keys)
+        assert list(properties.keys()) == ["work_mode"]
+        assert list(properties.items()) == [("work_mode", "cycle")]
+        assert list(properties.values()) == ["cycle"]
+        assert list(properties) == ["work_mode"]
+        assert len(properties) == 1
+
+    def test_single_key_access_unaffected_by_other_flushed_keys(self, tombstoned):
+        """Direct access to a still-live key must not raise, even though
+        `ethnicity` has been flushed for this cohort."""
+        assert tombstoned["work_mode"] == "cycle"
+        assert tombstoned.get("work_mode") == "cycle"
+
 
 class _NestedResidence:
     """Minimal stand-in exposing a `properties` attribute for traversal."""
