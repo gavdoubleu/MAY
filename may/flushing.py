@@ -11,6 +11,14 @@ Whole-dict reads fail loud too: `keys()`, `items()`, `values()`, `__iter__`,
 cohort, since a flushed key's absence from the live dict is otherwise
 indistinguishable from a key that was simply never assigned. See
 docs/adr/0004-tombstoned-properties-enumeration-fails-loud-cohort-wide.md.
+
+CAVEAT: the guarantee is enforced on `obj.properties`, not on any reference
+taken independently of it. `tombstone_objects` swaps in a *new*
+TombstonedProperties and reassigns `obj.properties`; it does not mutate the
+old dict in place. Code that captures `props = obj.properties` and holds
+that reference across a later flush step keeps reading the stale, freed
+values through it with no error. Don't cache a `.properties` reference
+across a timeline step — always re-read `obj.properties` fresh.
 """
 
 
