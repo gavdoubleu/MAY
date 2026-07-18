@@ -11,6 +11,7 @@ import numpy as np
 from datetime import datetime
 from collections import defaultdict
 from .serialization_config import SerializationConfig
+from .cohort_flush import CohortFlushTracker
 
 logger = logging.getLogger("world_serializer")
 
@@ -37,20 +38,14 @@ class WorldSerializer:
         # run; export() then reopens it in 'r+' instead of rewriting from
         # scratch. See docs/adr/0003.
         self._core_output_file = None
-        # Person properties already written by flush_properties steps; the
-        # final export() must skip these (their in-memory values are gone).
-        self.flushed_person_properties = set()
-        self.flushed_geography_properties = set()
-        # venue_type -> set of flushed property names
-        self.flushed_venue_properties = {}
-        # venue_type -> Venue.id sequence at flush; final export re-verifies
-        # the cohort order against this and fails loud on drift.
-        self._flushed_venue_cohort_ids = {}
-        # Person.id / GeographicalUnit.id sequence at first flush; every
-        # later flush call and final export re-verify against this and fail
-        # loud on drift (see docs/adr/0003).
-        self._flushed_population_cohort_ids = None
-        self._flushed_geography_cohort_ids = None
+        # One CohortFlushTracker per flush target: records flushed property
+        # names and the cohort's row-id sequence, re-verifying it on every
+        # later flush call and at final export (see docs/adr/0003,
+        # docs/adr/0005). venue_type -> tracker, created lazily on first
+        # flush for that type.
+        self._population_flush = CohortFlushTracker("population")
+        self._geography_flush = CohortFlushTracker("geo_units")
+        self._venue_flushes = {}
 
     def export_core(self, world, output_file):
         """
@@ -84,7 +79,7 @@ class WorldSerializer:
         order. Datasets are created lazily here — dtype inferred from live
         values (see docs/adr/0003). Each written dataset is stamped with a
         'flushed_by_step' attr for inspection; the authoritative skip list
-        for the final export is the in-memory flushed_person_properties set.
+        for the final export is self._population_flush.flushed_names.
         """
         if self._core_output_file is None:
             raise RuntimeError(
@@ -92,31 +87,14 @@ class WorldSerializer:
                 "call export_core() first."
             )
         configured = self.config.get_person_properties()
-        unknown = [name for name in property_names if name not in configured]
-        if unknown:
-            raise ValueError(
-                f"Cannot flush unknown population properties {unknown}: not "
-                f"listed in the serialization config ({configured})."
-            )
-        already_flushed = self.flushed_person_properties.intersection(property_names)
-        if already_flushed:
-            raise ValueError(
-                f"Population properties flushed twice: {sorted(already_flushed)}."
-            )
+        self._population_flush.validate(property_names, configured)
 
         people_sorted, _ = self._sorted_people(world)
 
         # Cohort must match any earlier flush: columns from both steps share
         # one row order (see docs/adr/0003).
-        recorded_cohort_ids = self._flushed_population_cohort_ids
         cohort_ids = [person.id for person in people_sorted]
-        if recorded_cohort_ids is not None and cohort_ids != recorded_cohort_ids:
-            raise RuntimeError(
-                f"Population cohort changed since its earlier flush_properties "
-                f"step ({len(recorded_cohort_ids)} people then, "
-                f"{len(cohort_ids)} now): flushed columns would not share a "
-                f"row order."
-            )
+        self._population_flush.check_drift(cohort_ids)
 
         with h5py.File(self._core_output_file, 'r+') as f:
             props_group = f['population'].require_group('properties')
@@ -127,8 +105,7 @@ class WorldSerializer:
                         'flush_properties(target=population)'
                 logger.info(f"  Flushed population property '{prop_name}'")
 
-        self.flushed_person_properties.update(property_names)
-        self._flushed_population_cohort_ids = cohort_ids
+        self._population_flush.mark_flushed(property_names)
 
     def flush_geography_properties(self, world, property_names):
         """
@@ -136,8 +113,8 @@ class WorldSerializer:
         mid-timeline. Mirrors flush_population_properties(): lazy datasets
         under /geography/properties in the id-sorted row order used by
         _write_geography_core(), stamped with a 'flushed_by_step' attr; the
-        authoritative skip list for the final export is the in-memory
-        flushed_geography_properties set.
+        authoritative skip list for the final export is
+        self._geography_flush.flushed_names.
         """
         if self._core_output_file is None:
             raise RuntimeError(
@@ -145,31 +122,14 @@ class WorldSerializer:
                 "call export_core() first."
             )
         configured = self.config.get_geography_settings()['properties']
-        unknown = [name for name in property_names if name not in configured]
-        if unknown:
-            raise ValueError(
-                f"Cannot flush unknown geography properties {unknown}: not "
-                f"listed in the serialization config ({configured})."
-            )
-        already_flushed = self.flushed_geography_properties.intersection(property_names)
-        if already_flushed:
-            raise ValueError(
-                f"Geography properties flushed twice: {sorted(already_flushed)}."
-            )
+        self._geography_flush.validate(property_names, configured)
 
         units_list = sorted(world.geography.units_by_id.values(), key=lambda u: u.id)
 
         # Cohort must match any earlier flush: columns from both steps share
         # one row order (see docs/adr/0003).
-        recorded_cohort_ids = self._flushed_geography_cohort_ids
         cohort_ids = [unit.id for unit in units_list]
-        if recorded_cohort_ids is not None and cohort_ids != recorded_cohort_ids:
-            raise RuntimeError(
-                f"Geography cohort changed since its earlier flush_properties "
-                f"step ({len(recorded_cohort_ids)} units then, "
-                f"{len(cohort_ids)} now): flushed columns would not share a "
-                f"row order."
-            )
+        self._geography_flush.check_drift(cohort_ids)
 
         with h5py.File(self._core_output_file, 'r+') as f:
             props_group = f['geography'].require_group('properties')
@@ -180,8 +140,7 @@ class WorldSerializer:
                         'flush_properties(target=geo_units)'
                 logger.info(f"  Flushed geography property '{prop_name}'")
 
-        self.flushed_geography_properties.update(property_names)
-        self._flushed_geography_cohort_ids = cohort_ids
+        self._geography_flush.mark_flushed(property_names)
 
     def flush_venue_properties(self, world, venue_type, property_names):
         """
@@ -199,22 +158,8 @@ class WorldSerializer:
                 "call export_core() first."
             )
         configured = self.config.get_venue_properties(venue_type)
-        if not configured:
-            raise ValueError(
-                f"Cannot flush venue type {venue_type!r}: no properties "
-                f"listed for it in the serialization config."
-            )
-        unknown = [name for name in property_names if name not in configured]
-        if unknown:
-            raise ValueError(
-                f"Cannot flush unknown {venue_type} properties {unknown}: "
-                f"not listed in the serialization config ({configured})."
-            )
-        already_flushed = self.flushed_venue_properties.get(venue_type, set()).intersection(property_names)
-        if already_flushed:
-            raise ValueError(
-                f"{venue_type} properties flushed twice: {sorted(already_flushed)}."
-            )
+        tracker = self._venue_flushes.setdefault(venue_type, CohortFlushTracker(venue_type))
+        tracker.validate(property_names, configured)
 
         # Cohort order: within-type slice of the stable geo-sort applied to
         # the full venue list by _write_venues().
@@ -227,15 +172,8 @@ class WorldSerializer:
 
         # Cohort must match any earlier partial flush of the same type:
         # columns from both steps share one row order.
-        recorded_cohort_ids = self._flushed_venue_cohort_ids.get(venue_type)
         cohort_ids = [venue.id for venue in cohort_sorted]
-        if recorded_cohort_ids is not None and cohort_ids != recorded_cohort_ids:
-            raise RuntimeError(
-                f"Venue cohort {venue_type!r} changed since its earlier "
-                f"flush_properties step ({len(recorded_cohort_ids)} venues "
-                f"then, {len(cohort_ids)} now): flushed columns would not "
-                f"share a row order."
-            )
+        tracker.check_drift(cohort_ids)
 
         with h5py.File(self._core_output_file, 'r+') as f:
             type_group = f.require_group('venues').require_group('properties').require_group(venue_type)
@@ -246,8 +184,7 @@ class WorldSerializer:
                         f'flush_properties(target=venues, venue_type={venue_type})'
                 logger.info(f"  Flushed {venue_type} property '{prop_name}'")
 
-        self.flushed_venue_properties.setdefault(venue_type, set()).update(property_names)
-        self._flushed_venue_cohort_ids[venue_type] = cohort_ids
+        tracker.mark_flushed(property_names)
 
     def export(self, world, output_file):
         """
@@ -425,22 +362,15 @@ class WorldSerializer:
 
         # Flushed cohort must not have drifted: columns written at flush
         # time are aligned to the cohort order recorded then.
-        if self._flushed_geography_cohort_ids is not None:
-            current_cohort_ids = [unit.id for unit in units_list]
-            if current_cohort_ids != self._flushed_geography_cohort_ids:
-                raise RuntimeError(
-                    f"Geography cohort changed after its flush_properties "
-                    f"step ({len(self._flushed_geography_cohort_ids)} units "
-                    f"at flush, {len(current_cohort_ids)} now): flushed "
-                    f"columns no longer align with /geography/ids."
-                )
+        current_cohort_ids = [unit.id for unit in units_list]
+        self._geography_flush.check_drift(current_cohort_ids)
 
         geo_settings = self.config.get_geography_settings()
         # Columns already written by flush_properties steps are skipped:
         # their in-memory values are tombstoned (may/flushing.py).
         properties_to_include = [
             name for name in geo_settings['properties']
-            if name not in self.flushed_geography_properties
+            if name not in self._geography_flush.flushed_names
         ]
         if not properties_to_include:
             return
@@ -524,21 +454,14 @@ class WorldSerializer:
         """Write configured person property datasets to HDF5."""
         # Flushed cohort must not have drifted: columns written at flush
         # time are aligned to the cohort order recorded then.
-        if self._flushed_population_cohort_ids is not None:
-            current_cohort_ids = [person.id for person in (self._people_sorted or [])]
-            if current_cohort_ids != self._flushed_population_cohort_ids:
-                raise RuntimeError(
-                    f"Population cohort changed after its flush_properties "
-                    f"step ({len(self._flushed_population_cohort_ids)} people "
-                    f"at flush, {len(current_cohort_ids)} now): flushed "
-                    f"columns no longer align with /population/ids."
-                )
+        current_cohort_ids = [person.id for person in (self._people_sorted or [])]
+        self._population_flush.check_drift(current_cohort_ids)
 
         # Columns already written by flush_properties steps are skipped:
         # their in-memory values are tombstoned (may/flushing.py).
         properties_to_include = [
             name for name in self.config.get_person_properties()
-            if name not in self.flushed_person_properties
+            if name not in self._population_flush.flushed_names
         ]
         if not properties_to_include:
             return
@@ -1031,29 +954,19 @@ class WorldSerializer:
 
         # Flushed cohorts must not have drifted: columns written at flush
         # time are aligned to the cohort order recorded then. Checked over
-        # every flushed type up front, independent of venues_by_type, so a
-        # type with zero current venues (fully removed post-flush) is still
-        # caught rather than silently skipped.
-        for venue_type, recorded_cohort_ids in self._flushed_venue_cohort_ids.items():
+        # every tracked type up front (self._venue_flushes), independent of
+        # venues_by_type, so a type with zero current venues (fully removed
+        # post-flush) is still caught rather than silently skipped — see
+        # docs/adr/0005.
+        for venue_type, tracker in self._venue_flushes.items():
             current_cohort_ids = [venue.id for venue in venues_by_type.get(venue_type, [])]
-            if current_cohort_ids != recorded_cohort_ids:
-                if not current_cohort_ids:
-                    raise RuntimeError(
-                        f"Venue cohort {venue_type!r} fully removed after its "
-                        f"flush_properties step ({len(recorded_cohort_ids)} venues "
-                        f"at flush, 0 now): flushed columns are orphaned."
-                    )
-                raise RuntimeError(
-                    f"Venue cohort {venue_type!r} changed after its "
-                    f"flush_properties step ({len(recorded_cohort_ids)} venues "
-                    f"at flush, {len(current_cohort_ids)} now): flushed "
-                    f"columns no longer align with ranks_in_type."
-                )
+            tracker.check_drift(current_cohort_ids)
 
         for venue_type, venues in venues_by_type.items():
             # Columns already written by flush_properties steps are skipped:
             # their in-memory values are tombstoned (may/flushing.py).
-            flushed = self.flushed_venue_properties.get(venue_type, set())
+            tracker = self._venue_flushes.get(venue_type)
+            flushed = tracker.flushed_names if tracker else set()
             properties_to_include = [
                 name for name in self.config.get_venue_properties(venue_type)
                 if name not in flushed
