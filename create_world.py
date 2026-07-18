@@ -171,6 +171,36 @@ def main():
     world = World(geography=geo, population=population, venues=venues, household_distributor=household_distributor)
     logger.info(world)
 
+    # Serialization schema and output path are resolved up front, and the
+    # canonical .h5 is created now with core /population and /geography
+    # datasets (row order is final once the population exists). Later
+    # flush_properties steps and the final export reopen it in 'r+'.
+    # See docs/adr/0003.
+    serial_config = config.get("serialization", {})
+    export_path = None
+    serialization_config_file = None
+    if serial_config.get("enabled", True):
+        try:
+            serialization_config_file = serial_config.get("config_file")
+            if not serialization_config_file:
+                raise ValueError(
+                    "serialization.enabled is true but serialization.config_file "
+                    "is missing — a serialization schema is required."
+                )
+            serialization_config_file = pr.resolve(serialization_config_file)
+            output_dir = pr.resolve(serial_config.get("output_dir", "."))
+            filename = args.filename or serial_config.get("filename", "world_state.h5")
+
+            if output_dir != ".":
+                os.makedirs(output_dir, exist_ok=True)
+
+            export_path = os.path.join(output_dir, filename)
+            world.create_canonical_file(export_path, config_file=serialization_config_file)
+        except Exception as e:
+            logger.error(f"Failed to create canonical HDF5 file: {e}")
+            logger.exception(e)
+            sys.exit(1)
+
     # TIMELINE - Unified Event Processing
     # This replaces the separate "attributes" and "venue_pipeline" sections if "timeline" is present.
     
@@ -261,6 +291,27 @@ def main():
                     logger.exception(e)
                     sys.exit(1)
 
+            elif step_type == "flush_properties":
+                # Write settled properties to the canonical .h5 and free their
+                # in-memory values. Schema inline (no config file):
+                #   target: population|geo_units|venues, properties: [...]
+                flush_target = step.get("target")
+                flush_property_names = step.get("properties")
+                logger.info("")
+                logger.info(f"[FLUSH PROPERTIES] target={flush_target} properties={flush_property_names}")
+                if export_path is None:
+                    logger.error(
+                        "A flush_properties step requires serialization to be "
+                        "enabled (the canonical .h5 is its destination)."
+                    )
+                    sys.exit(1)
+                try:
+                    world.flush_properties(target=flush_target, properties=flush_property_names)
+                except Exception as e:
+                    logger.error(f"flush_properties step failed: {e}")
+                    logger.exception(e)
+                    sys.exit(1)
+
             else:
                 logger.warning(f"Unknown timeline step type: {step_type}")
 
@@ -339,26 +390,13 @@ def main():
     logger.info(f"Population: {len(world.population.get_all_people()):,} people")
     logger.info("=" * 60)
 
-    # Export world to HDF5 for C++ simulation
-    serial_config = config.get("serialization", {})
-    if serial_config.get("enabled", True):
+    # Export world to HDF5 for C++ simulation (fills in the canonical file
+    # created after population generation; path/config resolved there).
+    if export_path is not None:
         logger.info("")
         logger.info("Exporting world to HDF5...")
         try:
-            config_file = serial_config.get("config_file")
-            if not config_file:
-                raise ValueError(
-                    "serialization.enabled is true but serialization.config_file "
-                    "is missing — a serialization schema is required."
-                )
-            output_dir = pr.resolve(serial_config.get("output_dir", "."))
-            filename = args.filename or serial_config.get("filename", "world_state.h5")
-
-            if output_dir != ".":
-                os.makedirs(output_dir, exist_ok=True)
-
-            export_path = os.path.join(output_dir, filename)
-            world.export_to_hdf5(export_path, config_file=pr.resolve(config_file))
+            world.export_to_hdf5(export_path, config_file=serialization_config_file)
         except Exception as e:
             logger.error(f"Failed to serialize world to HDF5: {e}")
             logger.exception(e)

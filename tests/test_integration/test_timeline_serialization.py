@@ -220,3 +220,168 @@ class TestWorldHDF5PayloadIntegrity:
             assert "Region" in geo_levels_binary
             assert "MGU" in geo_levels_binary
             assert "SGU" in geo_levels_binary
+
+
+def _assert_h5_equivalent(path_a, path_b):
+    """Recursively compare two HDF5 files: same tree, datasets and attrs."""
+    import numpy as np
+
+    # Deliberate divergences from a baseline export: timestamps, and the
+    # inspection attr stamped on datasets written by flush_properties steps.
+    ignored_attrs = {'creation_timestamp', 'flushed_by_step'}
+
+    def compare_attrs(obj_a, obj_b, location):
+        keys_a = set(obj_a.attrs.keys()) - ignored_attrs
+        keys_b = set(obj_b.attrs.keys()) - ignored_attrs
+        assert keys_a == keys_b, f"attr keys differ at {location}: {keys_a ^ keys_b}"
+        for key in keys_a:
+            value_a, value_b = obj_a.attrs[key], obj_b.attrs[key]
+            assert np.array_equal(value_a, value_b), f"attr {key} differs at {location}"
+
+    def compare_group(group_a, group_b, location):
+        compare_attrs(group_a, group_b, location)
+        keys_a = set(group_a.keys())
+        keys_b = set(group_b.keys())
+        assert keys_a == keys_b, f"children differ at {location}: {keys_a ^ keys_b}"
+        for key in keys_a:
+            child_a, child_b = group_a[key], group_b[key]
+            child_location = f"{location}/{key}"
+            assert type(child_a) is type(child_b), f"node type differs at {child_location}"
+            if isinstance(child_a, h5py.Group):
+                compare_group(child_a, child_b, child_location)
+            else:
+                compare_attrs(child_a, child_b, child_location)
+                data_a, data_b = child_a[()], child_b[()]
+                assert np.array_equal(data_a, data_b, equal_nan=(data_a.dtype.kind == 'f')), \
+                    f"dataset differs at {child_location}"
+
+    with h5py.File(path_a, 'r') as file_a, h5py.File(path_b, 'r') as file_b:
+        compare_group(file_a, file_b, '')
+
+
+class TestEarlyCanonicalFileEquivalence:
+    """Two-stage export (export_core early + export in 'r+') must produce a
+    file equivalent to the single-shot export path. See docs/adr/0003."""
+
+    def test_two_stage_export_matches_single_shot(self, minimal_world, tmp_path):
+        config_file = "configs/2021/serialization_config.yaml"
+        single_shot_path = str(tmp_path / "single_shot.h5")
+        two_stage_path = str(tmp_path / "two_stage.h5")
+
+        # Baseline: single-shot export (no canonical file created early)
+        stats_single = minimal_world.export_to_hdf5(single_shot_path, config_file=config_file)
+
+        # Two-stage: canonical core file first, then final export reopens it
+        minimal_world.create_canonical_file(two_stage_path, config_file=config_file)
+        assert os.path.exists(two_stage_path)
+        with h5py.File(two_stage_path, 'r') as f:
+            assert 'population' in f and 'geography' in f
+            assert 'venues' not in f
+        stats_two_stage = minimal_world.export_to_hdf5(two_stage_path, config_file=config_file)
+
+        assert stats_single == stats_two_stage
+        _assert_h5_equivalent(single_shot_path, two_stage_path)
+
+    def test_export_to_different_path_than_canonical_fails_loud(self, minimal_world, tmp_path):
+        config_file = "configs/2021/serialization_config.yaml"
+        minimal_world.create_canonical_file(str(tmp_path / "canonical.h5"), config_file=config_file)
+        with pytest.raises(ValueError, match="canonical"):
+            minimal_world.export_to_hdf5(str(tmp_path / "other.h5"), config_file=config_file)
+
+
+class TestFlushPropertiesPopulation:
+    """Mid-timeline flush of person properties to the canonical file
+    (`flush_properties` step, target: population). See tmp/plans phase 2."""
+
+    CONFIG_FILE = "configs/2021/serialization_config.yaml"
+
+    @pytest.fixture
+    def world_with_ethnicity(self, minimal_world, tmp_path):
+        """Canonical file created; every person carries an 'ethnicity'
+        (listed in the 2021 serialization config's population properties)."""
+        for person in minimal_world.population.people:
+            person.properties["ethnicity"] = f"group_{person.id % 3}"
+        canonical_path = str(tmp_path / "canonical.h5")
+        minimal_world.create_canonical_file(canonical_path, config_file=self.CONFIG_FILE)
+        return minimal_world, canonical_path
+
+    def test_flush_writes_property_column_in_frozen_row_order(self, world_with_ethnicity):
+        world, canonical_path = world_with_ethnicity
+        expected = {p.id: p.properties["ethnicity"] for p in world.population.people}
+
+        world.flush_properties(target="population", properties=["ethnicity"])
+
+        with h5py.File(canonical_path, 'r') as f:
+            dataset = f['population/properties/ethnicity']
+            person_ids = f['population/ids'][:]
+            values = [v.decode() for v in dataset[:]]
+            assert dataset.attrs['flushed_by_step'] == 'flush_properties(target=population)'
+            for person_id, value in zip(person_ids, values):
+                assert value == expected[person_id]
+
+    def test_flushed_property_is_tombstoned_on_every_person(self, world_with_ethnicity):
+        from may.flushing import FlushedPropertyError
+        world, _ = world_with_ethnicity
+
+        world.flush_properties(target="population", properties=["ethnicity"])
+
+        for person in world.population.people:
+            # Membership stays True (filtering.py checks `attr in properties`
+            # before reading) but the read itself must fail loud.
+            assert "ethnicity" in person.properties
+            with pytest.raises(FlushedPropertyError):
+                person.properties["ethnicity"]
+            with pytest.raises(FlushedPropertyError):
+                person.properties.get("ethnicity")
+
+    def test_final_export_after_flush_matches_no_flush_baseline(self, minimal_world, tmp_path):
+        """The whole point of the feature: flushing mid-run must not change
+        the on-disk format. Flushed columns are written once at flush time
+        and skipped by the final export."""
+        for person in minimal_world.population.people:
+            person.properties["ethnicity"] = f"group_{person.id % 3}"
+            person.properties["work_mode"] = f"mode_{person.id % 2}"
+
+        baseline_path = str(tmp_path / "baseline.h5")
+        stats_baseline = minimal_world.export_to_hdf5(baseline_path, config_file=self.CONFIG_FILE)
+
+        flushed_path = str(tmp_path / "flushed.h5")
+        minimal_world.create_canonical_file(flushed_path, config_file=self.CONFIG_FILE)
+        minimal_world.flush_properties(target="population", properties=["ethnicity", "work_mode"])
+        stats_flushed = minimal_world.export_to_hdf5(flushed_path, config_file=self.CONFIG_FILE)
+
+        assert stats_baseline == stats_flushed
+        _assert_h5_equivalent(baseline_path, flushed_path)
+
+    def test_unknown_target_fails_loud(self, world_with_ethnicity):
+        world, _ = world_with_ethnicity
+        with pytest.raises(ValueError, match="target"):
+            world.flush_properties(target="peple", properties=["ethnicity"])
+
+    def test_unknown_property_fails_loud(self, world_with_ethnicity):
+        """Property not in serialization config would never reach the export."""
+        world, _ = world_with_ethnicity
+        with pytest.raises(ValueError, match="not_a_property"):
+            world.flush_properties(target="population", properties=["not_a_property"])
+
+    def test_empty_properties_list_fails_loud(self, world_with_ethnicity):
+        world, _ = world_with_ethnicity
+        with pytest.raises(ValueError, match="properties"):
+            world.flush_properties(target="population", properties=[])
+
+    def test_flush_without_canonical_file_fails_loud(self, minimal_world):
+        with pytest.raises(RuntimeError, match="canonical"):
+            minimal_world.flush_properties(target="population", properties=["ethnicity"])
+
+    def test_double_flush_fails_loud(self, world_with_ethnicity):
+        world, _ = world_with_ethnicity
+        world.flush_properties(target="population", properties=["ethnicity"])
+        with pytest.raises(ValueError, match="twice"):
+            world.flush_properties(target="population", properties=["ethnicity"])
+
+    def test_unimplemented_targets_fail_loud(self, world_with_ethnicity):
+        """geo_units and venues arrive in later phases; until then declaring
+        them must not silently no-op."""
+        world, _ = world_with_ethnicity
+        with pytest.raises(NotImplementedError):
+            world.flush_properties(target="geo_units", properties=["ethnicity"])

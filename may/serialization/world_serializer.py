@@ -33,10 +33,85 @@ class WorldSerializer:
         self.config = SerializationConfig(config_file)
         self.compression_settings = self.config.get_compression_settings()
         self.registries = {}  # Registry of string-to-int mappings
+        # Path of the canonical file if export_core() already created it this
+        # run; export() then reopens it in 'r+' instead of rewriting from
+        # scratch. See docs/adr/0003.
+        self._core_output_file = None
+        # Person properties already written by flush_properties steps; the
+        # final export() must skip these (their in-memory values are gone).
+        self.flushed_person_properties = set()
+
+    def export_core(self, world, output_file):
+        """
+        Create the canonical HDF5 file early, right after population
+        generation, with the core /geography and /population datasets whose
+        row order is already final (geo-sorted; id/age/sex/geo_unit never
+        mutate). Property datasets are NOT created here — their dtypes are
+        inferred from values that may not exist yet; they are written by
+        later flush steps or by the final export(). See docs/adr/0003.
+        """
+        logger.info("=" * 60)
+        logger.info("Creating canonical HDF5 (core datasets)")
+        logger.info("=" * 60)
+        logger.info(f"Output file: {output_file}")
+
+        with h5py.File(output_file, 'w') as f:
+            logger.info("Serializing geography (core)...")
+            self._write_geography_core(f, world)
+            logger.info("Serializing population (core)...")
+            self._write_population_core(f, world)
+
+        self._core_output_file = output_file
+        logger.info("Canonical file created (core datasets written)")
+
+    def flush_population_properties(self, world, property_names):
+        """
+        Write person property columns to the canonical file mid-timeline.
+
+        Reopens the canonical file in 'r+' and writes one dataset per
+        property under /population/properties, in the frozen geo-sorted row
+        order. Datasets are created lazily here — dtype inferred from live
+        values (see docs/adr/0003). Each written dataset is stamped with a
+        'flushed_by_step' attr for inspection; the authoritative skip list
+        for the final export is the in-memory flushed_person_properties set.
+        """
+        if self._core_output_file is None:
+            raise RuntimeError(
+                "flush_population_properties() requires the canonical file: "
+                "call export_core() first."
+            )
+        configured = self.config.get_person_properties()
+        unknown = [name for name in property_names if name not in configured]
+        if unknown:
+            raise ValueError(
+                f"Cannot flush unknown population properties {unknown}: not "
+                f"listed in the serialization config ({configured})."
+            )
+        already_flushed = self.flushed_person_properties.intersection(property_names)
+        if already_flushed:
+            raise ValueError(
+                f"Population properties flushed twice: {sorted(already_flushed)}."
+            )
+
+        people_sorted, _ = self._sorted_people(world)
+        with h5py.File(self._core_output_file, 'r+') as f:
+            props_group = f['population'].require_group('properties')
+            for prop_name in property_names:
+                self._write_property_array(props_group, prop_name, people_sorted)
+                if prop_name in props_group:  # absent if every value was None
+                    props_group[prop_name].attrs['flushed_by_step'] = \
+                        'flush_properties(target=population)'
+                logger.info(f"  Flushed population property '{prop_name}'")
+
+        self.flushed_person_properties.update(property_names)
 
     def export(self, world, output_file):
         """
         Export world to HDF5 file.
+
+        If export_core() already created the canonical file this run, the
+        file is reopened in 'r+' and the core /geography and /population
+        datasets are not rewritten.
         """
         # Internal state for export coordination
         self._venue_to_global_id = {}
@@ -47,6 +122,13 @@ class WorldSerializer:
         logger.info("=" * 60)
         logger.info(f"Output file: {output_file}")
 
+        core_written = self._core_output_file is not None
+        if core_written and self._core_output_file != output_file:
+            raise ValueError(
+                f"export() target {output_file!r} differs from the canonical "
+                f"file created by export_core() ({self._core_output_file!r})."
+            )
+
         stats = {
             'num_people': 0,
             'num_venues': 0,
@@ -54,18 +136,26 @@ class WorldSerializer:
             'num_subsets': 0,
         }
 
-        with h5py.File(output_file, 'w') as f:
+        with h5py.File(output_file, 'r+' if core_written else 'w') as f:
             # Write metadata
             self._write_metadata(f, world, stats)
 
             # Write geography
             logger.info("Serializing geography...")
-            self._write_geography(f, world)
+            if not core_written:
+                self._write_geography_core(f, world)
+            self._write_geography_properties(f, world)
             stats['num_geo_units'] = len(world.geography.get_all_units())
 
             # Write population
             logger.info("Serializing population...")
-            self._write_population(f, world)
+            if core_written:
+                # Re-derive the frozen row order (stable sort of immutable
+                # geo_unit ids — identical to the export_core() order).
+                self._people_sorted, _ = self._sorted_people(world)
+            else:
+                self._write_population_core(f, world)
+            self._write_population_properties(f, world)
             stats['num_people'] = len(world.population.people)
 
             # Write venues
@@ -115,8 +205,8 @@ class WorldSerializer:
         f.attrs['serialization_version'] = '1.0'
         f.attrs['MAY_version'] = '0.1.0'
 
-    def _write_geography(self, f, world):
-        """Write geography hierarchy to HDF5."""
+    def _write_geography_core(self, f, world):
+        """Write geography hierarchy core datasets (no properties) to HDF5."""
         geo_group = f.create_group('geography')
         geo_settings = self.config.get_geography_settings()
 
@@ -183,17 +273,39 @@ class WorldSerializer:
             self._create_dataset(geo_group, 'latitudes', latitudes)
             self._create_dataset(geo_group, 'longitudes', longitudes)
 
-        # Additional properties (if configured)
+        logger.info(f"  Wrote {num_units} geographical units (core)")
+
+    def _write_geography_properties(self, f, world):
+        """Write configured geography property datasets to HDF5."""
+        geo_settings = self.config.get_geography_settings()
         properties_to_include = geo_settings['properties']
-        if properties_to_include:
-            props_group = geo_group.create_group('properties')
-            for prop_name in properties_to_include:
-                self._write_property_array(props_group, prop_name, units_list)
+        if not properties_to_include:
+            return
 
-        logger.info(f"  Wrote {num_units} geographical units")
+        units_list = sorted(world.geography.units_by_id.values(), key=lambda u: u.id)
+        if not units_list:
+            return
 
-    def _write_population(self, f, world):
-        """Write population data to HDF5."""
+        geo_group = f['geography']
+        props_group = geo_group.create_group('properties')
+        for prop_name in properties_to_include:
+            self._write_property_array(props_group, prop_name, units_list)
+        logger.info(f"  Wrote geography properties: {properties_to_include}")
+
+    def _sorted_people(self, world):
+        """
+        Frozen /population row order: stable sort by geo_unit id. Deterministic
+        over the run (ids/geo assignment never mutate), so early core writes,
+        flush steps and the final export all agree on row positions.
+        """
+        people = world.population.people
+        geo_unit_ids_raw = np.array([p.geographical_unit.id if p.geographical_unit else -1 for p in people], dtype=np.int32)
+        sort_idx = np.argsort(geo_unit_ids_raw, kind='stable')
+        people_sorted = [people[i] for i in sort_idx]
+        return people_sorted, geo_unit_ids_raw[sort_idx]
+
+    def _write_population_core(self, f, world):
+        """Write population core datasets (no properties) to HDF5."""
         pop_group = f.create_group('population')
 
         people = world.population.people
@@ -205,13 +317,7 @@ class WorldSerializer:
 
         logger.info(f"  Serializing {num_people:,} people...")
 
-        # Sort people by their geographical unit ID using numpy argsort for speed
-        geo_unit_ids_raw = np.array([p.geographical_unit.id if p.geographical_unit else -1 for p in people], dtype=np.int32)
-        sort_idx = np.argsort(geo_unit_ids_raw, kind='stable')
-        people_sorted = [people[i] for i in sort_idx]
-
-        # Use the sorted geo_unit_ids directly
-        geo_unit_ids_sorted = geo_unit_ids_raw[sort_idx]
+        people_sorted, geo_unit_ids_sorted = self._sorted_people(world)
 
         # Store sorted people for activity mapping serialization
         self._people_sorted = people_sorted
@@ -251,19 +357,30 @@ class WorldSerializer:
                 logger.info(f"      Processed {end:,}/{num_people:,} people...")
 
         logger.info(f"    ✓ Wrote core datasets to HDF5")
+        logger.info(f"  Wrote {num_people:,} people (core)")
 
-        # Properties (configured in YAML)
-        properties_to_include = self.config.get_person_properties()
-        if properties_to_include:
-            props_group = pop_group.create_group('properties')
+    def _write_population_properties(self, f, world):
+        """Write configured person property datasets to HDF5."""
+        # Columns already written by flush_properties steps are skipped:
+        # their in-memory values are tombstoned (may/flushing.py).
+        properties_to_include = [
+            name for name in self.config.get_person_properties()
+            if name not in self.flushed_person_properties
+        ]
+        if not properties_to_include:
+            return
+        if not self._people_sorted:
+            logger.warning("No people to serialize properties for")
+            return
 
-            for prop_idx, prop_name in enumerate(properties_to_include, 1):
-                logger.info(f"    Writing property {prop_idx}/{len(properties_to_include)}: {prop_name}...")
-                self._write_property_array(props_group, prop_name, people_sorted)
+        pop_group = f['population']
+        props_group = pop_group.require_group('properties')
 
-        logger.info(f"  Wrote {num_people:,} people")
-        if properties_to_include:
-            logger.info(f"    Including properties: {properties_to_include}")
+        for prop_idx, prop_name in enumerate(properties_to_include, 1):
+            logger.info(f"    Writing property {prop_idx}/{len(properties_to_include)}: {prop_name}...")
+            self._write_property_array(props_group, prop_name, self._people_sorted)
+
+        logger.info(f"    Including properties: {properties_to_include}")
 
     def _write_partition_index(self, pop_group, geo_unit_ids):
         """

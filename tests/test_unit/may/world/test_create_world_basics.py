@@ -80,8 +80,12 @@ def test_main_cli_arg_parsing(mock_setup_geography):
                             # we can just let it run through safely since it's mocked
                             try:
                                 main()
-                            except Exception:
-                                pass # We only care that config was read
+                            except BaseException:
+                                # We only care that config was read. With an
+                                # empty config, main() now exits early (loud
+                                # SystemExit: serialization.config_file is
+                                # validated up front before the timeline).
+                                pass
                                 
             # Assert config was attempted to be opened
             mock_open.assert_any_call(test_config_path, "r")

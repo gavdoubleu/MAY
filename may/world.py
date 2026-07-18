@@ -43,6 +43,13 @@ class World:
         self.population = population
         self.venues = venues
         self.household_distributor = household_distributor
+        # WorldSerializer created by create_canonical_file(); reused by
+        # export_to_hdf5() so the final export reopens the canonical file
+        # in 'r+' instead of rewriting it. See docs/adr/0003.
+        self._serializer = None
+        # Shared tombstone registry for flushed person properties — every
+        # Person's TombstonedProperties consults this one set (may/flushing.py).
+        self._flushed_person_property_names = set()
 
         # Register residence types from venue configuration with Person class
         if venues:
@@ -211,6 +218,66 @@ class World:
 
         return stats
 
+    def create_canonical_file(self, output_file, config_file):
+        """
+        Create the canonical HDF5 file early (right after population
+        generation) with core /population and /geography datasets, whose
+        geo-sorted row order is already final. Later flush steps and the
+        final export_to_hdf5() reopen this file in 'r+' and fill in the
+        remaining datasets. See docs/adr/0003.
+
+        Args:
+            output_file: Path to output HDF5 file
+            config_file: Path to serialization YAML config (required)
+        """
+        from may.serialization import WorldSerializer
+
+        self._serializer = WorldSerializer(config_file=pr.resolve(config_file))
+        self._serializer.export_core(self, output_file)
+
+    def flush_properties(self, target, properties):
+        """
+        Flush settled properties to the canonical HDF5 file mid-timeline and
+        free their in-memory values (a `flush_properties` timeline step).
+
+        After a successful flush the property keys are tombstoned: `in`
+        still returns True but reading or writing the value raises
+        FlushedPropertyError (see may/flushing.py). The final export skips
+        flushed columns.
+
+        Args:
+            target: 'population', 'geo_units' or 'venues'
+            properties: non-empty list of property names to flush
+        """
+        valid_targets = {"population", "geo_units", "venues"}
+        if target not in valid_targets:
+            raise ValueError(
+                f"flush_properties target {target!r} invalid; expected one "
+                f"of {sorted(valid_targets)}."
+            )
+        if not properties or not isinstance(properties, list):
+            raise ValueError(
+                "flush_properties requires a non-empty `properties:` list."
+            )
+        if self._serializer is None:
+            raise RuntimeError(
+                "flush_properties requires the canonical HDF5 file: "
+                "serialization must be enabled and create_canonical_file() "
+                "called before the timeline."
+            )
+
+        if target == "population":
+            from may.flushing import tombstone_objects
+            self._serializer.flush_population_properties(self, properties)
+            tombstone_objects(
+                self.population.people, properties,
+                self._flushed_person_property_names,
+            )
+        else:
+            raise NotImplementedError(
+                f"flush_properties target {target!r} not yet supported."
+            )
+
     def export_to_hdf5(self, output_file, config_file):
         """
         Export world state to HDF5 file for C++ simulation.
@@ -240,7 +307,10 @@ class World:
         logger.info("EXPORTING WORLD TO HDF5")
         logger.info("=" * 60)
 
-        serializer = WorldSerializer(config_file=pr.resolve(config_file))
+        if self._serializer is not None:
+            serializer = self._serializer
+        else:
+            serializer = WorldSerializer(config_file=pr.resolve(config_file))
         stats = serializer.export(self, output_file)
 
         logger.info("")
