@@ -8,6 +8,7 @@ its value must fail loud with FlushedPropertyError.
 import pytest
 
 from may.flushing import FlushedPropertyError, TombstonedProperties
+from may.venue_distributor.base_distributor import BaseDistributor
 
 
 @pytest.fixture
@@ -61,3 +62,30 @@ class TestTombstonedProperties:
         assert "ethnicity" in properties
         with pytest.raises(FlushedPropertyError):
             properties["ethnicity"]
+
+
+class _NestedResidence:
+    """Minimal stand-in exposing a `properties` attribute for traversal."""
+
+    def __init__(self, properties):
+        self.properties = properties
+
+
+class TestTombstoneTraversalInDistributor:
+    """`TombstonedProperties` is a dict subclass; distributor path traversal
+    must treat it as a dict (isinstance, not `type(...) is dict`) or unflushed
+    keys silently become invisible to filters — see the university-distributor
+    regression where a whole cohort selected 0 people after an unrelated flush.
+    """
+
+    def test_unflushed_key_readable_through_tombstoned_properties(self):
+        flushed_keys = {"ethnicity"}
+        properties = TombstonedProperties(
+            {"original_pattern": "pattern_a"}, flushed_keys
+        )
+        residence = _NestedResidence(properties)
+        traverse = BaseDistributor._get_nested_value_with_dict_support
+
+        value = traverse(None, residence, "properties.original_pattern")
+
+        assert value == "pattern_a"

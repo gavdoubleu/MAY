@@ -51,6 +51,7 @@ class World:
         # Person's TombstonedProperties consults this one set (may/flushing.py).
         self._flushed_person_property_names = set()
         self._flushed_geo_unit_property_names = set()
+        self._flushed_venue_property_names_by_type = {}
 
         # Register residence types from venue configuration with Person class
         if venues:
@@ -236,7 +237,7 @@ class World:
         self._serializer = WorldSerializer(config_file=pr.resolve(config_file))
         self._serializer.export_core(self, output_file)
 
-    def flush_properties(self, target, properties):
+    def flush_properties(self, target, properties, venue_type=None):
         """
         Flush settled properties to the canonical HDF5 file mid-timeline and
         free their in-memory values (a `flush_properties` timeline step).
@@ -249,6 +250,8 @@ class World:
         Args:
             target: 'population', 'geo_units' or 'venues'
             properties: non-empty list of property names to flush
+            venue_type: required for target 'venues' (the cohort to flush);
+                must be omitted for other targets
         """
         valid_targets = {"population", "geo_units", "venues"}
         if target not in valid_targets:
@@ -259,6 +262,14 @@ class World:
         if not properties or not isinstance(properties, list):
             raise ValueError(
                 "flush_properties requires a non-empty `properties:` list."
+            )
+        if target == "venues" and not venue_type:
+            raise ValueError(
+                "flush_properties target 'venues' requires `venue_type:`."
+            )
+        if target != "venues" and venue_type is not None:
+            raise ValueError(
+                f"flush_properties target {target!r} does not take `venue_type:`."
             )
         if self._serializer is None:
             raise RuntimeError(
@@ -281,9 +292,14 @@ class World:
                 self.geography.units_by_id.values(), properties,
                 self._flushed_geo_unit_property_names,
             )
-        else:
-            raise NotImplementedError(
-                f"flush_properties target {target!r} not yet supported."
+        else:  # venues
+            from may.flushing import tombstone_objects
+            self._serializer.flush_venue_properties(self, venue_type, properties)
+            venues_of_type = [v for v in self.venues.get_all_venues_list()
+                              if v.type == venue_type]
+            tombstone_objects(
+                venues_of_type, properties,
+                self._flushed_venue_property_names_by_type.setdefault(venue_type, set()),
             )
 
     def export_to_hdf5(self, output_file, config_file):

@@ -41,6 +41,11 @@ class WorldSerializer:
         # final export() must skip these (their in-memory values are gone).
         self.flushed_person_properties = set()
         self.flushed_geography_properties = set()
+        # venue_type -> set of flushed property names
+        self.flushed_venue_properties = {}
+        # venue_type -> Venue.id sequence at flush; final export re-verifies
+        # the cohort order against this and fails loud on drift.
+        self._flushed_venue_cohort_ids = {}
 
     def export_core(self, world, output_file):
         """
@@ -144,6 +149,72 @@ class WorldSerializer:
                 logger.info(f"  Flushed geography property '{prop_name}'")
 
         self.flushed_geography_properties.update(property_names)
+
+    def flush_venue_properties(self, world, venue_type, property_names):
+        """
+        Write one venue type's property columns to the canonical file
+        mid-timeline. Rows follow the cohort order: venues of the type in
+        the stable geo-sorted order _write_venues() will use, so columns
+        align with ranks_in_type. The cohort must be closed — its Venue.id
+        sequence is recorded here and re-verified at final export, which
+        fails loud if venues of the type were added, removed or reordered
+        after the flush.
+        """
+        if self._core_output_file is None:
+            raise RuntimeError(
+                "flush_venue_properties() requires the canonical file: "
+                "call export_core() first."
+            )
+        configured = self.config.get_venue_properties(venue_type)
+        if not configured:
+            raise ValueError(
+                f"Cannot flush venue type {venue_type!r}: no properties "
+                f"listed for it in the serialization config."
+            )
+        unknown = [name for name in property_names if name not in configured]
+        if unknown:
+            raise ValueError(
+                f"Cannot flush unknown {venue_type} properties {unknown}: "
+                f"not listed in the serialization config ({configured})."
+            )
+        already_flushed = self.flushed_venue_properties.get(venue_type, set()).intersection(property_names)
+        if already_flushed:
+            raise ValueError(
+                f"{venue_type} properties flushed twice: {sorted(already_flushed)}."
+            )
+
+        # Cohort order: within-type slice of the stable geo-sort applied to
+        # the full venue list by _write_venues().
+        venues_of_type = [v for v in world.venues.get_all_venues_list() if v.type == venue_type]
+        geo_unit_ids_raw = np.array(
+            [v.geographical_unit.id if v.geographical_unit else -1 for v in venues_of_type],
+            dtype=np.int32
+        )
+        cohort_sorted = [venues_of_type[i] for i in np.argsort(geo_unit_ids_raw, kind='stable')]
+
+        # Cohort must match any earlier partial flush of the same type:
+        # columns from both steps share one row order.
+        recorded_cohort_ids = self._flushed_venue_cohort_ids.get(venue_type)
+        cohort_ids = [venue.id for venue in cohort_sorted]
+        if recorded_cohort_ids is not None and cohort_ids != recorded_cohort_ids:
+            raise RuntimeError(
+                f"Venue cohort {venue_type!r} changed since its earlier "
+                f"flush_properties step ({len(recorded_cohort_ids)} venues "
+                f"then, {len(cohort_ids)} now): flushed columns would not "
+                f"share a row order."
+            )
+
+        with h5py.File(self._core_output_file, 'r+') as f:
+            type_group = f.require_group('venues').require_group('properties').require_group(venue_type)
+            for prop_name in property_names:
+                self._write_property_array(type_group, prop_name, cohort_sorted)
+                if prop_name in type_group:  # absent if every value was None
+                    type_group[prop_name].attrs['flushed_by_step'] = \
+                        f'flush_properties(target=venues, venue_type={venue_type})'
+                logger.info(f"  Flushed {venue_type} property '{prop_name}'")
+
+        self.flushed_venue_properties.setdefault(venue_type, set()).update(property_names)
+        self._flushed_venue_cohort_ids[venue_type] = cohort_ids
 
     def export(self, world, output_file):
         """
@@ -778,7 +849,9 @@ class WorldSerializer:
 
     def _write_venues(self, f, world):
         """Write venues and subsets to HDF5."""
-        venues_group = f.create_group('venues')
+        # May already exist: flush_venue_properties() creates /venues/properties
+        # mid-timeline in the canonical file.
+        venues_group = f.require_group('venues')
         venue_global_settings = self.config.get_venue_global_settings()
 
         # Get all venues as a list
@@ -897,16 +970,34 @@ class WorldSerializer:
             venues_by_type[v.type].append(v)
 
         # For each type, write configured properties
-        props_group = venues_group.create_group('properties')
+        props_group = venues_group.require_group('properties')
 
         for venue_type, venues in venues_by_type.items():
-            properties_to_include = self.config.get_venue_properties(venue_type)
+            # Flushed cohorts must not have drifted: columns written at flush
+            # time are aligned to the cohort order recorded then.
+            recorded_cohort_ids = self._flushed_venue_cohort_ids.get(venue_type)
+            if recorded_cohort_ids is not None:
+                current_cohort_ids = [venue.id for venue in venues]
+                if current_cohort_ids != recorded_cohort_ids:
+                    raise RuntimeError(
+                        f"Venue cohort {venue_type!r} changed after its "
+                        f"flush_properties step ({len(recorded_cohort_ids)} venues "
+                        f"at flush, {len(current_cohort_ids)} now): flushed "
+                        f"columns no longer align with ranks_in_type."
+                    )
+
+            # Columns already written by flush_properties steps are skipped:
+            # their in-memory values are tombstoned (may/flushing.py).
+            flushed = self.flushed_venue_properties.get(venue_type, set())
+            properties_to_include = [
+                name for name in self.config.get_venue_properties(venue_type)
+                if name not in flushed
+            ]
 
             if not properties_to_include:
                 continue
 
-            # Create type-specific subgroup
-            type_group = props_group.create_group(venue_type)
+            type_group = props_group.require_group(venue_type)
 
             for prop_name in properties_to_include:
                 # Create array for this property across all venues of this type

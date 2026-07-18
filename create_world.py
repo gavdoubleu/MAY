@@ -295,10 +295,16 @@ def main():
                 # Write settled properties to the canonical .h5 and free their
                 # in-memory values. Schema inline (no config file):
                 #   target: population|geo_units|venues, properties: [...]
+                #   venue_type: required when target is venues
                 flush_target = step.get("target")
                 flush_property_names = step.get("properties")
+                flush_venue_type = step.get("venue_type")
                 logger.info("")
-                logger.info(f"[FLUSH PROPERTIES] target={flush_target} properties={flush_property_names}")
+                logger.info(
+                    f"[FLUSH PROPERTIES] target={flush_target} "
+                    f"properties={flush_property_names}"
+                    + (f" venue_type={flush_venue_type}" if flush_venue_type else "")
+                )
                 if export_path is None:
                     logger.error(
                         "A flush_properties step requires serialization to be "
@@ -306,7 +312,9 @@ def main():
                     )
                     sys.exit(1)
                 try:
-                    world.flush_properties(target=flush_target, properties=flush_property_names)
+                    world.flush_properties(target=flush_target,
+                                           properties=flush_property_names,
+                                           venue_type=flush_venue_type)
                 except Exception as e:
                     logger.error(f"flush_properties step failed: {e}")
                     logger.exception(e)

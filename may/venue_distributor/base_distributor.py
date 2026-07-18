@@ -425,8 +425,10 @@ class BaseDistributor:
                 return None
 
             # Try dict access first if value is actually a dict
-            # This is significantly faster than try/except getattr for dicts
-            if type(value) is dict:
+            # This is significantly faster than try/except getattr for dicts.
+            # isinstance (not `type is dict`) so dict subclasses such as
+            # TombstonedProperties are traversed as dicts, not objects.
+            if isinstance(value, dict):
                 value = value.get(part)
             else:
                 value = getattr(value, part, None)

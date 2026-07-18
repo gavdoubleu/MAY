@@ -379,13 +379,6 @@ class TestFlushPropertiesPopulation:
         with pytest.raises(ValueError, match="twice"):
             world.flush_properties(target="population", properties=["ethnicity"])
 
-    def test_unimplemented_targets_fail_loud(self, world_with_ethnicity):
-        """venues arrives in a later phase; until then declaring it must not
-        silently no-op."""
-        world, _ = world_with_ethnicity
-        with pytest.raises(NotImplementedError):
-            world.flush_properties(target="venues", properties=["ethnicity"])
-
 
 class TestFlushPropertiesGeoUnits:
     """Mid-timeline flush of geographical unit properties to the canonical
@@ -471,3 +464,172 @@ class TestFlushPropertiesGeoUnits:
         world.flush_properties(target="geo_units", properties=[self.GEO_PROPERTY])
         with pytest.raises(ValueError, match="twice"):
             world.flush_properties(target="geo_units", properties=[self.GEO_PROPERTY])
+
+
+class TestFlushPropertiesVenues:
+    """Mid-timeline flush of a venue-type property cohort to the canonical
+    file (`flush_properties` step, target: venues). See tmp/plans phase 4."""
+
+    VENUE_TYPE = "company"
+
+    @pytest.fixture
+    def venue_config_file(self, tmp_path):
+        """The 2021 serialization config lists no 'company' properties, so
+        derive one that does."""
+        import yaml
+        with open("configs/2021/serialization_config.yaml") as f:
+            config = yaml.safe_load(f)
+        config["venues"]["types"][self.VENUE_TYPE] = {"properties": ["capacity", "sector"]}
+        config_path = tmp_path / "serialization_config_venues.yaml"
+        config_path.write_text(yaml.safe_dump(config))
+        return str(config_path)
+
+    @pytest.fixture
+    def world_with_venue_properties(self, minimal_world, venue_config_file, tmp_path):
+        """Canonical file created; companies carry capacity + sector. An
+        extra company sits in a lower-id geo unit but is added last, so the
+        cohort's geo-sorted order differs from insertion order."""
+        from may.geography import Venue
+        mgu = minimal_world.geography.units_by_id[2]
+        extra_company = Venue(name="company_mgu", venue_type=self.VENUE_TYPE, geographical_unit=mgu)
+        minimal_world.venues.add_venue(extra_company)
+        companies = [v for v in minimal_world.venues.get_all_venues_list()
+                     if v.type == self.VENUE_TYPE]
+        for offset, venue in enumerate(companies):
+            venue.properties["capacity"] = 10 + offset
+            venue.properties["sector"] = f"sector_{venue.id}"
+        canonical_path = str(tmp_path / "canonical.h5")
+        minimal_world.create_canonical_file(canonical_path, config_file=venue_config_file)
+        return minimal_world, canonical_path
+
+    def _cohort_sorted(self, world):
+        companies = [v for v in world.venues.get_all_venues_list()
+                     if v.type == self.VENUE_TYPE]
+        return sorted(companies, key=lambda v: v.geographical_unit.id)
+
+    def test_flush_writes_venue_property_columns_in_cohort_order(self, world_with_venue_properties):
+        world, canonical_path = world_with_venue_properties
+        cohort = self._cohort_sorted(world)
+        expected_capacities = [v.properties["capacity"] for v in cohort]
+        expected_sectors = [v.properties["sector"] for v in cohort]
+
+        world.flush_properties(target="venues", venue_type=self.VENUE_TYPE,
+                               properties=["capacity", "sector"])
+
+        with h5py.File(canonical_path, 'r') as f:
+            type_group = f[f'venues/properties/{self.VENUE_TYPE}']
+            assert list(type_group['capacity'][:]) == expected_capacities
+            assert [v.decode() for v in type_group['sector'][:]] == expected_sectors
+            assert type_group['capacity'].attrs['flushed_by_step'] == \
+                f'flush_properties(target=venues, venue_type={self.VENUE_TYPE})'
+
+    def test_flushed_property_is_tombstoned_per_type(self, world_with_venue_properties):
+        """Tombstones apply to the flushed cohort only: a school's own
+        'capacity' key (different type) must stay readable."""
+        from may.flushing import FlushedPropertyError
+        world, _ = world_with_venue_properties
+        school = next(v for v in world.venues.get_all_venues_list() if v.type == "school")
+        school.properties["capacity"] = 99
+
+        world.flush_properties(target="venues", venue_type=self.VENUE_TYPE,
+                               properties=["capacity", "sector"])
+
+        for venue in world.venues.get_all_venues_list():
+            if venue.type == self.VENUE_TYPE:
+                assert "capacity" in venue.properties
+                with pytest.raises(FlushedPropertyError):
+                    venue.properties["capacity"]
+                with pytest.raises(FlushedPropertyError):
+                    venue.properties.get("sector")
+        assert school.properties["capacity"] == 99
+
+    def test_final_export_after_flush_matches_no_flush_baseline(self, minimal_world, venue_config_file, tmp_path):
+        """Flushing a venue cohort mid-run must not change the on-disk
+        format: flushed columns are written once at flush time (aligned
+        with ranks_in_type) and skipped by the final export."""
+        from may.geography import Venue
+        mgu = minimal_world.geography.units_by_id[2]
+        minimal_world.venues.add_venue(
+            Venue(name="company_mgu", venue_type=self.VENUE_TYPE, geographical_unit=mgu))
+        companies = [v for v in minimal_world.venues.get_all_venues_list()
+                     if v.type == self.VENUE_TYPE]
+        for offset, venue in enumerate(companies):
+            venue.properties["capacity"] = 10 + offset
+            venue.properties["sector"] = f"sector_{venue.id}"
+
+        baseline_path = str(tmp_path / "baseline.h5")
+        stats_baseline = minimal_world.export_to_hdf5(baseline_path, config_file=venue_config_file)
+
+        flushed_path = str(tmp_path / "flushed.h5")
+        minimal_world.create_canonical_file(flushed_path, config_file=venue_config_file)
+        minimal_world.flush_properties(target="venues", venue_type=self.VENUE_TYPE,
+                                       properties=["capacity", "sector"])
+        stats_flushed = minimal_world.export_to_hdf5(flushed_path, config_file=venue_config_file)
+
+        assert stats_baseline == stats_flushed
+        _assert_h5_equivalent(baseline_path, flushed_path)
+
+    def test_cohort_drift_after_flush_fails_loud_at_export(self, world_with_venue_properties, tmp_path):
+        """The cohort must be closed at flush: adding a venue of the type
+        afterwards would misalign the flushed columns with ranks_in_type."""
+        from may.geography import Venue
+        world, canonical_path = world_with_venue_properties
+        world.flush_properties(target="venues", venue_type=self.VENUE_TYPE,
+                               properties=["capacity", "sector"])
+
+        sgu = world.geography.units_by_id[3]
+        world.venues.add_venue(
+            Venue(name="late_company", venue_type=self.VENUE_TYPE, geographical_unit=sgu))
+
+        with pytest.raises(RuntimeError, match="cohort"):
+            world.export_to_hdf5(canonical_path, config_file=None)
+
+    def test_cohort_drift_between_partial_flushes_fails_loud(self, world_with_venue_properties):
+        """Two flush steps may split a type's properties, but the cohort
+        must not change between them: the second flush re-verifies the
+        Venue.id sequence recorded by the first."""
+        from may.geography import Venue
+        world, _ = world_with_venue_properties
+        world.flush_properties(target="venues", venue_type=self.VENUE_TYPE,
+                               properties=["capacity"])
+
+        sgu = world.geography.units_by_id[3]
+        world.venues.add_venue(
+            Venue(name="late_company", venue_type=self.VENUE_TYPE, geographical_unit=sgu))
+
+        with pytest.raises(RuntimeError, match="cohort"):
+            world.flush_properties(target="venues", venue_type=self.VENUE_TYPE,
+                                   properties=["sector"])
+
+    def test_missing_venue_type_fails_loud(self, world_with_venue_properties):
+        world, _ = world_with_venue_properties
+        with pytest.raises(ValueError, match="venue_type"):
+            world.flush_properties(target="venues", properties=["capacity"])
+
+    def test_venue_type_on_other_target_fails_loud(self, world_with_venue_properties):
+        world, _ = world_with_venue_properties
+        with pytest.raises(ValueError, match="venue_type"):
+            world.flush_properties(target="population", properties=["ethnicity"],
+                                   venue_type=self.VENUE_TYPE)
+
+    def test_unconfigured_venue_type_fails_loud(self, world_with_venue_properties):
+        """Type with no properties in the serialization config: nothing it
+        writes could ever reach the export."""
+        world, _ = world_with_venue_properties
+        with pytest.raises(ValueError, match="not_a_type"):
+            world.flush_properties(target="venues", venue_type="not_a_type",
+                                   properties=["capacity"])
+
+    def test_unknown_venue_property_fails_loud(self, world_with_venue_properties):
+        world, _ = world_with_venue_properties
+        with pytest.raises(ValueError, match="not_a_property"):
+            world.flush_properties(target="venues", venue_type=self.VENUE_TYPE,
+                                   properties=["not_a_property"])
+
+    def test_double_flush_fails_loud(self, world_with_venue_properties):
+        world, _ = world_with_venue_properties
+        world.flush_properties(target="venues", venue_type=self.VENUE_TYPE,
+                               properties=["capacity"])
+        with pytest.raises(ValueError, match="twice"):
+            world.flush_properties(target="venues", venue_type=self.VENUE_TYPE,
+                                   properties=["capacity"])
