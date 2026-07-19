@@ -293,6 +293,25 @@ class WorldSerializer:
         staging_path = self._staging_path(venue_type)
 
         subset_keys = [(venue.id, subset.subset_index) for venue, subset in venue_subset_pairs]
+
+        if tracker.subset_keys_already_flushed(subset_keys):
+            logger.info(
+                f"{venue_type} subsets already flushed with same keys; skipping."
+            )
+            return
+
+        from may.flushing import GuttedMembers
+        already_gutted = [
+            key for key, (_, subset) in zip(subset_keys, venue_subset_pairs)
+            if isinstance(subset.members, GuttedMembers)
+        ]
+        if already_gutted:
+            raise RuntimeError(
+                f"{venue_type!r} subsets partially flushed already: cannot "
+                f"mix already-gutted subsets {sorted(already_gutted)} with "
+                f"a new flush_venue_subsets call."
+            )
+
         subset_names = [subset.subset_name for _, subset in venue_subset_pairs]
         member_lists = [[person.id for person in subset.members] for _, subset in venue_subset_pairs]
         member_counts = [len(members) for members in member_lists]

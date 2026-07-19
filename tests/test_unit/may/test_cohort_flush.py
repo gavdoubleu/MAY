@@ -102,6 +102,23 @@ class TestRecordSubsetKeys:
         tracker.record_subset_keys({(1, 0), (1, 1)})  # no raise
 
 
+class TestSubsetKeysAlreadyFlushed:
+
+    def test_false_before_any_flush(self):
+        tracker = CohortFlushTracker("household")
+        assert tracker.subset_keys_already_flushed({(1, 0)}) is False
+
+    def test_true_on_exact_match(self):
+        tracker = CohortFlushTracker("household")
+        tracker.record_subset_keys({(1, 0), (1, 1)})
+        assert tracker.subset_keys_already_flushed({(1, 0), (1, 1)}) is True
+
+    def test_false_on_different_set(self):
+        tracker = CohortFlushTracker("household")
+        tracker.record_subset_keys({(1, 0), (1, 1)})
+        assert tracker.subset_keys_already_flushed({(1, 0)}) is False
+
+
 class TestCheckSubsetDrift:
 
     def test_without_any_subset_flush_does_not_raise(self):

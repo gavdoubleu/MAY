@@ -86,6 +86,11 @@ class CohortFlushTracker:
             )
         self._flushed_subset_keys = subset_keys
 
+    def subset_keys_already_flushed(self, subset_keys):
+        """True if `subset_keys` exactly match an earlier real subsets
+        flush for this cohort (safe to skip re-flushing)."""
+        return self._flushed_subset_keys == frozenset(subset_keys)
+
     def check_subset_drift(self, live_keys, all_keys):
         """Raise if this cohort's subsets were flushed but `live_keys`
         (non-gutted subsets on a venue of this cohort) is non-empty, or a

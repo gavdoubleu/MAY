@@ -1016,6 +1016,41 @@ class TestFlushPropertiesVenueSubsets:
         with pytest.raises(RuntimeError, match="household"):
             world.export_to_hdf5(canonical_path, config_file=None)
 
+    def test_repeat_flush_with_same_keys_is_a_no_op(self, world_with_households, tmp_path):
+        """Re-running the same subsets-flush step for a venue_type that's
+        already fully flushed (e.g. crash-recovery retry) must skip
+        cleanly, not crash on the now-gutted subsets."""
+        world = world_with_households
+        canonical_path = str(tmp_path / "canonical.h5")
+        world.create_canonical_file(canonical_path, config_file="configs/2021/serialization_config.yaml")
+        world.flush_properties(target="venues", venue_type=self.VENUE_TYPE, properties=[],
+                               subsets=True)
+
+        world.flush_properties(target="venues", venue_type=self.VENUE_TYPE, properties=[],
+                               subsets=True)  # no raise
+
+        world.export_to_hdf5(canonical_path, config_file=None)
+
+    def test_repeat_flush_after_new_subset_added_fails_loud(self, world_with_households, tmp_path):
+        """A subset added to this venue_type between two flush attempts
+        leaves a mix of live and already-gutted subsets: must raise a
+        clear error, not the generic gutted-members access error."""
+        world = world_with_households
+        canonical_path = str(tmp_path / "canonical.h5")
+        world.create_canonical_file(canonical_path, config_file="configs/2021/serialization_config.yaml")
+        world.flush_properties(target="venues", venue_type=self.VENUE_TYPE, properties=[],
+                               subsets=True)
+
+        sgu = world.geography.units_by_id[3]
+        from may.geography import Venue
+        late_household = Venue(name="late_household", venue_type=self.VENUE_TYPE, geographical_unit=sgu)
+        world.venues.add_venue(late_household)
+        late_household.add_to_subset(next(iter(world.population.people)))
+
+        with pytest.raises(RuntimeError, match=self.VENUE_TYPE):
+            world.flush_properties(target="venues", venue_type=self.VENUE_TYPE, properties=[],
+                                   subsets=True)
+
     def test_staging_dir_deleted_after_successful_export(self, world_with_households, tmp_path):
         world = world_with_households
         canonical_path = str(tmp_path / "canonical.h5")
