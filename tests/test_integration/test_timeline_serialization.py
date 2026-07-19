@@ -918,6 +918,45 @@ class TestFlushPropertiesVenueSubsets:
             household_b.add_to_subset(person)
         return minimal_world
 
+    @pytest.fixture
+    def world_with_metadata_subset(self, world_with_households):
+        """One household whose subset carries member_metadata, mirroring
+        route_distributor.py's per-person row shape (board/alight-style
+        numeric fields), to exercise the metadata-staging path households
+        otherwise never touch."""
+        world = world_with_households
+        households = world.venues.get_venues_by_type(self.VENUE_TYPE)
+        household_a = households[0]
+        for subset in household_a.subsets.values():
+            for person in subset.members:
+                subset.member_metadata[person.id] = {
+                    "leg_idx": 0,
+                    "origin_unit_id": 1,
+                    "dest_unit_id": 2,
+                }
+        return world
+
+    def test_final_export_after_metadata_subset_flush_matches_no_flush_baseline(
+        self, world_with_metadata_subset, tmp_path
+    ):
+        """Flushing a subset that carries member_metadata must not drop that
+        metadata: the final export must stream staged metadata back in,
+        producing output identical to a run that never flushed."""
+        world = world_with_metadata_subset
+
+        baseline_path = str(tmp_path / "baseline.h5")
+        stats_baseline = world.export_to_hdf5(
+            baseline_path, config_file="configs/2021/serialization_config.yaml")
+
+        flushed_path = str(tmp_path / "flushed.h5")
+        world.create_canonical_file(flushed_path, config_file="configs/2021/serialization_config.yaml")
+        world.flush_properties(target="venues", venue_type=self.VENUE_TYPE, properties=[],
+                               subsets=True)
+        stats_flushed = world.export_to_hdf5(flushed_path, config_file="configs/2021/serialization_config.yaml")
+
+        assert stats_baseline == stats_flushed
+        _assert_h5_equivalent(baseline_path, flushed_path)
+
     def test_flush_gutted_subset_members_raise_on_access(self, world_with_households, tmp_path):
         from may.flushing import FlushedPropertyError
         world = world_with_households

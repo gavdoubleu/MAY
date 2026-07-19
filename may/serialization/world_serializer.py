@@ -298,6 +298,35 @@ class WorldSerializer:
         member_counts = [len(members) for members in member_lists]
         total_members = sum(member_counts)
 
+        # Discover the union of member_metadata field names (first-seen
+        # order) across this venue_type's subsets, and each subset's
+        # metadata row count, before gutting destroys the live dicts.
+        meta_field_names = []
+        meta_field_set = set()
+        meta_row_counts = []
+        for _, subset in venue_subset_pairs:
+            meta = subset.member_metadata
+            meta_row_counts.append(len(meta))
+            for fields in meta.values():
+                for field_name in fields.keys():
+                    if field_name not in meta_field_set:
+                        meta_field_set.add(field_name)
+                        meta_field_names.append(field_name)
+        total_meta_rows = sum(meta_row_counts)
+
+        meta_person_ids = np.empty(total_meta_rows, dtype=np.int32)
+        meta_per_field = {
+            field_name: np.full(total_meta_rows, -1.0, dtype=np.float32)
+            for field_name in meta_field_names
+        }
+        row = 0
+        for _, subset in venue_subset_pairs:
+            for person_id, fields in subset.member_metadata.items():
+                meta_person_ids[row] = person_id
+                for field_name, value in fields.items():
+                    meta_per_field[field_name][row] = float(value)
+                row += 1
+
         with h5py.File(staging_path, 'w') as f:
             subsets_group = f.create_group('subsets')
             self._create_dataset(
@@ -322,23 +351,32 @@ class WorldSerializer:
             )
             self._create_dataset(subsets_group, 'members_flat', members_flat)
 
-            # Empty-but-present membership_metadata shape: households carry
-            # no member_metadata (Phase B tracer), so the schema exists but
-            # no per-subset retrieval index is built here — see Phase B plan.
             meta_group = f.create_group('membership_metadata')
-            self._create_dataset(meta_group, 'person_ids', np.empty(0, dtype=np.int32))
-            self._create_dataset(meta_group, 'venue_ids', np.empty(0, dtype=np.int32))
             self._create_dataset(
-                meta_group, 'field_names', np.empty(0, dtype=h5py.string_dtype()),
+                meta_group, 'row_counts', np.array(meta_row_counts, dtype=np.int32),
             )
+            self._create_dataset(meta_group, 'person_ids', meta_person_ids)
+            self._create_dataset(
+                meta_group, 'field_names',
+                np.array(meta_field_names, dtype=h5py.string_dtype()),
+            )
+            for field_name in meta_field_names:
+                self._create_dataset(meta_group, field_name, meta_per_field[field_name])
 
         with h5py.File(staging_path, 'r') as f:
             written_total = f['subsets/members_flat'].shape[0]
+            written_meta_total = f['membership_metadata/person_ids'].shape[0]
         if written_total != total_members:
             raise RuntimeError(
                 f"Staging write for venue_type {venue_type!r} verification "
                 f"failed: expected {total_members} staged members, found "
                 f"{written_total}."
+            )
+        if written_meta_total != total_meta_rows:
+            raise RuntimeError(
+                f"Staging write for venue_type {venue_type!r} verification "
+                f"failed: expected {total_meta_rows} staged metadata rows, "
+                f"found {written_meta_total}."
             )
 
         for (venue, subset), member_count in zip(venue_subset_pairs, member_counts):
@@ -352,11 +390,11 @@ class WorldSerializer:
 
     def _subset_staging_index(self, venue_type):
         """Lazily open the staging file for `venue_type` (if this run
-        flushed its subsets) and build an in-memory
-        {(venue_id, subset_index): (start, count)} index into its
-        `members_flat` array from the small metadata arrays. Cached in
-        self._subset_staging_readers so repeated husks reuse one open
-        reader and one index."""
+        flushed its subsets) and build in-memory
+        {(venue_id, subset_index): (start, count)} indices into its
+        `members_flat` and `membership_metadata` arrays from the small
+        index arrays. Cached in self._subset_staging_readers so repeated
+        husks reuse one open reader and one pair of indices."""
         if venue_type in self._subset_staging_readers:
             return self._subset_staging_readers[venue_type]
 
@@ -364,24 +402,54 @@ class WorldSerializer:
         venue_ids = reader['subsets/venue_ids'][:]
         subset_indices = reader['subsets/subset_indices'][:]
         member_counts = reader['subsets/member_counts'][:]
+        meta_row_counts = reader['membership_metadata/row_counts'][:]
+        meta_field_names = list(reader['membership_metadata/field_names'].asstr()[:])
 
         index = {}
+        meta_index = {}
         start = 0
-        for venue_id, subset_index, count in zip(venue_ids, subset_indices, member_counts):
-            index[(int(venue_id), int(subset_index))] = (start, int(count))
+        meta_start = 0
+        for venue_id, subset_index, count, meta_count in zip(
+            venue_ids, subset_indices, member_counts, meta_row_counts
+        ):
+            key = (int(venue_id), int(subset_index))
+            index[key] = (start, int(count))
             start += int(count)
+            meta_index[key] = (meta_start, int(meta_count))
+            meta_start += int(meta_count)
 
-        self._subset_staging_readers[venue_type] = (reader, index)
-        return reader, index
+        self._subset_staging_readers[venue_type] = (reader, index, meta_index, meta_field_names)
+        return reader, index, meta_index, meta_field_names
 
     def _staged_member_ids(self, subset):
         """Read a gutted subset's member ids back from staging."""
-        reader, index = self._subset_staging_index(subset.venue.type)
+        reader, index, _, _ = self._subset_staging_index(subset.venue.type)
         start, count = index[(subset.venue.id, subset.subset_index)]
         return reader['subsets/members_flat'][start:start + count].tolist()
 
+    def _staged_member_metadata_count(self, subset):
+        """Row count only, for field-discovery/counting passes."""
+        _, _, meta_index, _ = self._subset_staging_index(subset.venue.type)
+        return meta_index[(subset.venue.id, subset.subset_index)][1]
+
+    def _staged_metadata_field_names(self, venue_type):
+        return self._subset_staging_index(venue_type)[3]
+
+    def _staged_member_metadata(self, subset):
+        """Read a gutted subset's member_metadata back from staging as
+        row-aligned arrays: (person_ids: int32[count], field_values:
+        {field_name: float32[count]})."""
+        reader, _, meta_index, field_names = self._subset_staging_index(subset.venue.type)
+        start, count = meta_index[(subset.venue.id, subset.subset_index)]
+        person_ids = reader['membership_metadata/person_ids'][start:start + count]
+        field_values = {
+            field_name: reader[f'membership_metadata/{field_name}'][start:start + count]
+            for field_name in field_names
+        }
+        return person_ids, field_values
+
     def _close_subset_staging_readers(self):
-        for reader, _ in self._subset_staging_readers.values():
+        for reader, *_ in self._subset_staging_readers.values():
             reader.close()
         self._subset_staging_readers = {}
 
@@ -1513,9 +1581,14 @@ class WorldSerializer:
                 continue
             for subset in venue.subsets.values():
                 if isinstance(subset.members, GuttedMembers):
-                    # Gutted subsets contribute zero metadata rows in Phase
-                    # B (households never populate member_metadata); real
-                    # per-subset retrieval is a Phase C concern.
+                    count = self._staged_member_metadata_count(subset)
+                    if count == 0:
+                        continue
+                    n_rows += count
+                    for fname in self._staged_metadata_field_names(subset.venue.type):
+                        if fname not in field_set:
+                            field_set.add(fname)
+                            field_names.append(fname)
                     continue
                 meta = getattr(subset, 'member_metadata', None)
                 if not meta:
@@ -1543,6 +1616,15 @@ class WorldSerializer:
                 continue
             for subset in venue.subsets.values():
                 if isinstance(subset.members, GuttedMembers):
+                    person_ids, field_values = self._staged_member_metadata(subset)
+                    count = len(person_ids)
+                    if count == 0:
+                        continue
+                    person_arr[k:k + count] = person_ids
+                    venue_arr[k:k + count] = global_id
+                    for fname, values in field_values.items():
+                        per_field[fname][k:k + count] = values
+                    k += count
                     continue
                 meta = getattr(subset, 'member_metadata', None)
                 if not meta:
