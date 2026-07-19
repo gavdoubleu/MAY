@@ -7,7 +7,13 @@ its value must fail loud with FlushedPropertyError.
 
 import pytest
 
-from may.flushing import FlushedPropertyError, TombstonedProperties
+from may.flushing import (
+    FlushedPropertyError,
+    GuttedMemberMetadata,
+    GuttedMembers,
+    TombstonedProperties,
+    gut_subset,
+)
 from may.venue_distributor.base_distributor import BaseDistributor
 
 
@@ -139,3 +145,87 @@ class TestTombstoneTraversalInDistributor:
         value = traverse(None, residence, "properties.original_pattern")
 
         assert value == "pattern_a"
+
+
+class TestGuttedMembers:
+
+    def test_len_returns_cached_count(self):
+        gutted = GuttedMembers(3)
+
+        assert len(gutted) == 3
+
+    def test_iteration_raises(self):
+        gutted = GuttedMembers(3)
+
+        with pytest.raises(FlushedPropertyError):
+            iter(gutted)
+
+    def test_membership_check_raises(self):
+        gutted = GuttedMembers(3)
+
+        with pytest.raises(FlushedPropertyError):
+            "anything" in gutted
+
+    def test_add_raises(self):
+        gutted = GuttedMembers(3)
+
+        with pytest.raises(FlushedPropertyError):
+            gutted.add("person")
+
+    def test_remove_raises(self):
+        gutted = GuttedMembers(3)
+
+        with pytest.raises(FlushedPropertyError):
+            gutted.remove("person")
+
+
+class TestGuttedMemberMetadata:
+
+    def test_bool_raises(self):
+        gutted = GuttedMemberMetadata()
+
+        with pytest.raises(FlushedPropertyError):
+            bool(gutted)
+
+    def test_len_raises(self):
+        gutted = GuttedMemberMetadata()
+
+        with pytest.raises(FlushedPropertyError):
+            len(gutted)
+
+    def test_getitem_raises(self):
+        gutted = GuttedMemberMetadata()
+
+        with pytest.raises(FlushedPropertyError):
+            gutted["field"]
+
+    def test_iteration_raises(self):
+        gutted = GuttedMemberMetadata()
+
+        with pytest.raises(FlushedPropertyError):
+            iter(gutted)
+
+    def test_membership_check_raises(self):
+        gutted = GuttedMemberMetadata()
+
+        with pytest.raises(FlushedPropertyError):
+            "field" in gutted
+
+
+class _StubSubset:
+
+    def __init__(self):
+        self.members = {"person_a", "person_b"}
+        self.member_metadata = {"height": {"person_a": 1.8}}
+
+
+class TestGutSubset:
+
+    def test_replaces_members_and_metadata_with_sentinels(self):
+        subset = _StubSubset()
+
+        gut_subset(subset, member_count=2)
+
+        assert isinstance(subset.members, GuttedMembers)
+        assert len(subset.members) == 2
+        assert isinstance(subset.member_metadata, GuttedMemberMetadata)

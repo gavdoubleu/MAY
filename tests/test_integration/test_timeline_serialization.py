@@ -886,3 +886,106 @@ class TestFlushPropertiesVenues:
         with pytest.raises(ValueError, match="twice"):
             world.flush_properties(target="venues", venue_type=self.VENUE_TYPE,
                                    properties=["capacity"])
+
+
+class TestFlushPropertiesVenueSubsets:
+    """Mid-timeline flush of a venue-type's subset membership to staging
+    (`flush_properties` step, target: venues, subsets: true). See
+    tmp/plans/streaming-checkpointed-world-export.md phase B. Households
+    are the tracer cohort: no member_metadata, biggest resident payload."""
+
+    VENUE_TYPE = "household"
+
+    def test_subsets_on_non_venues_target_fails_loud(self, minimal_world):
+        with pytest.raises(ValueError, match="subsets"):
+            minimal_world.flush_properties(target="population", properties=[],
+                                           subsets=True)
+
+    @pytest.fixture
+    def world_with_households(self, minimal_world):
+        """Two households, each with the household's default subset
+        populated from the existing population."""
+        people = list(minimal_world.population.people)
+        sgu = minimal_world.geography.units_by_id[3]
+        from may.geography import Venue
+        household_a = Venue(name="household_a", venue_type=self.VENUE_TYPE, geographical_unit=sgu)
+        household_b = Venue(name="household_b", venue_type=self.VENUE_TYPE, geographical_unit=sgu)
+        minimal_world.venues.add_venue(household_a)
+        minimal_world.venues.add_venue(household_b)
+        for person in people[:5]:
+            household_a.add_to_subset(person)
+        for person in people[5:]:
+            household_b.add_to_subset(person)
+        return minimal_world
+
+    def test_flush_gutted_subset_members_raise_on_access(self, world_with_households, tmp_path):
+        from may.flushing import FlushedPropertyError
+        world = world_with_households
+        canonical_path = str(tmp_path / "canonical.h5")
+        world.create_canonical_file(canonical_path, config_file="configs/2021/serialization_config.yaml")
+
+        world.flush_properties(target="venues", venue_type=self.VENUE_TYPE, properties=[],
+                               subsets=True)
+
+        households = world.venues.get_venues_by_type(self.VENUE_TYPE)
+        for household in households:
+            for subset in household.subsets.values():
+                assert subset.num_members == 5
+                with pytest.raises(FlushedPropertyError):
+                    list(subset.members)
+
+    def test_final_export_after_subsets_flush_matches_no_flush_baseline(
+        self, world_with_households, tmp_path
+    ):
+        """Flushing household subset membership mid-run must not change the
+        on-disk format: the final export streams staged members back in,
+        producing output byte-identical to a run that never flushed."""
+        world = world_with_households
+
+        baseline_path = str(tmp_path / "baseline.h5")
+        stats_baseline = world.export_to_hdf5(
+            baseline_path, config_file="configs/2021/serialization_config.yaml")
+
+        flushed_path = str(tmp_path / "flushed.h5")
+        world.create_canonical_file(flushed_path, config_file="configs/2021/serialization_config.yaml")
+        world.flush_properties(target="venues", venue_type=self.VENUE_TYPE, properties=[],
+                               subsets=True)
+        stats_flushed = world.export_to_hdf5(flushed_path, config_file="configs/2021/serialization_config.yaml")
+
+        assert stats_baseline == stats_flushed
+        _assert_h5_equivalent(baseline_path, flushed_path)
+
+    def test_live_subset_added_after_subsets_flush_fails_loud_at_export(
+        self, world_with_households, tmp_path
+    ):
+        """A household added (or a new subset added to an existing one)
+        after the subsets flush would be silently dropped by final export
+        (it's not staged, and its live members shadow nothing) — must fail
+        loud instead."""
+        world = world_with_households
+        canonical_path = str(tmp_path / "canonical.h5")
+        world.create_canonical_file(canonical_path, config_file="configs/2021/serialization_config.yaml")
+        world.flush_properties(target="venues", venue_type=self.VENUE_TYPE, properties=[],
+                               subsets=True)
+
+        sgu = world.geography.units_by_id[3]
+        from may.geography import Venue
+        late_household = Venue(name="late_household", venue_type=self.VENUE_TYPE, geographical_unit=sgu)
+        world.venues.add_venue(late_household)
+        late_household.add_to_subset(next(iter(world.population.people)))
+
+        with pytest.raises(RuntimeError, match="household"):
+            world.export_to_hdf5(canonical_path, config_file=None)
+
+    def test_staging_dir_deleted_after_successful_export(self, world_with_households, tmp_path):
+        world = world_with_households
+        canonical_path = str(tmp_path / "canonical.h5")
+        world.create_canonical_file(canonical_path, config_file="configs/2021/serialization_config.yaml")
+        world.flush_properties(target="venues", venue_type=self.VENUE_TYPE, properties=[],
+                               subsets=True)
+        staging_dir = tmp_path / "staging"
+        assert staging_dir.exists()
+
+        world.export_to_hdf5(canonical_path, config_file=None)
+
+        assert not staging_dir.exists()

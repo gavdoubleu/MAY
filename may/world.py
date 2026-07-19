@@ -232,15 +232,19 @@ class World:
         self._serializer = WorldSerializer(config_file=pr.resolve(config_file))
         self._serializer.export_core(self, output_file)
 
-    def flush_properties(self, target, properties, venue_type=None):
+    def flush_properties(self, target, properties, venue_type=None, subsets=False):
         """
-        Flush settled properties to the canonical HDF5 file mid-timeline and
-        free their in-memory values (a `flush_properties` timeline step).
+        Flush settled properties, or venue subset membership, to the
+        canonical HDF5 file mid-timeline and free their in-memory values
+        (a `flush_properties` timeline step).
 
-        After a successful flush the property keys are tombstoned: `in`
+        After a successful property flush the keys are tombstoned: `in`
         still returns True but reading or writing the value raises
-        FlushedPropertyError (see may/flushing.py). The final export skips
-        flushed columns.
+        FlushedPropertyError (see may/flushing.py). After a successful
+        subsets flush, each subset's members are staged to disk and its
+        `.members`/`.member_metadata` become gutted sentinels raising
+        FlushedPropertyError. The final export skips flushed columns and
+        streams staged subset membership back in from disk.
 
         A requested property whose every live value is `None` is deferred:
         nothing is written, it is not tombstoned, and it may be requested
@@ -249,9 +253,12 @@ class World:
 
         Args:
             target: 'population', 'geo_units' or 'venues'
-            properties: non-empty list of property names to flush
-            venue_type: required for target 'venues' (the cohort to flush);
-                must be omitted for other targets
+            properties: list of property names to flush; may be empty iff
+                `subsets` is True
+            venue_type: required for target 'venues' (the cohort to
+                flush); must be omitted for other targets
+            subsets: flush this venue_type's subset membership to staging;
+                only valid with target 'venues'
         """
         valid_targets = {"population", "geo_units", "venues"}
         if target not in valid_targets:
@@ -259,7 +266,17 @@ class World:
                 f"flush_properties target {target!r} invalid; expected one "
                 f"of {sorted(valid_targets)}."
             )
-        if not properties or not isinstance(properties, list):
+        if subsets and target != "venues":
+            raise ValueError(
+                "flush_properties `subsets: true` is only valid with "
+                "target 'venues'."
+            )
+        if not properties and not subsets:
+            raise ValueError(
+                "flush_properties requires a non-empty `properties:` list "
+                "(unless `subsets: true` is set)."
+            )
+        if properties and not isinstance(properties, list):
             raise ValueError(
                 "flush_properties requires a non-empty `properties:` list."
             )
@@ -281,12 +298,15 @@ class World:
         from may.flushing import tombstone_objects
         from may.serialization.flush_specs import FLUSH_SPECS
 
-        spec = FLUSH_SPECS[target]
-        written_properties = spec.serializer_call(self, venue_type, properties)
-        tombstone_objects(
-            spec.cohort(self, venue_type), written_properties,
-            spec.registry(self, venue_type),
-        )
+        if properties:
+            spec = FLUSH_SPECS[target]
+            written_properties = spec.serializer_call(self, venue_type, properties)
+            tombstone_objects(
+                spec.cohort(self, venue_type), written_properties,
+                spec.registry(self, venue_type),
+            )
+        if subsets:
+            self._serializer.flush_venue_subsets(self, venue_type)
 
     def export_to_hdf5(self, output_file, config_file=None):
         """

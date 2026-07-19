@@ -81,3 +81,49 @@ class TestMarkFlushed:
         assert tracker.flushed_names == set()
         tracker.mark_flushed(["ethnicity", "work_mode"])
         assert tracker.flushed_names == {"ethnicity", "work_mode"}
+
+
+class TestRecordSubsetKeys:
+
+    def test_first_call_records_without_raising(self):
+        tracker = CohortFlushTracker("household")
+        tracker.record_subset_keys({(1, 0), (1, 1)})  # no raise
+
+    def test_second_call_with_different_keys_raises(self):
+        tracker = CohortFlushTracker("household")
+        tracker.record_subset_keys({(1, 0), (1, 1)})
+
+        with pytest.raises(RuntimeError, match="household"):
+            tracker.record_subset_keys({(1, 0)})
+
+    def test_repeated_call_with_same_keys_does_not_raise(self):
+        tracker = CohortFlushTracker("household")
+        tracker.record_subset_keys({(1, 0), (1, 1)})
+        tracker.record_subset_keys({(1, 0), (1, 1)})  # no raise
+
+
+class TestCheckSubsetDrift:
+
+    def test_without_any_subset_flush_does_not_raise(self):
+        tracker = CohortFlushTracker("household")
+        tracker.check_subset_drift(live_keys=set(), all_keys={(1, 0)})  # no raise
+
+    def test_after_flush_with_no_live_subsets_and_husks_intact_does_not_raise(self):
+        tracker = CohortFlushTracker("household")
+        tracker.record_subset_keys({(1, 0), (1, 1)})
+
+        tracker.check_subset_drift(live_keys=set(), all_keys={(1, 0), (1, 1)})  # no raise
+
+    def test_live_subset_on_flushed_cohort_raises(self):
+        tracker = CohortFlushTracker("household")
+        tracker.record_subset_keys({(1, 0)})
+
+        with pytest.raises(RuntimeError, match="household"):
+            tracker.check_subset_drift(live_keys={(2, 0)}, all_keys={(1, 0), (2, 0)})
+
+    def test_missing_husk_raises(self):
+        tracker = CohortFlushTracker("household")
+        tracker.record_subset_keys({(1, 0), (1, 1)})
+
+        with pytest.raises(RuntimeError, match="household"):
+            tracker.check_subset_drift(live_keys=set(), all_keys={(1, 0)})

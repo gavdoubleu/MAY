@@ -6,6 +6,8 @@ for loading in C++ simulation engine.
 """
 
 import logging
+import os
+import shutil
 import h5py
 import numpy as np
 from datetime import datetime
@@ -245,6 +247,144 @@ class WorldSerializer:
             log_label=venue_type,
         )
 
+    def _staging_dir(self):
+        return os.path.join(os.path.dirname(self._core_output_file), 'staging')
+
+    def _staging_path(self, venue_type):
+        return os.path.join(self._staging_dir(), f'{venue_type}.h5')
+
+    def flush_venue_subsets(self, world, venue_type):
+        """
+        Stage one venue type's subset membership to
+        `<staging_dir>/<venue_type>.h5` and gut the live subsets, freeing
+        their `.members`/`.member_metadata` (see may/flushing.py,
+        docs/adr/0002). The cohort's `(Venue.id, subset_index)` keys are
+        recorded on this venue_type's CohortFlushTracker and re-verified
+        at final export (docs/adr/0005): no live subset may exist on this
+        venue_type afterwards, and every staged subset must still be
+        present as a husk.
+
+        Staging is skipped, with a warning, if the venue_type currently
+        has no subsets at all (mirrors the all-None property policy).
+        """
+        from may.flushing import gut_subset
+
+        if self._core_output_file is None:
+            raise RuntimeError(
+                "flush_venue_subsets() requires the canonical file: "
+                "call export_core() first."
+            )
+
+        tracker = self._venue_flushes.setdefault(venue_type, CohortFlushTracker(venue_type))
+
+        venue_subset_pairs = [
+            (venue, subset)
+            for venue in world.venues.get_venues_by_type(venue_type)
+            for subset in venue.subsets.values()
+        ]
+        if not venue_subset_pairs:
+            logger.warning(
+                f"No subsets to flush for venue_type {venue_type!r}; skipping."
+            )
+            return
+
+        staging_dir = self._staging_dir()
+        os.makedirs(staging_dir, exist_ok=True)
+        staging_path = self._staging_path(venue_type)
+
+        subset_keys = [(venue.id, subset.subset_index) for venue, subset in venue_subset_pairs]
+        subset_names = [subset.subset_name for _, subset in venue_subset_pairs]
+        member_lists = [[person.id for person in subset.members] for _, subset in venue_subset_pairs]
+        member_counts = [len(members) for members in member_lists]
+        total_members = sum(member_counts)
+
+        with h5py.File(staging_path, 'w') as f:
+            subsets_group = f.create_group('subsets')
+            self._create_dataset(
+                subsets_group, 'venue_ids',
+                np.array([key[0] for key in subset_keys], dtype=np.int32),
+            )
+            self._create_dataset(
+                subsets_group, 'subset_indices',
+                np.array([key[1] for key in subset_keys], dtype=np.int32),
+            )
+            self._create_dataset(
+                subsets_group, 'subset_names',
+                np.array(subset_names, dtype=h5py.string_dtype()),
+            )
+            self._create_dataset(
+                subsets_group, 'member_counts',
+                np.array(member_counts, dtype=np.int32),
+            )
+            members_flat = np.array(
+                [person_id for members in member_lists for person_id in members],
+                dtype=np.int32,
+            )
+            self._create_dataset(subsets_group, 'members_flat', members_flat)
+
+            # Empty-but-present membership_metadata shape: households carry
+            # no member_metadata (Phase B tracer), so the schema exists but
+            # no per-subset retrieval index is built here — see Phase B plan.
+            meta_group = f.create_group('membership_metadata')
+            self._create_dataset(meta_group, 'person_ids', np.empty(0, dtype=np.int32))
+            self._create_dataset(meta_group, 'venue_ids', np.empty(0, dtype=np.int32))
+            self._create_dataset(
+                meta_group, 'field_names', np.empty(0, dtype=h5py.string_dtype()),
+            )
+
+        with h5py.File(staging_path, 'r') as f:
+            written_total = f['subsets/members_flat'].shape[0]
+        if written_total != total_members:
+            raise RuntimeError(
+                f"Staging write for venue_type {venue_type!r} verification "
+                f"failed: expected {total_members} staged members, found "
+                f"{written_total}."
+            )
+
+        for (venue, subset), member_count in zip(venue_subset_pairs, member_counts):
+            gut_subset(subset, member_count)
+
+        tracker.record_subset_keys(subset_keys)
+        logger.info(
+            f"  Flushed {venue_type} subsets to staging: "
+            f"{len(venue_subset_pairs)} subsets, {total_members} memberships"
+        )
+
+    def _subset_staging_index(self, venue_type):
+        """Lazily open the staging file for `venue_type` (if this run
+        flushed its subsets) and build an in-memory
+        {(venue_id, subset_index): (start, count)} index into its
+        `members_flat` array from the small metadata arrays. Cached in
+        self._subset_staging_readers so repeated husks reuse one open
+        reader and one index."""
+        if venue_type in self._subset_staging_readers:
+            return self._subset_staging_readers[venue_type]
+
+        reader = h5py.File(self._staging_path(venue_type), 'r')
+        venue_ids = reader['subsets/venue_ids'][:]
+        subset_indices = reader['subsets/subset_indices'][:]
+        member_counts = reader['subsets/member_counts'][:]
+
+        index = {}
+        start = 0
+        for venue_id, subset_index, count in zip(venue_ids, subset_indices, member_counts):
+            index[(int(venue_id), int(subset_index))] = (start, int(count))
+            start += int(count)
+
+        self._subset_staging_readers[venue_type] = (reader, index)
+        return reader, index
+
+    def _staged_member_ids(self, subset):
+        """Read a gutted subset's member ids back from staging."""
+        reader, index = self._subset_staging_index(subset.venue.type)
+        start, count = index[(subset.venue.id, subset.subset_index)]
+        return reader['subsets/members_flat'][start:start + count].tolist()
+
+    def _close_subset_staging_readers(self):
+        for reader, _ in self._subset_staging_readers.values():
+            reader.close()
+        self._subset_staging_readers = {}
+
     def export(self, world, output_file):
         """
         Export world to HDF5 file.
@@ -258,6 +398,7 @@ class WorldSerializer:
         self._venue_type_id_map = {}
         self._people_sorted = None
         self._geo_units_sorted = None
+        self._subset_staging_readers = {}
         logger.info("=" * 60)
         logger.info("Exporting World to HDF5")
         logger.info("=" * 60)
@@ -317,6 +458,17 @@ class WorldSerializer:
             # Write registries (Enum mappings for C++)
             logger.info("Writing string registries...")
             self._write_registries(f)
+
+        # Any exception above propagates before this point, so staging/
+        # survives a crash automatically for inspection/retry.
+        self._close_subset_staging_readers()
+        if self._core_output_file is not None:
+            staging_dir = self._staging_dir()
+            if os.path.isdir(staging_dir):
+                try:
+                    shutil.rmtree(staging_dir)
+                except OSError as error:
+                    logger.warning(f"Could not remove staging dir {staging_dir!r}: {error}")
 
         logger.info("")
         logger.info("Export complete!")
@@ -1050,6 +1202,25 @@ class WorldSerializer:
             current_cohort_ids = [venue.id for venue in venues_by_type.get(venue_type, [])]
             tracker.check_drift(current_cohort_ids)
 
+        # Subset-flushed cohorts must be fully closed: no live (non-gutted)
+        # subset may exist on the venue_type, and every staged subset must
+        # still be present as a husk — see docs/adr/0005, flush_venue_subsets.
+        from may.flushing import GuttedMembers
+        for venue_type, tracker in self._venue_flushes.items():
+            venues_of_type = venues_by_type.get(venue_type, [])
+            live_keys = {
+                (venue.id, subset.subset_index)
+                for venue in venues_of_type
+                for subset in venue.subsets.values()
+                if not isinstance(subset.members, GuttedMembers)
+            }
+            all_keys = {
+                (venue.id, subset.subset_index)
+                for venue in venues_of_type
+                for subset in venue.subsets.values()
+            }
+            tracker.check_subset_drift(live_keys, all_keys)
+
         # Configured types with zero current venues (e.g. never populated,
         # or fully removed post-flush) must still get their subgroup —
         # mirrors the drift-check loop above, not just venues_by_type.
@@ -1132,7 +1303,12 @@ class WorldSerializer:
     def _write_subset_members(self, subsets_group, all_subsets):
         """
         Write subset member lists as ragged arrays with chunked processing.
+        Gutted subsets (flushed to staging, see flush_venue_subsets) have
+        their member ids streamed back in from the staging reader instead
+        of iterating the live (sentinel) `.members`.
         """
+        from may.flushing import GuttedMembers
+
         num_subsets = len(all_subsets)
         chunk_size = 200000
 
@@ -1158,7 +1334,10 @@ class WorldSerializer:
             
             for subset in chunk:
                 chunk_offsets.append(current_member_idx)
-                ids = [p.id for p in subset.members]
+                if isinstance(subset.members, GuttedMembers):
+                    ids = self._staged_member_ids(subset)
+                else:
+                    ids = [p.id for p in subset.members]
                 chunk_members.extend(ids)
                 current_member_idx += len(ids)
             
@@ -1320,6 +1499,8 @@ class WorldSerializer:
         exactly only up to that point, so e.g. venue ids in big worlds could
         corrupt.
         """
+        from may.flushing import GuttedMembers
+
         venue_to_global_id = self._venue_to_global_id
 
         # Pass 1: count rows and discover the union of field names (in
@@ -1331,6 +1512,11 @@ class WorldSerializer:
             if id(venue) not in venue_to_global_id:
                 continue
             for subset in venue.subsets.values():
+                if isinstance(subset.members, GuttedMembers):
+                    # Gutted subsets contribute zero metadata rows in Phase
+                    # B (households never populate member_metadata); real
+                    # per-subset retrieval is a Phase C concern.
+                    continue
                 meta = getattr(subset, 'member_metadata', None)
                 if not meta:
                     continue
@@ -1356,6 +1542,8 @@ class WorldSerializer:
             if global_id is None:
                 continue
             for subset in venue.subsets.values():
+                if isinstance(subset.members, GuttedMembers):
+                    continue
                 meta = getattr(subset, 'member_metadata', None)
                 if not meta:
                     continue

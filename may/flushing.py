@@ -113,6 +113,88 @@ class TombstonedProperties(dict):
         return dict.__len__(self)
 
 
+class GuttedMembers:
+    """Sentinel replacing `Subset.members` after its members are flushed to
+    staging and freed. `len()` answers from the cached count (so
+    `_write_subsets`, `num_members`, and Venue's own member-count summation
+    keep working on a husk); iteration, membership, and mutation raise
+    FlushedPropertyError since the actual member ids now live only in
+    staging.
+    """
+
+    __slots__ = ('_count',)
+
+    def __init__(self, count):
+        self._count = count
+
+    def __len__(self):
+        return self._count
+
+    def _refuse(self):
+        raise FlushedPropertyError(
+            "Subset members were flushed to staging and freed; their "
+            "in-memory values are gone. Reorder the timeline so this "
+            "access happens before the flush_properties subsets step."
+        )
+
+    def __iter__(self):
+        self._refuse()
+
+    def __contains__(self, item):
+        self._refuse()
+
+    def add(self, item):
+        self._refuse()
+
+    def remove(self, item):
+        self._refuse()
+
+    def discard(self, item):
+        self._refuse()
+
+
+class GuttedMemberMetadata:
+    """Sentinel replacing `Subset.member_metadata` after gutting. Raises on
+    all access, including `bool()`/`len()`, so generic code that
+    truthy-checks metadata fails loud rather than silently treating a husk
+    as "no metadata".
+    """
+
+    __slots__ = ()
+
+    def _refuse(self):
+        raise FlushedPropertyError(
+            "Subset member_metadata was flushed to staging and freed; its "
+            "in-memory value is gone. Reorder the timeline so this access "
+            "happens before the flush_properties subsets step."
+        )
+
+    def __bool__(self):
+        self._refuse()
+
+    def __len__(self):
+        self._refuse()
+
+    def __getitem__(self, key):
+        self._refuse()
+
+    def __setitem__(self, key, value):
+        self._refuse()
+
+    def __iter__(self):
+        self._refuse()
+
+    def __contains__(self, key):
+        self._refuse()
+
+
+def gut_subset(subset, member_count):
+    """Replace a flushed subset's members/member_metadata with sentinels
+    once its members have been staged and verified."""
+    subset.members = GuttedMembers(member_count)
+    subset.member_metadata = GuttedMemberMetadata()
+
+
 def tombstone_objects(objects, property_names, flushed_keys):
     """Free flushed values and install tombstones on every object.
 

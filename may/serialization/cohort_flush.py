@@ -19,6 +19,7 @@ class CohortFlushTracker:
         self.label = label
         self._flushed_names = set()
         self._recorded_cohort_ids = None
+        self._flushed_subset_keys = None
 
     @property
     def flushed_names(self):
@@ -67,3 +68,41 @@ class CohortFlushTracker:
             return
         if cohort_ids != self._recorded_cohort_ids:
             raise self._drift_error(cohort_ids)
+
+    def record_subset_keys(self, subset_keys):
+        """Record the `(Venue.id, subset_index)` keys staged by a real
+        subsets flush, raising if a second subsets-flush for this cohort
+        sends a different set."""
+        subset_keys = frozenset(subset_keys)
+        if (
+            self._flushed_subset_keys is not None
+            and subset_keys != self._flushed_subset_keys
+        ):
+            raise RuntimeError(
+                f"{self.label!r} cohort subsets flushed twice with "
+                f"different subset sets: recorded "
+                f"{sorted(self._flushed_subset_keys)}, now "
+                f"{sorted(subset_keys)}."
+            )
+        self._flushed_subset_keys = subset_keys
+
+    def check_subset_drift(self, live_keys, all_keys):
+        """Raise if this cohort's subsets were flushed but `live_keys`
+        (non-gutted subsets on a venue of this cohort) is non-empty, or a
+        recorded subset is missing from `all_keys` (current husks + live
+        subsets). No-op if this cohort's subsets were never flushed."""
+        if self._flushed_subset_keys is None:
+            return
+        if live_keys:
+            raise RuntimeError(
+                f"{self.label!r} cohort's subsets were flushed, but live "
+                f"(non-gutted) subsets still exist for this venue type: "
+                f"{sorted(live_keys)}. The cohort is closed to new "
+                f"subsets once flushed."
+            )
+        missing = self._flushed_subset_keys - frozenset(all_keys)
+        if missing:
+            raise RuntimeError(
+                f"{self.label!r} cohort's flushed subsets are missing at "
+                f"export: {sorted(missing)}."
+            )
