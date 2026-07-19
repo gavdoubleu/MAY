@@ -89,7 +89,7 @@ class WorldSerializer:
         configured = self.config.get_person_properties()
         self._population_flush.validate(property_names, configured)
 
-        people_sorted, _ = self._sorted_people(world)
+        people_sorted, _ = self._stable_sort_by_geo_unit(world.population.people)
 
         # Cohort must match any earlier flush: columns from both steps share
         # one row order (see docs/adr/0003).
@@ -164,11 +164,7 @@ class WorldSerializer:
         # Cohort order: within-type slice of the stable geo-sort applied to
         # the full venue list by _write_venues().
         venues_of_type = [v for v in world.venues.get_all_venues_list() if v.type == venue_type]
-        geo_unit_ids_raw = np.array(
-            [v.geographical_unit.id if v.geographical_unit else -1 for v in venues_of_type],
-            dtype=np.int32
-        )
-        cohort_sorted = [venues_of_type[i] for i in np.argsort(geo_unit_ids_raw, kind='stable')]
+        cohort_sorted, _ = self._stable_sort_by_geo_unit(venues_of_type)
 
         # Cohort must match any earlier partial flush of the same type:
         # columns from both steps share one row order.
@@ -233,7 +229,7 @@ class WorldSerializer:
             if core_written:
                 # Re-derive the frozen row order (stable sort of immutable
                 # geo_unit ids — identical to the export_core() order).
-                self._people_sorted, _ = self._sorted_people(world)
+                self._people_sorted, _ = self._stable_sort_by_geo_unit(world.population.people)
             else:
                 self._write_population_core(f, world)
             self._write_population_properties(f, world)
@@ -383,17 +379,26 @@ class WorldSerializer:
             self._write_property_array(props_group, prop_name, units_list)
         logger.info(f"  Wrote geography properties: {properties_to_include}")
 
-    def _sorted_people(self, world):
+    def _stable_sort_by_geo_unit(self, objects, geo_unit_key=lambda obj: obj.geographical_unit):
         """
-        Frozen /population row order: stable sort by geo_unit id. Deterministic
-        over the run (ids/geo assignment never mutate), so early core writes,
-        flush steps and the final export all agree on row positions.
+        Frozen row order shared by every geo-sorted cohort (population,
+        venues, subsets, and the venue-type flush cohort): stable sort by
+        geo_unit id, missing units last (-1). Deterministic over the run
+        (ids/geo assignment never mutate), so early core writes, flush
+        steps and the final export all agree on row positions.
+
+        `geo_unit_key` extracts the GeographicalUnit to sort by (or None);
+        defaults to `obj.geographical_unit` for objects that carry it
+        directly (people, venues). Subsets pass
+        `lambda subset: subset.venue.geographical_unit`.
         """
-        people = world.population.people
-        geo_unit_ids_raw = np.array([p.geographical_unit.id if p.geographical_unit else -1 for p in people], dtype=np.int32)
+        geo_unit_ids_raw = np.array(
+            [(geo_unit_key(obj).id if geo_unit_key(obj) else -1) for obj in objects],
+            dtype=np.int32
+        )
         sort_idx = np.argsort(geo_unit_ids_raw, kind='stable')
-        people_sorted = [people[i] for i in sort_idx]
-        return people_sorted, geo_unit_ids_raw[sort_idx]
+        objects_sorted = [objects[i] for i in sort_idx]
+        return objects_sorted, geo_unit_ids_raw[sort_idx]
 
     def _write_population_core(self, f, world):
         """Write population core datasets (no properties) to HDF5."""
@@ -408,7 +413,7 @@ class WorldSerializer:
 
         logger.info(f"  Serializing {num_people:,} people...")
 
-        people_sorted, geo_unit_ids_sorted = self._sorted_people(world)
+        people_sorted, geo_unit_ids_sorted = self._stable_sort_by_geo_unit(world.population.people)
 
         # Store sorted people for activity mapping serialization
         self._people_sorted = people_sorted
@@ -844,10 +849,8 @@ class WorldSerializer:
 
         num_venues = len(all_venues)
 
-        # Sort venues by their geographical unit ID using numpy argsort
-        geo_unit_ids_raw = np.array([v.geographical_unit.id if v.geographical_unit else -1 for v in all_venues], dtype=np.int32)
-        sort_idx = np.argsort(geo_unit_ids_raw, kind='stable')
-        all_venues_sorted = [all_venues[i] for i in sort_idx]
+        # Sort venues by their geographical unit ID
+        all_venues_sorted, _ = self._stable_sort_by_geo_unit(all_venues)
 
         logger.info(f"    ✓ Sorted {num_venues:,} venues by geo_unit_id")
 
@@ -999,10 +1002,10 @@ class WorldSerializer:
 
         num_subsets = len(all_subsets)
 
-        # Sort subsets by their venue's geographical unit ID using numpy argsort
-        geo_unit_ids_raw = np.array([s.venue.geographical_unit.id if s.venue.geographical_unit else -1 for s in all_subsets], dtype=np.int32)
-        sort_idx = np.argsort(geo_unit_ids_raw, kind='stable')
-        all_subsets_sorted = [all_subsets[i] for i in sort_idx]
+        # Sort subsets by their venue's geographical unit ID
+        all_subsets_sorted, _ = self._stable_sort_by_geo_unit(
+            all_subsets, geo_unit_key=lambda subset: subset.venue.geographical_unit
+        )
 
         logger.info(f"    ✓ Sorted {num_subsets:,} subsets by venue's geo_unit_id")
 
