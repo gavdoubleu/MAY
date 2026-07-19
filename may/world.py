@@ -278,29 +278,15 @@ class World:
                 "called before the timeline."
             )
 
-        if target == "population":
-            from may.flushing import tombstone_objects
-            self._serializer.flush_population_properties(self, properties)
-            tombstone_objects(
-                self.population.people, properties,
-                self._flushed_person_property_names,
-            )
-        elif target == "geo_units":
-            from may.flushing import tombstone_objects
-            self._serializer.flush_geography_properties(self, properties)
-            tombstone_objects(
-                self.geography.units_by_id.values(), properties,
-                self._flushed_geo_unit_property_names,
-            )
-        else:  # venues
-            from may.flushing import tombstone_objects
-            self._serializer.flush_venue_properties(self, venue_type, properties)
-            venues_of_type = [v for v in self.venues.get_all_venues_list()
-                              if v.type == venue_type]
-            tombstone_objects(
-                venues_of_type, properties,
-                self._flushed_venue_property_names_by_type.setdefault(venue_type, set()),
-            )
+        from may.flushing import tombstone_objects
+        from may.serialization.flush_specs import FLUSH_SPECS
+
+        spec = FLUSH_SPECS[target]
+        spec.serializer_call(self, venue_type, properties)
+        tombstone_objects(
+            spec.cohort(self, venue_type), properties,
+            spec.registry(self, venue_type),
+        )
 
     def export_to_hdf5(self, output_file, config_file):
         """
