@@ -299,11 +299,13 @@ def main():
                 flush_target = step.get("target")
                 flush_property_names = step.get("properties")
                 flush_venue_type = step.get("venue_type")
+                flush_subsets = step.get("subsets", False)
                 logger.info("")
                 logger.info(
                     f"[FLUSH PROPERTIES] target={flush_target} "
                     f"properties={flush_property_names}"
                     + (f" venue_type={flush_venue_type}" if flush_venue_type else "")
+                    + (f" subsets={flush_subsets}" if flush_subsets else "")
                 )
                 if export_path is None:
                     logger.error(
@@ -314,7 +316,8 @@ def main():
                 try:
                     world.flush_properties(target=flush_target,
                                            properties=flush_property_names,
-                                           venue_type=flush_venue_type)
+                                           venue_type=flush_venue_type,
+                                           subsets=flush_subsets)
                 except Exception as e:
                     logger.error(f"flush_properties step failed: {e}")
                     logger.exception(e)
