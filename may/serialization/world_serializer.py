@@ -70,6 +70,38 @@ class WorldSerializer:
         self._core_output_file = output_file
         logger.info("Canonical file created (core datasets written)")
 
+    def _flush_cohort_properties(self, tracker, group_path, cohort_sorted,
+                                  configured_properties, property_names,
+                                  flushed_by_step_label):
+        """
+        Shared body of flush_{population,geography,venue}_properties():
+        validate, record the cohort's row-id sequence against the tracker,
+        write one dataset per property under `group_path` (require_group'd
+        in sequence) in `cohort_sorted` order, stamp each with a
+        'flushed_by_step' attr, then mark the properties flushed on
+        `tracker`. Callers own the canonical-file check, the target-specific
+        cohort sort and the configured-properties lookup — this only knows
+        how to write a cohort's flush once those are settled.
+        """
+        tracker.validate(property_names, configured_properties)
+
+        # Cohort must match any earlier flush: columns from both steps share
+        # one row order (see docs/adr/0003).
+        cohort_ids = [obj.id for obj in cohort_sorted]
+        tracker.record_flush(cohort_ids)
+
+        with h5py.File(self._core_output_file, 'r+') as f:
+            group = f
+            for name in group_path:
+                group = group.require_group(name)
+            for prop_name in property_names:
+                self._write_property_array(group, prop_name, cohort_sorted)
+                if prop_name in group:  # absent if every value was None
+                    group[prop_name].attrs['flushed_by_step'] = flushed_by_step_label
+                logger.info(f"  Flushed {tracker.label} property '{prop_name}'")
+
+        tracker.mark_flushed(property_names)
+
     def flush_population_properties(self, world, property_names):
         """
         Write person property columns to the canonical file mid-timeline.
@@ -87,25 +119,11 @@ class WorldSerializer:
                 "call export_core() first."
             )
         configured = self.config.get_person_properties()
-        self._population_flush.validate(property_names, configured)
-
         people_sorted, _ = self._stable_sort_by_geo_unit(world.population.people)
-
-        # Cohort must match any earlier flush: columns from both steps share
-        # one row order (see docs/adr/0003).
-        cohort_ids = [person.id for person in people_sorted]
-        self._population_flush.record_flush(cohort_ids)
-
-        with h5py.File(self._core_output_file, 'r+') as f:
-            props_group = f['population'].require_group('properties')
-            for prop_name in property_names:
-                self._write_property_array(props_group, prop_name, people_sorted)
-                if prop_name in props_group:  # absent if every value was None
-                    props_group[prop_name].attrs['flushed_by_step'] = \
-                        'flush_properties(target=population)'
-                logger.info(f"  Flushed population property '{prop_name}'")
-
-        self._population_flush.mark_flushed(property_names)
+        self._flush_cohort_properties(
+            self._population_flush, ['population', 'properties'], people_sorted,
+            configured, property_names, 'flush_properties(target=population)',
+        )
 
     def flush_geography_properties(self, world, property_names):
         """
@@ -122,25 +140,11 @@ class WorldSerializer:
                 "call export_core() first."
             )
         configured = self.config.get_geography_settings()['properties']
-        self._geography_flush.validate(property_names, configured)
-
         units_list = sorted(world.geography.units_by_id.values(), key=lambda u: u.id)
-
-        # Cohort must match any earlier flush: columns from both steps share
-        # one row order (see docs/adr/0003).
-        cohort_ids = [unit.id for unit in units_list]
-        self._geography_flush.record_flush(cohort_ids)
-
-        with h5py.File(self._core_output_file, 'r+') as f:
-            props_group = f['geography'].require_group('properties')
-            for prop_name in property_names:
-                self._write_property_array(props_group, prop_name, units_list)
-                if prop_name in props_group:  # absent if every value was None
-                    props_group[prop_name].attrs['flushed_by_step'] = \
-                        'flush_properties(target=geo_units)'
-                logger.info(f"  Flushed geography property '{prop_name}'")
-
-        self._geography_flush.mark_flushed(property_names)
+        self._flush_cohort_properties(
+            self._geography_flush, ['geography', 'properties'], units_list,
+            configured, property_names, 'flush_properties(target=geo_units)',
+        )
 
     def flush_venue_properties(self, world, venue_type, property_names):
         """
@@ -159,28 +163,16 @@ class WorldSerializer:
             )
         configured = self.config.get_venue_properties(venue_type)
         tracker = self._venue_flushes.setdefault(venue_type, CohortFlushTracker(venue_type))
-        tracker.validate(property_names, configured)
 
         # Cohort order: within-type slice of the stable geo-sort applied to
         # the full venue list by _write_venues().
         venues_of_type = [v for v in world.venues.get_all_venues_list() if v.type == venue_type]
         cohort_sorted, _ = self._stable_sort_by_geo_unit(venues_of_type)
-
-        # Cohort must match any earlier partial flush of the same type:
-        # columns from both steps share one row order.
-        cohort_ids = [venue.id for venue in cohort_sorted]
-        tracker.record_flush(cohort_ids)
-
-        with h5py.File(self._core_output_file, 'r+') as f:
-            type_group = f.require_group('venues').require_group('properties').require_group(venue_type)
-            for prop_name in property_names:
-                self._write_property_array(type_group, prop_name, cohort_sorted)
-                if prop_name in type_group:  # absent if every value was None
-                    type_group[prop_name].attrs['flushed_by_step'] = \
-                        f'flush_properties(target=venues, venue_type={venue_type})'
-                logger.info(f"  Flushed {venue_type} property '{prop_name}'")
-
-        tracker.mark_flushed(property_names)
+        self._flush_cohort_properties(
+            tracker, ['venues', 'properties', venue_type], cohort_sorted,
+            configured, property_names,
+            f'flush_properties(target=venues, venue_type={venue_type})',
+        )
 
     def export(self, world, output_file):
         """
