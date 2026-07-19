@@ -15,14 +15,14 @@ FLUSH_SPECS = {
             world._serializer.flush_population_properties(world, properties)
         ),
         cohort=lambda world, venue_type: world.population.people,
-        registry=lambda world, venue_type: world._flushed_person_property_names,
+        registry=lambda world, venue_type: world._serializer._population_flush.flushed_names,
     ),
     "geo_units": FlushSpec(
         serializer_call=lambda world, venue_type, properties: (
             world._serializer.flush_geography_properties(world, properties)
         ),
         cohort=lambda world, venue_type: world.geography.units_by_id.values(),
-        registry=lambda world, venue_type: world._flushed_geo_unit_property_names,
+        registry=lambda world, venue_type: world._serializer._geography_flush.flushed_names,
     ),
     "venues": FlushSpec(
         serializer_call=lambda world, venue_type, properties: (
@@ -30,7 +30,7 @@ FLUSH_SPECS = {
         ),
         cohort=lambda world, venue_type: world.venues.get_venues_by_type(venue_type),
         registry=lambda world, venue_type: (
-            world._flushed_venue_property_names_by_type.setdefault(venue_type, set())
+            world._serializer._venue_flushes[venue_type].flushed_names
         ),
     ),
 }

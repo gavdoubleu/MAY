@@ -47,11 +47,6 @@ class World:
         # export_to_hdf5() so the final export reopens the canonical file
         # in 'r+' instead of rewriting it. See docs/adr/0003.
         self._serializer = None
-        # Shared tombstone registry for flushed person properties — every
-        # Person's TombstonedProperties consults this one set (may/flushing.py).
-        self._flushed_person_property_names = set()
-        self._flushed_geo_unit_property_names = set()
-        self._flushed_venue_property_names_by_type = {}
 
         # Register residence types from venue configuration with Person class
         if venues:
