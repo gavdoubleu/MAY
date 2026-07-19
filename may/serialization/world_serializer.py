@@ -46,6 +46,14 @@ class WorldSerializer:
         self._population_flush = CohortFlushTracker("population")
         self._geography_flush = CohortFlushTracker("geo_units")
         self._venue_flushes = {}
+        # Cohort sort caches for repeated flush_*_properties calls on the
+        # same target, reused across calls when cohort count is unchanged
+        # (see docs/adr/0006). Independent of, and never shared with,
+        # export()'s own self._people_sorted/self._geo_units_sorted, which
+        # always recompute fresh per export() call.
+        self._population_flush_sorted = None
+        self._geography_flush_sorted = None
+        self._venue_flush_sorted = {}
 
     def export_core(self, world, output_file):
         """
@@ -78,10 +86,19 @@ class WorldSerializer:
         validate, record the cohort's row-id sequence against the tracker,
         write one dataset per property under `group_path` (require_group'd
         in sequence) in `cohort_sorted` order, stamp each with a
-        'flushed_by_step' attr, then mark the properties flushed on
-        `tracker`. Callers own the canonical-file check, the target-specific
-        cohort sort and the configured-properties lookup — this only knows
-        how to write a cohort's flush once those are settled.
+        'flushed_by_step' attr, then mark flushed on `tracker` only those
+        properties that actually got a dataset written. Callers own the
+        canonical-file check, the target-specific cohort sort and the
+        configured-properties lookup — this only knows how to write a
+        cohort's flush once those are settled.
+
+        A property with every live value `None` at flush time gets no
+        dataset (see `_write_property_array`) and is therefore left off
+        `tracker`'s flushed set: it stays live in memory, un-tombstoned,
+        and may be requested again by a later flush_properties call or
+        picked up at final export once it has real values. Returns the
+        list of property names actually written, so callers know what to
+        tombstone.
         """
         tracker.validate(property_names, configured_properties)
 
@@ -90,17 +107,32 @@ class WorldSerializer:
         cohort_ids = [obj.id for obj in cohort_sorted]
         tracker.record_flush(cohort_ids)
 
+        written_names = []
         with h5py.File(self._core_output_file, 'r+') as f:
             group = f
             for name in group_path:
                 group = group.require_group(name)
             for prop_name in property_names:
+                # A retry after a mid-loop failure re-enters from the first
+                # property, so an earlier attempt may already have written
+                # this dataset; drop it first so h5py's create_dataset does
+                # not raise on the name collision.
+                if prop_name in group:
+                    del group[prop_name]
                 self._write_property_array(group, prop_name, cohort_sorted)
                 if prop_name in group:  # absent if every value was None
                     group[prop_name].attrs['flushed_by_step'] = flushed_by_step_label
-                logger.info(f"  Flushed {log_label} property '{prop_name}'")
+                    written_names.append(prop_name)
+                    logger.info(f"  Flushed {log_label} property '{prop_name}'")
+                else:
+                    logger.warning(
+                        f"  Deferred {log_label} property '{prop_name}': "
+                        f"all values were None, nothing written; not marked "
+                        f"flushed, still live for a later flush/export."
+                    )
 
-        tracker.mark_flushed(property_names)
+        tracker.mark_flushed(written_names)
+        return written_names
 
     def flush_population_properties(self, world, property_names):
         """
@@ -111,7 +143,14 @@ class WorldSerializer:
         order. Datasets are created lazily here — dtype inferred from live
         values (see docs/adr/0003). Each written dataset is stamped with a
         'flushed_by_step' attr for inspection; the authoritative skip list
-        for the final export is self._population_flush.flushed_names.
+        for the final export is self._population_flush.flushed_names. A
+        requested property with every value `None` is deferred rather than
+        flushed — see _flush_cohort_properties. Returns the property names
+        actually written.
+
+        The cohort sort is cached in self._population_flush_sorted and
+        reused across repeated calls when the population count is
+        unchanged, rather than re-sorted every call — see docs/adr/0006.
         """
         if self._core_output_file is None:
             raise RuntimeError(
@@ -119,9 +158,13 @@ class WorldSerializer:
                 "call export_core() first."
             )
         configured = self.config.get_person_properties()
-        people_sorted, _ = self._stable_sort_by_geo_unit(world.population.people)
-        self._flush_cohort_properties(
-            self._population_flush, ['population', 'properties'], people_sorted,
+        people = world.population.people
+        self._population_flush_sorted = self._cached_or_resorted(
+            self._population_flush_sorted, len(people),
+            lambda: self._stable_sort_by_geo_unit(people)[0],
+        )
+        return self._flush_cohort_properties(
+            self._population_flush, ['population', 'properties'], self._population_flush_sorted,
             configured, property_names, 'flush_properties(target=population)',
             log_label='population',
         )
@@ -130,10 +173,17 @@ class WorldSerializer:
         """
         Write geographical unit property columns to the canonical file
         mid-timeline. Mirrors flush_population_properties(): lazy datasets
-        under /geography/properties in the id-sorted row order used by
+        under /geography/properties in the geo-sorted row order used by
         _write_geography_core(), stamped with a 'flushed_by_step' attr; the
         authoritative skip list for the final export is
-        self._geography_flush.flushed_names.
+        self._geography_flush.flushed_names. A requested property with
+        every value `None` is deferred rather than flushed — see
+        _flush_cohort_properties. Returns the property names actually
+        written.
+
+        The cohort sort is cached in self._geography_flush_sorted and
+        reused across repeated calls when the unit count is unchanged,
+        rather than re-sorted every call — see docs/adr/0006.
         """
         if self._core_output_file is None:
             raise RuntimeError(
@@ -141,9 +191,15 @@ class WorldSerializer:
                 "call export_core() first."
             )
         configured = self.config.get_geography_settings()['properties']
-        units_list = sorted(world.geography.units_by_id.values(), key=lambda u: u.id)
-        self._flush_cohort_properties(
-            self._geography_flush, ['geography', 'properties'], units_list,
+        units_by_id = world.geography.units_by_id
+        self._geography_flush_sorted = self._cached_or_resorted(
+            self._geography_flush_sorted, len(units_by_id),
+            lambda: self._stable_sort_by_geo_unit(
+                list(units_by_id.values()), geo_unit_key=lambda u: u
+            )[0],
+        )
+        return self._flush_cohort_properties(
+            self._geography_flush, ['geography', 'properties'], self._geography_flush_sorted,
             configured, property_names, 'flush_properties(target=geo_units)',
             log_label='geography',
         )
@@ -156,7 +212,14 @@ class WorldSerializer:
         align with ranks_in_type. The cohort must be closed — its Venue.id
         sequence is recorded here and re-verified at final export, which
         fails loud if venues of the type were added, removed or reordered
-        after the flush.
+        after the flush. A requested property with every value `None` is
+        deferred rather than flushed — see _flush_cohort_properties.
+        Returns the property names actually written.
+
+        The cohort sort is cached per venue_type in
+        self._venue_flush_sorted and reused across repeated calls for the
+        same type when its venue count is unchanged, rather than re-sorted
+        every call — see docs/adr/0006.
         """
         if self._core_output_file is None:
             raise RuntimeError(
@@ -168,9 +231,14 @@ class WorldSerializer:
 
         # Cohort order: within-type slice of the stable geo-sort applied to
         # the full venue list by _write_venues().
-        venues_of_type = [v for v in world.venues.get_all_venues_list() if v.type == venue_type]
-        cohort_sorted, _ = self._stable_sort_by_geo_unit(venues_of_type)
-        self._flush_cohort_properties(
+        venues_of_type = world.venues.get_venues_by_type(venue_type)
+        cached = self._venue_flush_sorted.get(venue_type)
+        cohort_sorted = self._cached_or_resorted(
+            cached, len(venues_of_type),
+            lambda: self._stable_sort_by_geo_unit(venues_of_type)[0],
+        )
+        self._venue_flush_sorted[venue_type] = cohort_sorted
+        return self._flush_cohort_properties(
             tracker, ['venues', 'properties', venue_type], cohort_sorted,
             configured, property_names,
             f'flush_properties(target=venues, venue_type={venue_type})',
@@ -189,6 +257,7 @@ class WorldSerializer:
         self._venue_to_global_id = {}
         self._venue_type_id_map = {}
         self._people_sorted = None
+        self._geo_units_sorted = None
         logger.info("=" * 60)
         logger.info("Exporting World to HDF5")
         logger.info("=" * 60)
@@ -214,7 +283,13 @@ class WorldSerializer:
 
             # Write geography
             logger.info("Serializing geography...")
-            if not core_written:
+            if core_written:
+                # Re-derive the frozen row order (stable sort of immutable
+                # geo_unit ids — identical to the export_core() order).
+                self._geo_units_sorted, _ = self._stable_sort_by_geo_unit(
+                    list(world.geography.units_by_id.values()), geo_unit_key=lambda u: u
+                )
+            else:
                 self._write_geography_core(f, world)
             self._write_geography_properties(f, world)
             stats['num_geo_units'] = len(world.geography.get_all_units())
@@ -286,7 +361,13 @@ class WorldSerializer:
         # occur at multiple levels (e.g. SGU "DURHAM" parish under MGU
         # "DURHAM" county), so keying by ID captures every unit and all
         # hierarchy levels in the export.
-        units_list = sorted(world.geography.units_by_id.values(), key=lambda u: u.id)
+        units_list, _ = self._stable_sort_by_geo_unit(
+            list(world.geography.units_by_id.values()), geo_unit_key=lambda u: u
+        )
+
+        # Store sorted units for property serialization within this
+        # export() call (mirrors self._people_sorted for population).
+        self._geo_units_sorted = units_list
 
         if not units_list:
             logger.warning("No geographical units to serialize")
@@ -349,7 +430,7 @@ class WorldSerializer:
 
     def _write_geography_properties(self, f, world):
         """Write configured geography property datasets to HDF5."""
-        units_list = sorted(world.geography.units_by_id.values(), key=lambda u: u.id)
+        units_list = self._geo_units_sorted
 
         # Flushed cohort must not have drifted: columns written at flush
         # time are aligned to the cohort order recorded then.
@@ -377,15 +458,17 @@ class WorldSerializer:
     def _stable_sort_by_geo_unit(self, objects, geo_unit_key=lambda obj: obj.geographical_unit):
         """
         Frozen row order shared by every geo-sorted cohort (population,
-        venues, subsets, and the venue-type flush cohort): stable sort by
-        geo_unit id, missing units last (-1). Deterministic over the run
-        (ids/geo assignment never mutate), so early core writes, flush
-        steps and the final export all agree on row positions.
+        geo_units, venues, subsets, and the venue-type flush cohort):
+        stable sort by geo_unit id, missing units last (-1). Deterministic
+        over the run (ids/geo assignment never mutate), so early core
+        writes, flush steps and the final export all agree on row
+        positions.
 
         `geo_unit_key` extracts the GeographicalUnit to sort by (or None);
         defaults to `obj.geographical_unit` for objects that carry it
         directly (people, venues). Subsets pass
-        `lambda subset: subset.venue.geographical_unit`.
+        `lambda subset: subset.venue.geographical_unit`; geo_units pass
+        `lambda unit: unit` to sort by their own id.
         """
         geo_unit_ids_raw = np.array(
             [(geo_unit_key(obj).id if geo_unit_key(obj) else -1) for obj in objects],
@@ -394,6 +477,21 @@ class WorldSerializer:
         sort_idx = np.argsort(geo_unit_ids_raw, kind='stable')
         objects_sorted = [objects[i] for i in sort_idx]
         return objects_sorted, geo_unit_ids_raw[sort_idx]
+
+    def _cached_or_resorted(self, cached_sorted, live_count, compute_fresh):
+        """
+        Reuse `cached_sorted` (a previous flush call's sorted cohort) when
+        its length still matches `live_count`, else call `compute_fresh()`
+        for a full resort. See docs/adr/0006: a count match is trusted as
+        sufficient evidence the cohort hasn't drifted, without re-verifying
+        order — CohortFlushTracker.record_flush()/check_drift() remain the
+        backstop that catches a genuine drift (count mismatch, or anything
+        export() re-derives fresh and compares against the recorded
+        baseline).
+        """
+        if cached_sorted is not None and len(cached_sorted) == live_count:
+            return cached_sorted
+        return compute_fresh()
 
     def _write_population_core(self, f, world):
         """Write population core datasets (no properties) to HDF5."""
@@ -834,14 +932,11 @@ class WorldSerializer:
         venues_group = f.require_group('venues')
         venue_global_settings = self.config.get_venue_global_settings()
 
-        # Get all venues as a list
+        # Get all venues as a list. No early-return guard for the empty
+        # case: _write_venue_properties' drift check (docs/adr/0005) must
+        # still run when every venue has been removed post-flush, and the
+        # downstream per-step writers already handle a zero-length list.
         all_venues = world.venues.get_all_venues_list()
-        if not all_venues:
-            logger.warning("No venues to serialize")
-            # Initialize empty mapping for activity map serialization
-            self._venue_to_global_id = {}
-            return 0
-
         num_venues = len(all_venues)
 
         # Sort venues by their geographical unit ID

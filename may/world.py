@@ -247,6 +247,11 @@ class World:
         FlushedPropertyError (see may/flushing.py). The final export skips
         flushed columns.
 
+        A requested property whose every live value is `None` is deferred:
+        nothing is written, it is not tombstoned, and it may be requested
+        again by a later flush_properties call or picked up at final
+        export once it has real values.
+
         Args:
             target: 'population', 'geo_units' or 'venues'
             properties: non-empty list of property names to flush
@@ -282,9 +287,9 @@ class World:
         from may.serialization.flush_specs import FLUSH_SPECS
 
         spec = FLUSH_SPECS[target]
-        spec.serializer_call(self, venue_type, properties)
+        written_properties = spec.serializer_call(self, venue_type, properties)
         tombstone_objects(
-            spec.cohort(self, venue_type), properties,
+            spec.cohort(self, venue_type), written_properties,
             spec.registry(self, venue_type),
         )
 

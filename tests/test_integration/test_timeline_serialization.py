@@ -392,6 +392,34 @@ class TestFlushPropertiesPopulation:
         with pytest.raises(RuntimeError, match="cohort"):
             world.export_to_hdf5(canonical_path, config_file=None)
 
+    def test_all_none_property_is_deferred_not_lost(self, world_with_ethnicity):
+        """A property with every value still None at flush time (e.g. its
+        distributor step hasn't run yet) must not be marked flushed or
+        tombstoned: it stays live so a later flush/export can pick it up
+        once it has real values."""
+        world, canonical_path = world_with_ethnicity
+        # work_mode is configured but nobody has a value for it yet.
+        world.flush_properties(target="population", properties=["ethnicity", "work_mode"])
+
+        with h5py.File(canonical_path, 'r') as f:
+            assert "work_mode" not in f['population/properties']
+
+        # Not tombstoned: still readable, still None.
+        for person in world.population.people:
+            assert person.properties.get("work_mode") is None
+        for person in world.population.people:
+            person.properties["work_mode"] = f"mode_{person.id % 2}"
+
+        # Deferred property can be flushed for real once it has values.
+        world.flush_properties(target="population", properties=["work_mode"])
+
+        with h5py.File(canonical_path, 'r') as f:
+            dataset = f['population/properties/work_mode']
+            person_ids = f['population/ids'][:]
+            values = [v.decode() for v in dataset[:]]
+            for person_id, value in zip(person_ids, values):
+                assert value == f"mode_{person_id % 2}"
+
     def test_cohort_drift_between_partial_flushes_fails_loud(self, world_with_ethnicity):
         """Two flush steps may split population properties, but the cohort
         must not change between them: the second flush re-verifies the
@@ -407,6 +435,47 @@ class TestFlushPropertiesPopulation:
 
         with pytest.raises(RuntimeError, match="cohort"):
             world.flush_properties(target="population", properties=["work_mode"])
+
+    def test_retry_after_mid_loop_failure_does_not_raise_on_duplicate_dataset(
+        self, world_with_ethnicity
+    ):
+        """A property whose dataset was written before a later property in
+        the same flush call raised must not block a retry: h5py's
+        create_dataset raises on a name collision, so a naive retry of the
+        identical flush_properties call would previously fail with a
+        confusing 'name already exists' error instead of the original
+        cause."""
+        world, canonical_path = world_with_ethnicity
+        for person in world.population.people:
+            person.properties["work_mode"] = f"mode_{person.id % 2}"
+
+        original_write = world._serializer._write_property_array
+        state = {"raise_once": True}
+
+        def flaky_write(group, prop_name, objects):
+            if prop_name == "work_mode" and state["raise_once"]:
+                state["raise_once"] = False
+                raise IOError("simulated transient failure")
+            return original_write(group, prop_name, objects)
+
+        world._serializer._write_property_array = flaky_write
+
+        with pytest.raises(IOError, match="simulated transient failure"):
+            world.flush_properties(target="population", properties=["ethnicity", "work_mode"])
+
+        # Retry the identical call: must succeed, not raise on the
+        # already-on-disk 'ethnicity' dataset from the failed attempt.
+        world.flush_properties(target="population", properties=["ethnicity", "work_mode"])
+
+        with h5py.File(canonical_path, 'r') as f:
+            person_ids = f['population/ids'][:]
+            ethnicity_values = [v.decode() for v in f['population/properties/ethnicity'][:]]
+            work_mode_values = [v.decode() for v in f['population/properties/work_mode'][:]]
+            for person_id, ethnicity_value, work_mode_value in zip(
+                person_ids, ethnicity_values, work_mode_values
+            ):
+                assert ethnicity_value == f"group_{person_id % 3}"
+                assert work_mode_value == f"mode_{person_id % 2}"
 
 
 class TestFlushPropertiesGeoUnits:
@@ -665,6 +734,21 @@ class TestFlushPropertiesVenues:
         for venue in list(world.venues.get_all_venues_list()):
             if venue.type == self.VENUE_TYPE:
                 world.venues.remove_venue(venue)
+
+        with pytest.raises(RuntimeError, match="cohort"):
+            world.export_to_hdf5(canonical_path, config_file=None)
+
+    def test_cohort_fully_removed_after_flush_fails_loud_at_export_all_venues_empty(
+            self, world_with_venue_properties):
+        """Same as the sibling test, but every venue of every type is gone,
+        not just the flushed type — this hit the _write_venues early-return
+        guard rather than the per-type export loop."""
+        world, canonical_path = world_with_venue_properties
+        world.flush_properties(target="venues", venue_type=self.VENUE_TYPE,
+                               properties=["capacity", "sector"])
+
+        for venue in list(world.venues.get_all_venues_list()):
+            world.venues.remove_venue(venue)
 
         with pytest.raises(RuntimeError, match="cohort"):
             world.export_to_hdf5(canonical_path, config_file=None)
