@@ -293,7 +293,7 @@ class World:
             spec.registry(self, venue_type),
         )
 
-    def export_to_hdf5(self, output_file, config_file):
+    def export_to_hdf5(self, output_file, config_file=None):
         """
         Export world state to HDF5 file for C++ simulation.
 
@@ -302,12 +302,17 @@ class World:
         by the C++ simulation engine.
 
         The serialization configuration (config_file) determines which extra
-        properties are included in the export. It is required: there is no
+        properties are included in the export. If create_canonical_file() was
+        already called on this world, its config is reused: config_file may be
+        omitted, or if given must resolve to that same config, otherwise a
+        ValueError is raised. Otherwise config_file is required: there is no
         scenario-generic default schema.
 
         Args:
             output_file: Path to output HDF5 file
-            config_file: Path to serialization YAML config (required)
+            config_file: Path to serialization YAML config. Required unless
+                create_canonical_file() was already called on this world, in
+                which case it must match that config if given at all.
 
         Returns:
             dict: Export statistics (num_people, num_venues, etc.)
@@ -323,6 +328,14 @@ class World:
         logger.info("=" * 60)
 
         if self._serializer is not None:
+            if config_file is not None:
+                resolved_config_file = pr.resolve(config_file)
+                if resolved_config_file != self._serializer.config.config_file:
+                    raise ValueError(
+                        f"export_to_hdf5 config_file {resolved_config_file!r} does "
+                        f"not match config {self._serializer.config.config_file!r} "
+                        "used by create_canonical_file()"
+                    )
             serializer = self._serializer
         else:
             serializer = WorldSerializer(config_file=pr.resolve(config_file))

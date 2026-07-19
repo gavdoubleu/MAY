@@ -288,6 +288,12 @@ class TestEarlyCanonicalFileEquivalence:
         with pytest.raises(ValueError, match="canonical"):
             minimal_world.export_to_hdf5(str(tmp_path / "other.h5"), config_file=config_file)
 
+    def test_export_with_different_config_than_canonical_fails_loud(self, minimal_world, tmp_path):
+        canonical_path = str(tmp_path / "canonical.h5")
+        minimal_world.create_canonical_file(canonical_path, config_file="configs/2021/serialization_config.yaml")
+        with pytest.raises(ValueError, match="config_file"):
+            minimal_world.export_to_hdf5(canonical_path, config_file="configs/1911/serialization_config.yaml")
+
 
 class TestFlushPropertiesPopulation:
     """Mid-timeline flush of person properties to the canonical file
