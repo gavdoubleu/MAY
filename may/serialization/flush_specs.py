@@ -28,9 +28,7 @@ FLUSH_SPECS = {
         serializer_call=lambda world, venue_type, properties: (
             world._serializer.flush_venue_properties(world, venue_type, properties)
         ),
-        cohort=lambda world, venue_type: [
-            v for v in world.venues.get_all_venues_list() if v.type == venue_type
-        ],
+        cohort=lambda world, venue_type: world.venues.get_venues_by_type(venue_type),
         registry=lambda world, venue_type: (
             world._flushed_venue_property_names_by_type.setdefault(venue_type, set())
         ),

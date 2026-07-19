@@ -72,7 +72,7 @@ class WorldSerializer:
 
     def _flush_cohort_properties(self, tracker, group_path, cohort_sorted,
                                   configured_properties, property_names,
-                                  flushed_by_step_label):
+                                  flushed_by_step_label, log_label):
         """
         Shared body of flush_{population,geography,venue}_properties():
         validate, record the cohort's row-id sequence against the tracker,
@@ -98,7 +98,7 @@ class WorldSerializer:
                 self._write_property_array(group, prop_name, cohort_sorted)
                 if prop_name in group:  # absent if every value was None
                     group[prop_name].attrs['flushed_by_step'] = flushed_by_step_label
-                logger.info(f"  Flushed {tracker.label} property '{prop_name}'")
+                logger.info(f"  Flushed {log_label} property '{prop_name}'")
 
         tracker.mark_flushed(property_names)
 
@@ -123,6 +123,7 @@ class WorldSerializer:
         self._flush_cohort_properties(
             self._population_flush, ['population', 'properties'], people_sorted,
             configured, property_names, 'flush_properties(target=population)',
+            log_label='population',
         )
 
     def flush_geography_properties(self, world, property_names):
@@ -144,6 +145,7 @@ class WorldSerializer:
         self._flush_cohort_properties(
             self._geography_flush, ['geography', 'properties'], units_list,
             configured, property_names, 'flush_properties(target=geo_units)',
+            log_label='geography',
         )
 
     def flush_venue_properties(self, world, venue_type, property_names):
@@ -172,6 +174,7 @@ class WorldSerializer:
             tracker, ['venues', 'properties', venue_type], cohort_sorted,
             configured, property_names,
             f'flush_properties(target=venues, venue_type={venue_type})',
+            log_label=venue_type,
         )
 
     def export(self, world, output_file):
