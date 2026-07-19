@@ -311,6 +311,39 @@ class TestFlushPropertiesPopulation:
         minimal_world.create_canonical_file(canonical_path, config_file=self.CONFIG_FILE)
         return minimal_world, canonical_path
 
+    @pytest.fixture
+    def empty_population_world(self):
+        """A world with geo units/venues but zero people. Exercises the
+        degenerate empty-cohort case for population properties."""
+        from may.world import World
+        from may.geography import Geography, GeographicalUnit, Venue, VenueManager
+        from may.population import PopulationManager
+
+        geo = Geography(data_dir="", levels=["Region", "MGU", "SGU"])
+        root = GeographicalUnit(id=1, name="region_1", level="Region")
+        geo.add_geo_unit(root)
+        mgu = GeographicalUnit(id=2, name="mgu_1", level="MGU", parent=root)
+        geo.add_geo_unit(mgu)
+        sgu = GeographicalUnit(id=3, name="sgu_1", level="SGU", parent=mgu)
+        geo.add_geo_unit(sgu)
+
+        venues = VenueManager(geo, data_dir="")
+        venues.add_venue(Venue(name="house_1", venue_type="company", geographical_unit=sgu))
+
+        pop = PopulationManager(geo, data_dir="")
+        return World(geography=geo, population=pop, venues=venues)
+
+    def test_properties_group_created_for_empty_people_cohort(
+        self, empty_population_world, tmp_path
+    ):
+        """Pre-refactor behaviour: the /population/properties group exists
+        whenever properties are configured, regardless of people count."""
+        export_path = str(tmp_path / "empty_population.h5")
+        empty_population_world.export_to_hdf5(export_path, config_file=self.CONFIG_FILE)
+
+        with h5py.File(export_path, 'r') as f:
+            assert 'properties' in f['population']
+
     def test_flush_writes_property_column_in_frozen_row_order(self, world_with_ethnicity):
         world, canonical_path = world_with_ethnicity
         expected = {p.id: p.properties["ethnicity"] for p in world.population.people}
@@ -511,6 +544,31 @@ class TestFlushPropertiesGeoUnits:
         minimal_world.create_canonical_file(canonical_path, config_file=geo_config_file)
         return minimal_world, canonical_path
 
+    @pytest.fixture
+    def empty_geo_world(self):
+        """A world with zero geographical units (and consequently zero
+        venues/people, which require one). Exercises the degenerate
+        empty-cohort case for geography properties."""
+        from may.world import World
+        from may.geography import Geography, VenueManager
+        from may.population import PopulationManager
+
+        geo = Geography(data_dir="", levels=["Region", "MGU", "SGU"])
+        venues = VenueManager(geo, data_dir="")
+        pop = PopulationManager(geo, data_dir="")
+        return World(geography=geo, population=pop, venues=venues)
+
+    def test_properties_group_created_for_empty_geo_unit_cohort(
+        self, empty_geo_world, geo_config_file, tmp_path
+    ):
+        """Pre-refactor behaviour: the /geography/properties group exists
+        whenever properties are configured, regardless of unit count."""
+        export_path = str(tmp_path / "empty_geo.h5")
+        empty_geo_world.export_to_hdf5(export_path, config_file=geo_config_file)
+
+        with h5py.File(export_path, 'r') as f:
+            assert 'properties' in f['geography']
+
     def test_flush_writes_geo_property_column_in_id_order(self, world_with_geo_property):
         world, canonical_path = world_with_geo_property
         expected = {unit.id: unit.properties[self.GEO_PROPERTY]
@@ -651,6 +709,26 @@ class TestFlushPropertiesVenues:
         companies = [v for v in world.venues.get_all_venues_list()
                      if v.type == self.VENUE_TYPE]
         return sorted(companies, key=lambda v: v.geographical_unit.id)
+
+    def test_properties_subgroup_created_for_venue_type_with_zero_venues(
+        self, minimal_world, tmp_path
+    ):
+        """A configured venue type with no current venues (e.g. never
+        added to this world) must still get its per-type properties
+        subgroup, matching every other configured type."""
+        import yaml
+        empty_type = "hospital"
+        with open("configs/2021/serialization_config.yaml") as f:
+            config = yaml.safe_load(f)
+        config["venues"]["types"][empty_type] = {"properties": ["beds"]}
+        config_path = tmp_path / "serialization_config_empty_venue_type.yaml"
+        config_path.write_text(yaml.safe_dump(config))
+
+        export_path = str(tmp_path / "export.h5")
+        minimal_world.export_to_hdf5(export_path, config_file=str(config_path))
+
+        with h5py.File(export_path, 'r') as f:
+            assert empty_type in f['venues/properties']
 
     def test_flush_writes_venue_property_columns_in_cohort_order(self, world_with_venue_properties):
         world, canonical_path = world_with_venue_properties

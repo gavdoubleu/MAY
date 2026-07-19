@@ -446,8 +446,6 @@ class WorldSerializer:
         ]
         if not properties_to_include:
             return
-        if not units_list:
-            return
 
         geo_group = f['geography']
         props_group = geo_group.require_group('properties')
@@ -497,6 +495,12 @@ class WorldSerializer:
         """Write population core datasets (no properties) to HDF5."""
         pop_group = f.create_group('population')
 
+        people_sorted, geo_unit_ids_sorted = self._stable_sort_by_geo_unit(world.population.people)
+
+        # Store sorted people for property serialization within this
+        # export() call (mirrors self._geo_units_sorted for geography).
+        self._people_sorted = people_sorted
+
         people = world.population.people
         if not people:
             logger.warning("No people to serialize")
@@ -505,12 +509,6 @@ class WorldSerializer:
         num_people = len(people)
 
         logger.info(f"  Serializing {num_people:,} people...")
-
-        people_sorted, geo_unit_ids_sorted = self._stable_sort_by_geo_unit(world.population.people)
-
-        # Store sorted people for activity mapping serialization
-        self._people_sorted = people_sorted
-
         logger.info(f"    ✓ Sorted {num_people:,} people by geo_unit_id")
 
         logger.info(f"    Building partition index...")
@@ -562,9 +560,6 @@ class WorldSerializer:
             if name not in self._population_flush.flushed_names
         ]
         if not properties_to_include:
-            return
-        if not self._people_sorted:
-            logger.warning("No people to serialize properties for")
             return
 
         pop_group = f['population']
@@ -1055,7 +1050,12 @@ class WorldSerializer:
             current_cohort_ids = [venue.id for venue in venues_by_type.get(venue_type, [])]
             tracker.check_drift(current_cohort_ids)
 
-        for venue_type, venues in venues_by_type.items():
+        # Configured types with zero current venues (e.g. never populated,
+        # or fully removed post-flush) must still get their subgroup —
+        # mirrors the drift-check loop above, not just venues_by_type.
+        all_venue_types = set(venues_by_type) | set(self.config.venue_type_properties)
+        for venue_type in all_venue_types:
+            venues = venues_by_type.get(venue_type, [])
             # Columns already written by flush_properties steps are skipped:
             # their in-memory values are tombstoned (may/flushing.py).
             tracker = self._venue_flushes.get(venue_type)
