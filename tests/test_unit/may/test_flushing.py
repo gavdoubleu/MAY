@@ -178,6 +178,32 @@ class TestGuttedMembers:
         with pytest.raises(FlushedPropertyError):
             gutted.remove("person")
 
+    def test_uncovered_set_methods_raise_curated_error(self):
+        """clear/update/pop/... fall through to __getattr__, which must
+        raise FlushedPropertyError rather than a bare AttributeError."""
+        gutted = GuttedMembers(3)
+
+        for method_name in ("clear", "update", "pop", "union", "difference_update"):
+            with pytest.raises(FlushedPropertyError):
+                getattr(gutted, method_name)
+
+    def test_in_place_union_raises(self):
+        gutted = GuttedMembers(3)
+
+        with pytest.raises(FlushedPropertyError):
+            gutted |= {"person"}
+
+    def test_dunder_probe_keeps_attributeerror_semantics(self):
+        """Copy/pickle protocol lookups must see AttributeError, not the
+        curated error, so generic machinery isn't broken by the sentinel."""
+        gutted = GuttedMembers(3)
+
+        with pytest.raises(AttributeError):
+            gutted.__deepcopy__
+
+    def test_len_still_answers_from_cached_count(self):
+        assert len(GuttedMembers(7)) == 7
+
 
 class TestGuttedMemberMetadata:
 

@@ -566,6 +566,16 @@ class WorldSerializer:
                 # Write registries (Enum mappings for C++)
                 logger.info("Writing string registries...")
                 self._write_registries(f)
+        except BaseException:
+            # Staging survives a failed export by design; say so loudly so
+            # the operator knows a retry can still stream the flushed
+            # subsets back in.
+            if self._core_output_file is not None and os.path.isdir(self._staging_dir()):
+                logger.warning(
+                    f"Export failed; staging directory "
+                    f"{self._staging_dir()!r} is kept for inspection/retry."
+                )
+            raise
         finally:
             # Readers must close even on a failed export: a retry re-inits
             # self._subset_staging_readers, which would orphan open handles.

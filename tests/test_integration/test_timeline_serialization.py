@@ -1064,6 +1064,163 @@ class TestFlushPropertiesVenueSubsets:
 
         assert not staging_dir.exists()
 
+    def test_zero_subset_venue_type_flush_skips_with_warning(self, minimal_world, tmp_path, caplog):
+        """A configured venue_type with no subsets anywhere: skip + warn,
+        no staging file, nothing gutted, export unaffected (mirrors the
+        all-None property-flush policy)."""
+        world = minimal_world
+        canonical_path = str(tmp_path / "canonical.h5")
+        world.create_canonical_file(canonical_path, config_file="configs/2021/serialization_config.yaml")
+
+        with caplog.at_level("WARNING", logger="world_serializer"):
+            world.flush_properties(target="venues", venue_type=self.VENUE_TYPE, properties=[],
+                                   subsets=True)
+
+        assert "No subsets to flush" in caplog.text
+        assert not (tmp_path / "staging").exists()
+        world.export_to_hdf5(canonical_path, config_file=None)  # drift check must be a no-op
+
+    def test_crash_mid_staging_leaves_members_live_then_retry_succeeds(
+        self, world_with_households, tmp_path
+    ):
+        """Verify-then-gut's failure side: a crash during the staging write
+        must leave every subset live (nothing gutted), and an identical
+        retry must succeed."""
+        from may.flushing import FlushedPropertyError
+        world = world_with_households
+        canonical_path = str(tmp_path / "canonical.h5")
+        world.create_canonical_file(canonical_path, config_file="configs/2021/serialization_config.yaml")
+
+        with patch.object(world._serializer, "_create_dataset",
+                          side_effect=RuntimeError("disk full")):
+            with pytest.raises(RuntimeError, match="disk full"):
+                world.flush_properties(target="venues", venue_type=self.VENUE_TYPE,
+                                       properties=[], subsets=True)
+
+        households = world.venues.get_venues_by_type(self.VENUE_TYPE)
+        for household in households:
+            for subset in household.subsets.values():
+                assert len(list(subset.members)) == 5  # still live, not gutted
+
+        world.flush_properties(target="venues", venue_type=self.VENUE_TYPE, properties=[],
+                               subsets=True)  # retry, no raise
+
+        for household in households:
+            for subset in household.subsets.values():
+                with pytest.raises(FlushedPropertyError):
+                    list(subset.members)
+
+        world.export_to_hdf5(canonical_path, config_file=None)
+
+    def test_crash_mid_merge_keeps_staging_warns_and_closes_readers(
+        self, world_with_households, tmp_path, caplog
+    ):
+        """A crash during the final export merge must keep staging/ for
+        inspection/retry, say so with a warning, and close the staging
+        readers (a retry re-inits the reader cache, orphaning open ones)."""
+        world = world_with_households
+        canonical_path = str(tmp_path / "canonical.h5")
+        world.create_canonical_file(canonical_path, config_file="configs/2021/serialization_config.yaml")
+        world.flush_properties(target="venues", venue_type=self.VENUE_TYPE, properties=[],
+                               subsets=True)
+
+        # _write_registries runs after the staged members have been merged
+        # (readers open), so raising there simulates a crash mid-merge.
+        with patch.object(world._serializer, "_write_registries",
+                          side_effect=RuntimeError("merge crash")):
+            with caplog.at_level("WARNING", logger="world_serializer"):
+                with pytest.raises(RuntimeError, match="merge crash"):
+                    world.export_to_hdf5(canonical_path, config_file=None)
+
+        assert (tmp_path / "staging" / f"{self.VENUE_TYPE}.h5").exists()
+        assert "kept for inspection/retry" in caplog.text
+        assert world._serializer._subset_staging_readers == {}
+
+    def test_second_export_after_success_fails_loud(self, world_with_households, tmp_path):
+        """A successful export deletes staging/ but leaves husks behind: a
+        repeat export cannot stream the flushed subsets back, so it must
+        raise a clear error up front rather than an OSError mid-export."""
+        world = world_with_households
+        canonical_path = str(tmp_path / "canonical.h5")
+        world.create_canonical_file(canonical_path, config_file="configs/2021/serialization_config.yaml")
+        world.flush_properties(target="venues", venue_type=self.VENUE_TYPE, properties=[],
+                               subsets=True)
+        world.export_to_hdf5(canonical_path, config_file=None)
+
+        with pytest.raises(RuntimeError, match="exported once"):
+            world.export_to_hdf5(canonical_path, config_file=None)
+
+    def test_repeat_subsets_flush_after_export_fails_loud(self, world_with_households, tmp_path):
+        world = world_with_households
+        canonical_path = str(tmp_path / "canonical.h5")
+        world.create_canonical_file(canonical_path, config_file="configs/2021/serialization_config.yaml")
+        world.flush_properties(target="venues", venue_type=self.VENUE_TYPE, properties=[],
+                               subsets=True)
+        world.export_to_hdf5(canonical_path, config_file=None)
+
+        with pytest.raises(RuntimeError, match="cannot repeat"):
+            world.flush_properties(target="venues", venue_type=self.VENUE_TYPE, properties=[],
+                                   subsets=True)
+
+    def test_member_metadata_reassigned_after_flush_fails_loud_at_export(
+        self, world_with_metadata_subset, tmp_path
+    ):
+        """Plain attribute reassignment of member_metadata on a gutted
+        subset bypasses the sentinel; export would write the staged
+        metadata and silently drop the new rows — must fail loud instead."""
+        world = world_with_metadata_subset
+        canonical_path = str(tmp_path / "canonical.h5")
+        world.create_canonical_file(canonical_path, config_file="configs/2021/serialization_config.yaml")
+        world.flush_properties(target="venues", venue_type=self.VENUE_TYPE, properties=[],
+                               subsets=True)
+
+        households = world.venues.get_venues_by_type(self.VENUE_TYPE)
+        reassigned_subset = next(iter(households[0].subsets.values()))
+        reassigned_subset.member_metadata = {}
+
+        with pytest.raises(RuntimeError, match="reassigned"):
+            world.export_to_hdf5(canonical_path, config_file=None)
+
+    @pytest.fixture
+    def world_with_two_metadata_types(self, world_with_metadata_subset):
+        """Adds a live school subset carrying member_metadata whose field
+        names partially overlap the household metadata, so an export mixing
+        gutted (staged) and live metadata carriers exercises the
+        field-union merge order."""
+        world = world_with_metadata_subset
+        school = world.venues.get_venues_by_type("school")[0]
+        for person in list(world.population.people)[:3]:
+            school.add_to_subset(person)
+        for subset in school.subsets.values():
+            for person in subset.members:
+                subset.member_metadata[person.id] = {
+                    "leg_idx": 1,
+                    "t_board_min": 12,
+                    "t_alight_min": 30,
+                }
+        return world
+
+    def test_mixed_gutted_and_live_metadata_types_match_no_flush_baseline(
+        self, world_with_two_metadata_types, tmp_path
+    ):
+        """Flushing one metadata-carrying venue type while another stays
+        live must still produce a membership_metadata side-table identical
+        to a run that never flushed (row order and field-union order)."""
+        world = world_with_two_metadata_types
+
+        baseline_path = str(tmp_path / "baseline.h5")
+        stats_baseline = world.export_to_hdf5(
+            baseline_path, config_file="configs/2021/serialization_config.yaml")
+
+        flushed_path = str(tmp_path / "flushed.h5")
+        world.create_canonical_file(flushed_path, config_file="configs/2021/serialization_config.yaml")
+        world.flush_properties(target="venues", venue_type=self.VENUE_TYPE, properties=[],
+                               subsets=True)
+        stats_flushed = world.export_to_hdf5(flushed_path, config_file="configs/2021/serialization_config.yaml")
+
+        assert stats_baseline == stats_flushed
+        _assert_h5_equivalent(baseline_path, flushed_path)
+
 
 class TestFlushPropertiesCombinedRetrySafety:
     """A single flush_properties(properties=[...], subsets=True) call must
