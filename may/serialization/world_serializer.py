@@ -570,11 +570,13 @@ class WorldSerializer:
             # Staging survives a failed export by design; say so loudly so
             # the operator knows a retry can still stream the flushed
             # subsets back in.
-            if self._core_output_file is not None and os.path.isdir(self._staging_dir()):
-                logger.warning(
-                    f"Export failed; staging directory "
-                    f"{self._staging_dir()!r} is kept for inspection/retry."
-                )
+            if self._core_output_file is not None:
+                staging_dir = self._staging_dir()
+                if os.path.isdir(staging_dir):
+                    logger.warning(
+                        f"Export failed; staging directory "
+                        f"{staging_dir!r} is kept for inspection/retry."
+                    )
             raise
         finally:
             # Readers must close even on a failed export: a retry re-inits

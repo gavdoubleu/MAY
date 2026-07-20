@@ -201,8 +201,17 @@ class TestGuttedMembers:
         with pytest.raises(AttributeError):
             gutted.__deepcopy__
 
-    def test_len_still_answers_from_cached_count(self):
-        assert len(GuttedMembers(7)) == 7
+    def test_len_still_answers_after_blocked_operations(self):
+        """len must keep answering from the cached count even after blocked
+        set operations have raised."""
+        gutted = GuttedMembers(7)
+
+        with pytest.raises(FlushedPropertyError):
+            gutted.clear
+        with pytest.raises(FlushedPropertyError):
+            gutted.add("person")
+
+        assert len(gutted) == 7
 
 
 class TestGuttedMemberMetadata:

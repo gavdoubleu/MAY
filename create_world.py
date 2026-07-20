@@ -35,7 +35,13 @@ logging.getLogger('numexpr').setLevel(logging.WARNING)
 # MAY_LOG_LEVEL=DEBUG enables this module's per-stage [MEMORY] lines without
 # opening the DEBUG floodgates on every other logger (household allocation
 # alone emits millions of DEBUG lines).
-logger.setLevel(os.environ.get("MAY_LOG_LEVEL", "INFO"))
+may_log_level = os.environ.get("MAY_LOG_LEVEL", "INFO").upper()
+if may_log_level not in logging.getLevelNamesMapping():
+    raise ValueError(
+        f"MAY_LOG_LEVEL={may_log_level!r} is not a recognised logging level; "
+        f"expected one of {sorted(logging.getLevelNamesMapping())}"
+    )
+logger.setLevel(may_log_level)
 
 def set_random_seed(seed=999):
     """
@@ -60,6 +66,8 @@ def log_memory_usage(stage_label):
     MAY_LOG_LEVEL=DEBUG to capture per-stage memory for peak-RSS comparisons
     between flushed and unflushed configs.
     """
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
     status_path = "/proc/self/status"
     if not os.path.exists(status_path):
         return
@@ -250,6 +258,9 @@ def main():
         for step in timeline_config.get("steps", []):
             step_type = step.get("type")
             step_config = pr.resolve(step.get("config"))
+            # Label for the [MEMORY] line; branches without a config: key
+            # (currently only flush_properties) override it below.
+            step_label = step_config or ""
 
             if step_type == "residence_allocation":
                 # Runs the full household + residence-venue allocation strategy
@@ -325,6 +336,10 @@ def main():
                 flush_property_names = step.get("properties")
                 flush_venue_type = step.get("venue_type")
                 flush_subsets = step.get("subsets", False)
+                step_label = (
+                    f"target={flush_target}"
+                    + (f" venue_type={flush_venue_type}" if flush_venue_type else "")
+                )
                 logger.info("")
                 logger.info(
                     f"[FLUSH PROPERTIES] target={flush_target} "
@@ -351,10 +366,6 @@ def main():
             else:
                 logger.warning(f"Unknown timeline step type: {step_type}")
 
-            step_label = step_config if step_config else (
-                f"target={step.get('target')} venue_type={step.get('venue_type')}"
-                if step_type == "flush_properties" else ""
-            )
             log_memory_usage(f"timeline step {step_type} {step_label}".rstrip())
 
         # Commute-mode verification dump (after all assignments/distributors)
