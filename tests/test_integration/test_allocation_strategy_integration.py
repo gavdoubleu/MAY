@@ -409,7 +409,8 @@ class TestCoupleMatchingIntegration:
 
     def test_adult_couple_is_opposite_sex(self, hd):
         """Adult pair matching creates male/female couple in SGU_S2."""
-        np.random.seed(42)
+        # Seed the injected stream so the 95% opposite-sex roll lands
+        hd.set_random_generator(np.random.default_rng(42))
         hd._prepare_person_pools()
 
         # SGU_S2 adults: 28f, 32m, 45f, 55m → good m/f pair options
@@ -453,7 +454,8 @@ class TestCoupleMatchingIntegration:
 
     def test_elderly_couple_created_with_correct_ages(self, hd):
         """Elderly pair should have both members aged 65+, opposite sex."""
-        np.random.seed(42)
+        # Seed the injected stream so the 95% opposite-sex roll lands
+        hd.set_random_generator(np.random.default_rng(42))
         hd._prepare_person_pools()
 
         # SGU_S1: 68f, 75m → only valid elderly pair
@@ -1228,3 +1230,64 @@ class TestFullPipelineIntegration:
                     f"but {comp['Adults']} adults. Full composition: {comp}. "
                     f"Pattern: {h.properties.get('allocation_pattern')}"
                 )
+
+
+# Test: determinism of the injected RNG stream
+
+class TestAllocationDeterminism:
+    """Same seed → identical world. All allocation randomness flows through the
+    distributor's injected Generator, so two fresh worlds run with the same
+    `random_seed` must produce identical household memberships."""
+
+    def _run_full_strategy(self, random_seed):
+        geography = Geography(data_dir=f"{STRESS_DATA}/geography",
+                              levels=["SGU", "MGU", "LGU"])
+        geography.load_from_csv()
+        venue_manager = VenueManager(geography, data_dir=f"{STRESS_DATA}/venues")
+        venue_manager.load_from_yaml_config("test_venues_config.yaml")
+        population_manager = PopulationManager(geography=geography,
+                                               data_dir=f"{STRESS_DATA}/population")
+        population_manager.load_explicit_from_csv(
+            "people.csv",
+            column_mapping={"age": "age", "sex": "sex", "geo_unit": "location"}
+        )
+        distributor = HouseholdDistributor(
+            geography=geography,
+            population=population_manager,
+            venue_manager=venue_manager,
+            data_dir=f"{STRESS_DATA}/households",
+            config_file="test_households_config.yaml",
+            rules_file="relationship_rules.yaml"
+        )
+        distributor.load_household_data("households.csv")
+
+        execute_allocation_strategy(
+            population=population_manager,
+            venues=venue_manager,
+            household_distributor=distributor,
+            strategy_file=f"{STRESS_DATA}/households/test_allocation_strategy.yaml",
+            random_seed=random_seed,
+        )
+
+        households = sorted(
+            (h.geographical_unit.name,
+             h.properties.get('original_pattern', ''),
+             tuple(sorted(person.id for person in h.get_all_members())))
+            for h in venue_manager.get_venues_by_type("household")
+        )
+        return households, set(distributor.allocated_people)
+
+    def test_same_seed_identical_household_membership(self):
+        first_households, first_allocated = self._run_full_strategy(123)
+        second_households, second_allocated = self._run_full_strategy(123)
+        assert first_households == second_households
+        assert first_allocated == second_allocated
+
+    def test_global_numpy_state_does_not_leak_in(self):
+        """Perturbing the legacy global numpy RNG must not change results —
+        proof that allocation no longer reads np.random module state."""
+        first_households, _ = self._run_full_strategy(123)
+        np.random.seed(999)
+        np.random.random(1000)
+        second_households, _ = self._run_full_strategy(123)
+        assert first_households == second_households

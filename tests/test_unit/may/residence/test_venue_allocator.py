@@ -192,14 +192,14 @@ class TestApplyStrategy:
     def test_oldest_first_sorts_descending(self, hd):
         """oldest_first must produce descending age order."""
         people = all_people(hd)
-        result = _apply_strategy(list(people), "oldest_first")
+        result = _apply_strategy(list(people), "oldest_first", np.random.default_rng(0))
         ages = [p.age for p in result]
         assert ages == sorted(ages, reverse=True)
 
     def test_youngest_first_sorts_ascending(self, hd):
         """youngest_first must produce ascending age order."""
         people = all_people(hd)
-        result = _apply_strategy(list(people), "youngest_first")
+        result = _apply_strategy(list(people), "youngest_first", np.random.default_rng(0))
         ages = [p.age for p in result]
         assert ages == sorted(ages)
 
@@ -207,7 +207,7 @@ class TestApplyStrategy:
         """random strategy must return all the same people, just shuffled."""
         people = all_people(hd)
         original_ids = {p.id for p in people}
-        result = _apply_strategy(list(people), "random")
+        result = _apply_strategy(list(people), "random", np.random.default_rng(0))
         result_ids = {p.id for p in result}
         assert result_ids == original_ids
         assert len(result) == len(people)
@@ -215,8 +215,16 @@ class TestApplyStrategy:
     def test_unknown_strategy_falls_back_to_random(self, hd):
         """An unrecognised strategy name must not crash and must return all people."""
         people = all_people(hd)
-        result = _apply_strategy(list(people), "nonexistent_strategy")
+        result = _apply_strategy(list(people), "nonexistent_strategy", np.random.default_rng(0))
         assert {p.id for p in result} == {p.id for p in people}
+
+    def test_random_is_deterministic_for_same_seed(self, hd):
+        """Two same-seeded generators must shuffle identically — the venue
+        'random' strategy draws only from the injected generator."""
+        people = all_people(hd)
+        first = _apply_strategy(list(people), "random", np.random.default_rng(7))
+        second = _apply_strategy(list(people), "random", np.random.default_rng(7))
+        assert [p.id for p in first] == [p.id for p in second]
 
 
 # _check_attribute_constraints

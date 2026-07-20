@@ -110,7 +110,8 @@ def _allocate_to_venue_type(venue_type: str, allocation_config: Dict,
 
     # Apply strategy (sort eligible people)
     strategy = allocation_config.get('strategy', 'random')
-    eligible_people = _apply_strategy(eligible_people, strategy)
+    eligible_people = _apply_strategy(eligible_people, strategy,
+                                      household_distributor.random_generator)
 
     # Determine how many to allocate
     people_to_allocate = min(len(eligible_people), total_capacity)
@@ -311,26 +312,27 @@ def _get_eligible_people(population, household_distributor, eligibility) -> List
     return eligible
 
 
-def _apply_strategy(people: List, strategy: str) -> List:
+def _apply_strategy(people: List, strategy: str, random_generator) -> List:
     """
     Apply allocation strategy to sort/select people.
 
     Args:
         people: List of Person objects
         strategy: Strategy name ("random", "oldest_first", "youngest_first")
+        random_generator: numpy Generator used by the "random" strategy
 
     Returns:
         list: Sorted/shuffled list of people
     """
     if strategy == "random":
-        np.random.shuffle(people)
+        random_generator.shuffle(people)
     elif strategy == "oldest_first":
         people.sort(key=lambda p: p.age, reverse=True)
     elif strategy == "youngest_first":
         people.sort(key=lambda p: p.age)
     else:
         logger.warning(f"Unknown strategy '{strategy}', using random")
-        np.random.shuffle(people)
+        random_generator.shuffle(people)
 
     return people
 
@@ -516,7 +518,9 @@ def _allocate_with_attributes(venue_type: str, allocation_config: Dict,
     # Apply strategy to each attribute group
     strategy = allocation_config.get('strategy', 'random')
     for attr_slot in people_by_attributes:
-        people_by_attributes[attr_slot] = _apply_strategy(people_by_attributes[attr_slot], strategy)
+        people_by_attributes[attr_slot] = _apply_strategy(
+            people_by_attributes[attr_slot], strategy,
+            household_distributor.random_generator)
 
     # Pre-group people by geographical unit AND attribute slot
     # Structure: {(column_name, geo_unit): deque([person, ...])}

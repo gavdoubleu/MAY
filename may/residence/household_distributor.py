@@ -53,7 +53,8 @@ class HouseholdDistributor:
 
     def __init__(self, geography: Geography, population: PopulationManager,
                  venue_manager: VenueManager,
-                 data_dir, config_file, rules_file: Optional[str] = None):
+                 data_dir, config_file, rules_file: Optional[str] = None,
+                 random_generator: Optional[np.random.Generator] = None):
         """
         Initialize the household distributor.
 
@@ -65,11 +66,16 @@ class HouseholdDistributor:
             rules_file: Path to relationship_rules.yaml. When None (i.e. the
                 world config did not set `households.rules_file`), relationship
                 rules are disabled.
+            random_generator: Source of all allocation randomness. When None,
+                a default generator seeded from SeedSequence(0) is created —
+                matching the historical global seed set in create_world.
         """
         self.geography = geography
         self.population = population
         self.venue_manager = venue_manager
         self.data_dir = data_dir
+        self.random_generator = (random_generator if random_generator is not None
+                                 else np.random.default_rng(np.random.SeedSequence(0)))
 
         # Load configuration
         # Try relative to current working directory first, then relative to data_dir
@@ -123,6 +129,7 @@ class HouseholdDistributor:
             categories=self.categories,
             config_file=rules_config_path,
             geography=self.geography,
+            random_generator=self.random_generator,
         )
 
         # Initialize excess handler
@@ -141,6 +148,13 @@ class HouseholdDistributor:
             priority_order.append((priority, cat_idx))
         priority_order.sort()  # Sort by priority (lower = demote first)
         self.fallback_priority = [idx for _, idx in priority_order]
+
+    def set_random_generator(self, random_generator: np.random.Generator) -> None:
+        """Swap the stream feeding all allocation randomness (distributor,
+        sub-handlers via their back-reference, and the relationship-rules
+        validator, which holds its own copy)."""
+        self.random_generator = random_generator
+        self.relationship_rules.random_generator = random_generator
 
         logger.info(f"Initialized HouseholdDistributor with {len(self.categories)} categories")
         for cat in self.categories:
@@ -309,7 +323,7 @@ class HouseholdDistributor:
             category_pools = [{} for _ in self.categories]
 
             # Shuffling people ensures random dictionary order
-            np.random.shuffle(people)
+            self.random_generator.shuffle(people)
 
             # Categorize each person (only if not already allocated)
             for person in people:
@@ -976,7 +990,7 @@ class HouseholdDistributor:
 
                     # Random count between min and max_allocatable
                     if max_allocatable > min_count:
-                        count = np.random.randint(min_count, max_allocatable + 1)  # numpy's randint is exclusive of upper bound
+                        count = self.random_generator.integers(min_count, max_allocatable + 1)  # upper bound exclusive
                         logger.debug(f"    random allocation: {count} (range: {min_count}-{max_allocatable})")
                     else:
                         count = min_count
@@ -1506,7 +1520,7 @@ class HouseholdDistributor:
             normalized_weights = [w / total_weight for w in weights]
 
             # Sample using numpy choice
-            return np.random.choice(values, p=normalized_weights)
+            return self.random_generator.choice(values, p=normalized_weights)
 
         elif dist_type == 'poisson':
             # Zero-truncated Poisson distribution, capped at max value
@@ -1533,7 +1547,7 @@ class HouseholdDistributor:
             probs = probs / np.sum(probs)
 
             # Sample from distribution
-            return np.random.choice(values, p=probs)
+            return self.random_generator.choice(values, p=probs)
 
         elif dist_type == 'normal':
             # Normal (Gaussian) distribution
@@ -1541,7 +1555,7 @@ class HouseholdDistributor:
             std = distribution_config.get('std', 0.5)
 
             # Sample from normal distribution
-            value = np.random.normal(mean, std)
+            value = self.random_generator.normal(mean, std)
 
             # Ensure non-negative and round
             return max(0, int(round(value)))

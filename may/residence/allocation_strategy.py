@@ -7,7 +7,8 @@ Executes both household and venue allocations in a single YAML-defined sequence.
 import os
 import logging
 import yaml
-from typing import Dict, List
+import numpy as np
+from typing import Dict, List, Optional
 from .venue_allocator import _allocate_to_venue_type
 from .household_distributor import HouseholdError
 from may.utils import path_resolver as pr
@@ -19,7 +20,8 @@ def execute_allocation_strategy(population,
                                 venues,
                                 household_distributor,
                                 strategy_file: str = "data/households/allocation_strategy.yaml",
-                                export_debug_csv: bool = False):
+                                export_debug_csv: bool = False,
+                                random_seed: Optional[int] = None):
     """
     Execute a unified allocation strategy from YAML configuration.
 
@@ -30,12 +32,19 @@ def execute_allocation_strategy(population,
         population: PopulationManager
         venues: VenueManager
         household_distributor: HouseholdDistributor
-        strategy_file (str, optional): Path to YAML strategy file (relative or absolute). Default is "data/households/allocation_strategy.yaml". 
+        strategy_file (str, optional): Path to YAML strategy file (relative or absolute). Default is "data/households/allocation_strategy.yaml".
+        random_seed: When given, reseeds the distributor's random generator via
+            SeedSequence before any step runs. When None, the distributor keeps
+            whatever generator it was constructed with.
 
     Returns:
         dict: Complete statistics for all steps
-    
+
     """
+    if random_seed is not None:
+        household_distributor.set_random_generator(
+            np.random.default_rng(np.random.SeedSequence(random_seed)))
+
     logger.info("=" * 60)
     logger.info("Executing Unified Allocation Strategy")
     logger.info("=" * 60)

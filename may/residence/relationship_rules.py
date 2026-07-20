@@ -61,7 +61,8 @@ class RelationshipRulesValidator:
     def __init__(self,
                  categories: List,
                  config_file: str = "data/households/relationship_rules.yaml",
-                 geography=None):
+                 geography=None,
+                 random_generator=None):
         """
         Initialize relationship rules validator.
 
@@ -69,8 +70,12 @@ class RelationshipRulesValidator:
             categories: List of Category objects from household config
             config_file: Path to relationship rules YAML configuration
             geography: Optional Geography object (needed for per-MSOA same_category lookups)
+            random_generator: numpy Generator feeding all selection randomness.
+                When None, a default seeded from SeedSequence(0) is created.
         """
         self.categories = categories
+        self.random_generator = (random_generator if random_generator is not None
+                                 else np.random.default_rng(np.random.SeedSequence(0)))
         self.category_name_to_idx = {cat.name: idx for idx, cat in enumerate(categories)}
         self.geography = geography
 
@@ -580,7 +585,7 @@ class RelationshipRulesValidator:
         same_category_prob = self._resolve_same_category_prob(
             cat_attribute, geo_unit_code, default=fallback_prob,
         )
-        is_same_category = np.random.random() < same_category_prob
+        is_same_category = self.random_generator.random() < same_category_prob
 
         cat_getter = self._get_attribute_getter(cat_attribute)
         partner_cat = cat_getter(existing_partner)
@@ -590,7 +595,7 @@ class RelationshipRulesValidator:
             required_cat_value = 'male' if partner_cat == 'female' else 'female'
         else:
             others = {cat_getter(p) for p in candidates if cat_getter(p) != partner_cat}
-            required_cat_value = np.random.choice(sorted(others)) if others else partner_cat
+            required_cat_value = self.random_generator.choice(sorted(others)) if others else partner_cat
 
         partner_id = existing_partner.id
         scored: List[Tuple[float, Person]] = []
@@ -663,12 +668,12 @@ class RelationshipRulesValidator:
                     if dist_type == 'normal':
                         mean = pref_dist.get('mean', 30)
                         std = pref_dist.get('std', 6)
-                        target_diff = np.random.normal(mean, std)
+                        target_diff = self.random_generator.normal(mean, std)
                     else:
                         # Fallback to uniform if unknown type
                         min_diff = constraint.get('min_difference', 16)
                         max_diff = constraint.get('max_difference', 50)
-                        target_diff = np.random.uniform(min_diff, max_diff)
+                        target_diff = self.random_generator.uniform(min_diff, max_diff)
 
                     # Clamp to valid range
                     min_diff = constraint.get('min_difference', 16)
@@ -725,7 +730,7 @@ class RelationshipRulesValidator:
                         }
 
         shuffled_candidates = prioritized_candidates.copy()
-        np.random.shuffle(shuffled_candidates)
+        self.random_generator.shuffle(shuffled_candidates)
 
         # Try random selection up to max_attempts (from prioritized pool)
         candidates_tested = 0
@@ -884,7 +889,7 @@ class RelationshipRulesValidator:
             attr_stats['prob_max'] = same_category_prob
         attr_stats['prob_n'] += 1
 
-        is_same_category = np.random.random() < same_category_prob
+        is_same_category = self.random_generator.random() < same_category_prob
 
         if show_detailed_logs:
             pair_type = f"same-{cat_attribute}" if is_same_category else f"different-{cat_attribute}"
@@ -915,7 +920,7 @@ class RelationshipRulesValidator:
 
         # Pre-shuffle candidates once to avoid repeated random.choice() overhead
         shuffled_candidates = candidates.copy()
-        np.random.shuffle(shuffled_candidates)
+        self.random_generator.shuffle(shuffled_candidates)
 
         # Pre-group candidates by categorical attribute AND cache attribute values
         cat_getter = self._get_attribute_getter(cat_attribute)
@@ -1002,7 +1007,7 @@ class RelationshipRulesValidator:
                     # Use pre-computed categorical values from candidates_by_cat
                     all_cat_values = list(candidates_by_cat.keys())
                     other_values = [v for v in all_cat_values if v != first_cat_value]
-                    required_cat_value = np.random.choice(other_values) if other_values else first_cat_value
+                    required_cat_value = self.random_generator.choice(other_values) if other_values else first_cat_value
 
             # Use pre-grouped candidates by categorical attribute
             remaining = candidates_by_cat.get(required_cat_value, [])
@@ -1014,7 +1019,7 @@ class RelationshipRulesValidator:
 
             # Shuffle remaining candidates once and iterate
             shuffled_remaining = remaining.copy()
-            np.random.shuffle(shuffled_remaining)
+            self.random_generator.shuffle(shuffled_remaining)
 
             # Try to find valid partner - iterate through shuffled list
             for candidate in islice(shuffled_remaining, max_attempts):

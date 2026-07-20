@@ -7,7 +7,6 @@ This module contains logic for:
 """
 
 import logging
-import numpy as np
 from typing import List, Optional, Dict
 from itertools import islice
 from may.residence.composition_pattern import CompositionPattern
@@ -209,7 +208,7 @@ class HouseholdPromoter:
                     continue
 
                 # Try to promote and allocate to each household
-                np.random.shuffle(geo_unit_households)  # For fairness
+                self.distributor.random_generator.shuffle(geo_unit_households)  # For fairness
 
                 for household in geo_unit_households:
                     if not available_people:
