@@ -103,6 +103,14 @@ class MinimalVenueManager:
         return self._venues
 
 
+class MinimalPopulation:
+    def __init__(self, people):
+        self._people = people
+
+    def get_all_people(self):
+        return self._people
+
+
 class SimpleGeoSource:
     def __init__(self, lookup_data=None, fallback=None):
         self._lookup_data = lookup_data or {}
@@ -611,8 +619,70 @@ class TestAssignAll:
         vm = MinimalVenueManager([venue])
 
         # Finds no people
-        stats = assigner.assign_all(vm)
+        stats = assigner.assign_all(vm, population=MinimalPopulation([]))
         assert stats['total_people'] == 0
+
+    def test_person_level_without_population_raises(self):
+        """assignment_level='person' without a population manager fails loud."""
+        config = MinimalConfig(
+            attribute_name="test_attr",
+            assignment_level="person",
+        )
+        assigner = AttributeAssigner(config, SimpleDataManager())
+
+        vm = MinimalVenueManager([])
+        with pytest.raises(AttributeAssignmentError, match="population"):
+            assigner.assign_all(vm)
+
+    def test_person_level_collects_from_population_not_venues(self, geo_unit):
+        """A person in the population but in no venue is still assigned."""
+        config = MinimalConfig(
+            attribute_name="test_attr",
+            assignment_level="person",
+        )
+        rule = AssignmentRule(
+            role="any", priority=1, description="",
+            assignment={"strategy": "constant", "value": "W"},
+        )
+        config.get_person_assignment_rule = lambda: rule
+        assigner = AttributeAssigner(config, SimpleDataManager())
+
+        # category=None → empty activity_map → no residence venue at all
+        venueless_person = MinimalPerson(age=30, geographical_unit=geo_unit,
+                                         category=None)
+        vm = MinimalVenueManager([])
+
+        stats = assigner.assign_all(
+            vm, population=MinimalPopulation([venueless_person]))
+        assert venueless_person.properties["test_attr"] == "W"
+        assert stats['total_people'] == 1
+        assert stats['assigned_people'] == 1
+
+    def test_person_level_unaffected_by_gutted_subsets(self, geo_unit):
+        """Flushed (gutted) household membership no longer blocks person-level
+        assignment: the population is read directly, venues never iterated."""
+        from may.flushing import GuttedMembers
+
+        config = MinimalConfig(
+            attribute_name="test_attr",
+            assignment_level="person",
+        )
+        rule = AssignmentRule(
+            role="any", priority=1, description="",
+            assignment={"strategy": "constant", "value": "W"},
+        )
+        config.get_person_assignment_rule = lambda: rule
+        assigner = AttributeAssigner(config, SimpleDataManager())
+
+        person = MinimalPerson(age=30, geographical_unit=geo_unit,
+                               category=None)
+        gutted_household = MinimalVenue(venue_type="household", members=[])
+        gutted_household._members = GuttedMembers(1)  # iteration raises
+        vm = MinimalVenueManager([gutted_household])
+
+        stats = assigner.assign_all(vm, population=MinimalPopulation([person]))
+        assert person.properties["test_attr"] == "W"
+        assert stats['assigned_people'] == 1
 
     def test_routes_to_residence_assignment(self):
         """assignment_level='person_by_residence' routes to _assign_all_residences."""

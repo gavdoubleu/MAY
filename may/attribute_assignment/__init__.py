@@ -17,7 +17,8 @@ Usage:
     stats = assign_attributes(
         venue_manager=venue_manager,
         config_path="yaml/attribute_assignment.yaml",
-        geo_units={'E00000001', 'E00000002'}  # Optional
+        geo_units={'E00000001', 'E00000002'},  # Optional
+        population=population  # Required for person-level assignment
     )
 """
 

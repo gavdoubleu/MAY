@@ -19,7 +19,8 @@ class AttributeAssignmentError(Exception):
     aborts the run."""
 
 
-def assign_attributes(venue_manager, config_path: str, geo_units: Optional[set] = None) -> Dict[str, Any]:
+def assign_attributes(venue_manager, config_path: str, geo_units: Optional[set] = None,
+                      population=None) -> Dict[str, Any]:
     """
     Convenience function to assign attributes to a population.
 
@@ -27,6 +28,8 @@ def assign_attributes(venue_manager, config_path: str, geo_units: Optional[set] 
         venue_manager: VenueManager with households and venues
         config_path: Path to YAML configuration file
         geo_units: Optional set of geo unit codes to preload data for
+        population: Population manager; required for person-level assignment,
+            which collects people from it rather than from venue membership
 
     Returns:
         Assignment statistics dictionary
@@ -53,7 +56,7 @@ def assign_attributes(venue_manager, config_path: str, geo_units: Optional[set] 
 
     # Create assigner and run
     assigner = AttributeAssigner(config, data_manager)
-    stats = assigner.assign_all(venue_manager)
+    stats = assigner.assign_all(venue_manager, population=population)
 
     return stats
 class AttributeAssigner:
@@ -166,12 +169,15 @@ class AttributeAssigner:
 
         return self._strategy_cache[config_key]
 
-    def assign_all(self, venue_manager) -> Dict[str, Any]:
+    def assign_all(self, venue_manager, population=None) -> Dict[str, Any]:
         """
         Assign attribute based on assignment level (household or person).
 
         Args:
             venue_manager: VenueManager with households and people
+            population: Population manager; required for person-level
+                assignment (the population is read directly, not rebuilt
+                from venue membership, so gutted subsets stay untouched)
 
         Returns:
             Dictionary with assignment statistics
@@ -182,7 +188,13 @@ class AttributeAssigner:
 
         # Branch based on assignment level
         if self.config.assignment_level == "person":
-            self._assign_all_people(venue_manager)
+            if population is None:
+                raise AttributeAssignmentError(
+                    f"person-level assignment for '{self.attribute_name}' needs a "
+                    f"population manager — people are collected from the population, "
+                    f"not from venue membership"
+                )
+            self._assign_all_people(population)
         elif self.config.assignment_level == "person_by_residence":
             self._assign_all_residences(venue_manager)
         else:
@@ -410,15 +422,15 @@ class AttributeAssigner:
 
         return True
 
-    def _assign_all_people(self, venue_manager):
+    def _assign_all_people(self, population):
         """
         Assign attributes at person level.
 
+        People come straight from the population manager: no venue-membership
+        iteration, so each person is seen exactly once and gutted subsets
+        (flushed household membership) never block assignment.
         """
-        # Get all people from venue manager
-        all_people = []
-        for venue in venue_manager.get_all_venues_list():
-            all_people.extend(venue.get_all_members())
+        all_people = population.get_all_people()
 
         logger.info(f"Found {len(all_people)} total people")
         logger.info("")

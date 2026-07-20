@@ -210,7 +210,8 @@ class World:
         stats = assign_attributes(
             venue_manager=self.venues,
             config_path=config_path,
-            geo_units=geo_units
+            geo_units=geo_units,
+            population=self.population
         )
 
         return stats
