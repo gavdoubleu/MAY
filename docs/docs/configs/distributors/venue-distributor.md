@@ -197,7 +197,6 @@ allocation:
 ```yaml
 settings:
   priority: 10
-  max_allocations: null
   verbose: true
   log_summary: true
   use_spatial_index: true

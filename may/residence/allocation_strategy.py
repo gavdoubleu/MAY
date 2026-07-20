@@ -437,6 +437,15 @@ def _execute_venue_step(step_config: Dict, population, venues, household_distrib
     """
     venue_type = step_config.get('venue_type')
 
+    # max_allocations was a global, order-dependent stop condition removed
+    # outright — per-venue capacities are the mechanism. Warn on stale configs.
+    if 'max_allocations' in step_config:
+        logger.warning(
+            f"  'max_allocations' is no longer supported and is ignored "
+            f"(venue step '{step_config.get('name')}') — remove it from the "
+            f"strategy config; per-venue capacities cap allocation"
+        )
+
     # Create allocation config for venue allocator
     allocation_config = {
         'venue_type': venue_type,
@@ -444,7 +453,6 @@ def _execute_venue_step(step_config: Dict, population, venues, household_distrib
         'capacity_property': step_config.get('capacity_property', 'capacity'),
         'eligibility': step_config.get('eligibility', {}),
         'strategy': step_config.get('strategy', 'random'),
-        'max_allocations': step_config.get('max_allocations'),
         # Capacity rules owned by this allocation step. The presence of
         # capacity_config.attribute_capacities.column_mappings selects
         # attribute-aware vs. simple allocation downstream.

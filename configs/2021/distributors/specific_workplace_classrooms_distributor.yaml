@@ -102,9 +102,6 @@ settings:
   # Run after other education-specific allocations but before company
   priority: 3
 
-  # Limit number of allocations (null = no limit)
-  max_allocations: null
-
   # Logging
   verbose: true
   log_summary: true

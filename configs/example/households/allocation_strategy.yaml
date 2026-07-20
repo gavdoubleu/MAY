@@ -79,7 +79,6 @@ steps:
     venue_type: boarding_school
     subset_key: resident
     strategy: random
-    max_allocations:
     eligibility:
       - attribute: age
         min: 0
@@ -123,7 +122,6 @@ steps:
     venue_type: care_home
     subset_key: resident
     strategy: oldest_first
-    max_allocations:
     eligibility:
       - attribute: age
         min: 50
@@ -192,7 +190,6 @@ steps:
     venue_type: student_dorm
     subset_key: resident
     strategy: random
-    max_allocations:
     eligibility:
       - attribute: age
         min: 16

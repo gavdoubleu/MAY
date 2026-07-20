@@ -95,7 +95,6 @@ steps:
     refresh_pools: false
     enable_demotion: null
 
-
   # Step 4a: Elderly Couples
   - name: "Elderly Couples"
     type: "household"
@@ -145,7 +144,6 @@ steps:
     max_households: null
     refresh_pools: false
     enable_demotion: null
-
 
   # Step 6: Young Adult Pairs (Households)
   - name: "Young Adult Pairs (with assumption)"
@@ -199,7 +197,6 @@ steps:
           max_column: "StatutoryHighAge"
 
     strategy: "random"
-    max_allocations: null
 
   # Step 7: Elderly to Care Homes (Venues)
   - name: "Elderly to Care Homes"
@@ -254,7 +251,6 @@ steps:
             sex: "female"
 
     strategy: "oldest_first"  # Prioritize oldest within each age/sex group
-    max_allocations: null
 
   # Step 9: Students to Dormitories (Venues)
   - name: "Students to Dormitories"
@@ -289,7 +285,6 @@ steps:
             age_band: [65, 99]
 
     strategy: "random"
-    max_allocations: null
 
   # Step 10: Multi-Elderly  (Households)
   - name: "Multi-elderly"
@@ -693,7 +688,6 @@ steps:
 
     refresh_pools: false
 
-
 # CONFIGURATION OPTIONS
 
 # For household steps:
@@ -713,7 +707,6 @@ steps:
 #       - {attribute: "sex", value: "F"}        # Exact match
 #     Empty list [] or {} means no filtering
 #   - strategy: Allocation strategy ("random", "oldest_first", "youngest_first")
-#   - max_allocations: Limit number of people (null = fill capacity)
 
 # For household_excess steps:
 #   - target_patterns: List of original patterns to target for adding people

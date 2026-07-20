@@ -97,7 +97,6 @@ settings:
   priority: 1
 
   # No allocation limit
-  max_allocations: null
 
   # Logging
   verbose: true

@@ -105,9 +105,6 @@ settings:
   # Run after university (1) but before company (5)
   priority: 4
 
-  # Limit number of allocations (null = no limit)
-  max_allocations: null
-
   # Logging
   verbose: true
   log_summary: true

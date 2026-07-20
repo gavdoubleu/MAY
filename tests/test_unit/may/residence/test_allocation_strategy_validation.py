@@ -48,3 +48,19 @@ def test_promotion_source_patterns_not_checked():
 def test_empty_vocabulary_skips():
     steps = [{"type": "household", "name": "x", "patterns": ["nonsense"]}]
     _validate_step_patterns(steps, set())  # nothing to validate against
+
+
+def test_stale_max_allocations_key_warns(monkeypatch, caplog):
+    # max_allocations was removed outright; a stale key in an old config must
+    # warn loudly and be ignored, not silently cap allocation.
+    import logging
+    from may.residence import allocation_strategy
+
+    monkeypatch.setattr(allocation_strategy, "_allocate_to_venue_type",
+                        lambda **kwargs: {"allocated": 0})
+    step = {"type": "venue", "name": "stale", "venue_type": "care_home",
+            "max_allocations": 5}
+    with caplog.at_level(logging.WARNING, logger="allocation_strategy"):
+        allocation_strategy._execute_venue_step(step, None, None, None)
+    assert "max_allocations" in caplog.text
+    assert "no longer supported" in caplog.text

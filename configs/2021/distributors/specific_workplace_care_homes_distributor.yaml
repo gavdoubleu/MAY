@@ -106,9 +106,6 @@ settings:
   # Run after hospitals (4) but before company (5)
   priority: 3
 
-  # Limit number of allocations (null = no limit)
-  max_allocations: null
-
   # Logging
   verbose: true
   log_summary: true

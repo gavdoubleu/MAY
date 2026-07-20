@@ -302,9 +302,6 @@ settings:
   # Execution order (higher = earlier)
   priority: 10
 
-  # Limit number of allocations (null = no limit)
-  max_allocations: null
-
   # Logging
   verbose: true
   log_summary: true  # Print allocation statistics

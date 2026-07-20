@@ -122,7 +122,6 @@ allocation:
 
 settings:
   priority: 1
-  max_allocations: null
   verbose: true
   log_summary: true
   use_spatial_index: true

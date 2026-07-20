@@ -113,10 +113,7 @@ def _allocate_to_venue_type(venue_type: str, allocation_config: Dict,
     eligible_people = _apply_strategy(eligible_people, strategy)
 
     # Determine how many to allocate
-    max_allocations = allocation_config.get('max_allocations')
     people_to_allocate = min(len(eligible_people), total_capacity)
-    if max_allocations is not None:
-        people_to_allocate = min(people_to_allocate, max_allocations)
 
     logger.info(f"  Allocating {people_to_allocate} people...")
 
@@ -150,7 +147,7 @@ def _allocate_to_venue_type(venue_type: str, allocation_config: Dict,
         # Allocate people to this venue
         venue_residents = []
         for _ in range(capacity):
-            # Respect global max_allocations cap
+            # Stop once everyone allocatable has been placed
             if len(allocated_people) >= people_to_allocate:
                 break
 
