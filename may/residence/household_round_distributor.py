@@ -161,9 +161,13 @@ class HouseholdRoundDistributor:
         if demotion_rules is None:
             demotion_rules = {}
 
+        # Household counts restricted to the active geo-unit scope (whole
+        # world when no scope is set)
+        household_counts = self.distributor.scoped_household_counts()
+
         # Calculate total households to allocate for progress tracking
         total_households_to_allocate = 0
-        for geo_unit_code, compositions in self.distributor.household_counts_by_geo_unit.items():
+        for geo_unit_code, compositions in household_counts.items():
             for pattern_str, count in compositions.items():
                 # Only count if pattern matches filter
                 if pattern_set is None or pattern_str in pattern_set:
@@ -176,7 +180,7 @@ class HouseholdRoundDistributor:
         logger.info(f"Allocating {total_households_to_allocate:,} households...")
 
         # Iterate through each geo_unit
-        for geo_unit_code, compositions in self.distributor.household_counts_by_geo_unit.items():
+        for geo_unit_code, compositions in household_counts.items():
             # Iterate through each composition type in this geo_unit
             for pattern_str, count in compositions.items():
                 # Check if this pattern should be allocated in this round

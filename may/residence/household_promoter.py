@@ -156,9 +156,7 @@ class HouseholdPromoter:
         logger.info(f"Target categories: {target_categories}")
         logger.info("")
 
-        # Refresh pools if requested
-        if refresh_pools:
-            self.distributor._prepare_person_pools(refresh=True)
+        self.distributor._prepare_person_pools(refresh=refresh_pools)
 
         # The presence of a household_promotion step is the switch — promotion
         # runs where the strategy invokes it.
@@ -365,8 +363,7 @@ class HouseholdPromoter:
         logger.info("")
 
         # Refresh pools if requested
-        if refresh_pools:
-            self.distributor._prepare_person_pools(refresh=True)
+        self.distributor._prepare_person_pools(refresh=refresh_pools)
 
         # Track statistics
         people_added = 0

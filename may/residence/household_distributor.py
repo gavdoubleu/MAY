@@ -149,6 +149,14 @@ class HouseholdDistributor:
         priority_order.sort()  # Sort by priority (lower = demote first)
         self.fallback_priority = [idx for _, idx in priority_order]
 
+        # Active geo-unit scope: when set, allocation is restricted to this
+        # subset of smallest-level unit codes. None means the whole world.
+        self.geo_unit_scope: Optional[Set[str]] = None
+
+        logger.info(f"Initialized HouseholdDistributor with {len(self.categories)} categories")
+        for cat in self.categories:
+            logger.info(f"  - {cat}")
+
     def set_random_generator(self, random_generator: np.random.Generator) -> None:
         """Swap the stream feeding all allocation randomness (distributor,
         sub-handlers via their back-reference, and the relationship-rules
@@ -156,9 +164,26 @@ class HouseholdDistributor:
         self.random_generator = random_generator
         self.relationship_rules.random_generator = random_generator
 
-        logger.info(f"Initialized HouseholdDistributor with {len(self.categories)} categories")
-        for cat in self.categories:
-            logger.info(f"  - {cat}")
+    def set_geo_unit_scope(self, scope_sgu_codes: Optional[Set[str]]) -> None:
+        """Restrict allocation to a subset of smallest-level unit codes.
+
+        Passing None clears the scope (whole world). Person pools and the
+        promoter's household indexes are invalidated so the next step rebuilds
+        them for the new scope only.
+        """
+        self.geo_unit_scope = (None if scope_sgu_codes is None
+                               else set(scope_sgu_codes))
+        self.person_pool_by_geo_unit = {}
+        self.pools_prepared = False
+        self.promoter.reset_indexes()
+
+    def scoped_household_counts(self) -> Dict[str, Dict[str, int]]:
+        """Household counts filtered to the active geo-unit scope."""
+        if self.geo_unit_scope is None:
+            return self.household_counts_by_geo_unit
+        return {code: counts
+                for code, counts in self.household_counts_by_geo_unit.items()
+                if code in self.geo_unit_scope}
 
     def _parse_categories(self) -> List[Category]:
         """Parse categories from config."""
@@ -305,6 +330,9 @@ class HouseholdDistributor:
         # Get all units at the smallest geographical level
         smallest_level = self.geography.levels[0]
         sgu_units = self.geography.get_units_by_level(smallest_level)
+        if self.geo_unit_scope is not None:
+            sgu_units = {code: unit for code, unit in sgu_units.items()
+                         if code in self.geo_unit_scope}
         total_units = len(sgu_units)
 
         # Progress indicator configuration

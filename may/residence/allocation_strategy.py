@@ -5,10 +5,11 @@ Executes both household and venue allocations in a single YAML-defined sequence.
 """
 
 import os
+import hashlib
 import logging
 import yaml
 import numpy as np
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set, Tuple
 from .venue_allocator import _allocate_to_venue_type
 from .household_distributor import HouseholdError
 from may.utils import path_resolver as pr
@@ -25,26 +26,26 @@ def execute_allocation_strategy(population,
     """
     Execute a unified allocation strategy from YAML configuration.
 
-    This function orchestrates BOTH household and venue allocations in a single
-    sequence defined in the YAML file.
+    This function orchestrates BOTH household and venue allocations. The
+    outer loop runs over geographical units at the strategy's `loop_level`
+    (default: the largest configured level); the full step sequence runs per
+    unit, restricted to that unit's smallest-level units. Each unit draws
+    from its own random stream, so results are independent of the unit
+    iteration order.
 
     Args:
         population: PopulationManager
         venues: VenueManager
         household_distributor: HouseholdDistributor
         strategy_file (str, optional): Path to YAML strategy file (relative or absolute). Default is "data/households/allocation_strategy.yaml".
-        random_seed: When given, reseeds the distributor's random generator via
-            SeedSequence before any step runs. When None, the distributor keeps
-            whatever generator it was constructed with.
+        random_seed: Global seed for the per-unit random streams (each unit's
+            stream is spawned from SeedSequence((random_seed, digest(unit)))).
+            When None, seed 0 is used — matching the historical default.
 
     Returns:
-        dict: Complete statistics for all steps
+        dict: Complete statistics for all steps, aggregated across units
 
     """
-    if random_seed is not None:
-        household_distributor.set_random_generator(
-            np.random.default_rng(np.random.SeedSequence(random_seed)))
-
     logger.info("=" * 60)
     logger.info("Executing Unified Allocation Strategy")
     logger.info("=" * 60)
@@ -71,52 +72,110 @@ def execute_allocation_strategy(population,
         logger.warning("No allocation steps defined in strategy")
         return {}
 
+    geography = household_distributor.geography
+
+    # Outer-loop geography level: default is the largest configured level
+    loop_level = strategy.get('loop_level') or geography.levels[-1]
+    if loop_level not in geography.levels:
+        raise HouseholdError(
+            f"Unknown loop_level '{loop_level}' in {strategy_file}; "
+            f"configured geography levels: {geography.levels}"
+        )
+
+    if strategy.get('flush_per_unit', False):
+        raise HouseholdError(
+            f"flush_per_unit: true in {strategy_file} is not yet supported — "
+            f"per-unit flushing arrives with incremental subset staging"
+        )
+
     _validate_step_patterns(steps, household_distributor.household_pattern_vocabulary)
+    _validate_venue_step_levels(steps, venues, geography, loop_level)
 
-    logger.info(f"Found {len(steps)} allocation steps")
-    logger.info("")
-
-    # Execute each step
-    all_stats = {}
+    # Filter to known step types once, warning per step rather than per unit
+    known_step_types = ['household', 'venue', 'household_excess',
+                        'household_overflow', 'household_promotion']
+    numbered_steps: List[Tuple[int, str, str, Dict]] = []
     step_number = 1
-
     for step_config in steps:
         step_type = step_config.get('type')
         step_name = step_config.get('name', f'Step {step_number}')
-
-        if step_type not in ['household', 'venue', 'household_excess', 'household_overflow', 'household_promotion']:
+        if step_type not in known_step_types:
             logger.warning(f"Unknown step type '{step_type}' for step '{step_name}', skipping")
             continue
+        numbered_steps.append((step_number, step_name, step_type, step_config))
+        step_number += 1
+
+    smallest_level = geography.levels[0]
+    loop_units = geography.get_units_by_level(loop_level)
+    global_seed = random_seed if random_seed is not None else 0
+
+    logger.info(f"Found {len(numbered_steps)} allocation steps")
+    logger.info(f"Looping over {len(loop_units)} {loop_level} unit(s)")
+    logger.info("")
+
+    all_stats: Dict[str, Dict] = {}
+    total_units = len(loop_units)
+    progress_interval = max(1, total_units // 10)  # Update every 10%
+
+    for unit_index, (unit_code, unit) in enumerate(loop_units.items(), 1):
+        # Per-unit random stream: derived from the global seed and a stable
+        # digest of the unit code, so results are independent of unit order
+        household_distributor.set_random_generator(np.random.default_rng(
+            np.random.SeedSequence((global_seed, _stable_unit_digest(unit_code)))))
+
+        if unit.level == smallest_level:
+            scope_sgu_codes = {unit_code}
+        else:
+            scope_sgu_codes = {descendant.name for descendant
+                               in unit.get_descendants(level=smallest_level)}
+        # The unit's whole subtree (any level) — venues may sit between the
+        # loop level and the smallest level
+        scope_geo_unit_names = {unit_code} | {descendant.name for descendant
+                                              in unit.get_descendants()}
+        household_distributor.set_geo_unit_scope(scope_sgu_codes)
 
         logger.info("=" * 60)
-        logger.info(f"Step {step_number}: {step_name} ({step_type})")
+        logger.info(f"Geo unit {unit_index}/{total_units}: {unit_code} "
+                    f"({len(scope_sgu_codes)} {smallest_level} unit(s))")
         logger.info("=" * 60)
 
-        description = step_config.get('description')
-        if description:
-            logger.info(f"Description: {description}")
+        for step_number, step_name, step_type, step_config in numbered_steps:
+            logger.info("-" * 60)
+            logger.info(f"[{unit_code}] Step {step_number}: {step_name} ({step_type})")
+            logger.info("-" * 60)
+
+            description = step_config.get('description')
+            if description:
+                logger.info(f"Description: {description}")
+                logger.info("")
+
+            # Execute based on type
+            if step_type == 'household':
+                stats = _execute_household_step(step_config, household_distributor)
+            elif step_type == 'venue':
+                stats = _execute_venue_step(step_config, population, venues,
+                                            household_distributor,
+                                            scope_geo_unit_names, scope_sgu_codes)
+            elif step_type == 'household_excess':
+                stats = _execute_household_excess_step(step_config, household_distributor)
+            elif step_type == 'household_overflow':
+                stats = _execute_household_overflow_step(step_config, household_distributor)
+            elif step_type == 'household_promotion':
+                stats = _execute_household_promotion_step(step_config, household_distributor)
+
+            accumulated = all_stats.setdefault(
+                step_name, {'type': step_type, 'step_number': step_number})
+            _merge_step_stats(accumulated, stats)
             logger.info("")
 
-        # Execute based on type
-        if step_type == 'household':
-            stats = _execute_household_step(step_config, household_distributor)
-        elif step_type == 'venue':
-            stats = _execute_venue_step(step_config, population, venues, household_distributor)
-        elif step_type == 'household_excess':
-            stats = _execute_household_excess_step(step_config, household_distributor)
-        elif step_type == 'household_overflow':
-            stats = _execute_household_overflow_step(step_config, household_distributor)
-        elif step_type == 'household_promotion':
-            stats = _execute_household_promotion_step(step_config, household_distributor)
+        if unit_index % progress_interval == 0 or unit_index == total_units:
+            percent_complete = (unit_index / total_units) * 100
+            logger.info(f"Geo-unit progress: {unit_index}/{total_units} "
+                        f"({percent_complete:.1f}%) - "
+                        f"{len(household_distributor.allocated_people):,} people allocated")
 
-        all_stats[step_name] = {
-            'type': step_type,
-            'step_number': step_number,
-            **stats
-        }
-
-        step_number += 1
-        logger.info("")
+    # Clear the scope so any later use of the distributor sees the whole world
+    household_distributor.set_geo_unit_scope(None)
 
     # Print overall summary
     logger.info("=" * 60)
@@ -192,6 +251,76 @@ def execute_allocation_strategy(population,
         household_distributor.export_unallocated_people_to_csv()
 
     return all_stats
+
+
+def _stable_unit_digest(unit_code: str) -> int:
+    """Platform-independent 64-bit digest of a geo-unit code for seeding.
+
+    Python's hash() is randomised per process, so it cannot seed reproducible
+    per-unit streams.
+    """
+    return int.from_bytes(
+        hashlib.blake2b(unit_code.encode('utf-8'), digest_size=8).digest(), 'big')
+
+
+# Stats keys that are world-level snapshots rather than per-unit counts:
+# merging keeps the latest value instead of summing
+SNAPSHOT_STAT_KEYS = {'round_name', 'round_number', 'total_households',
+                      'total_people_allocated', 'total_people_remaining',
+                      'error'}
+
+
+def _merge_step_stats(accumulated: Dict, unit_stats: Dict) -> None:
+    """Fold one unit's step stats into the running totals for that step.
+
+    Counts add across units, snapshot keys keep the latest value, nested count
+    dicts (e.g. allocation_by_attribute) add per key, and capacity_pct is
+    recomputed from the merged counts.
+    """
+    for key, value in unit_stats.items():
+        if key == 'capacity_pct':
+            continue  # derived — recomputed below
+        if isinstance(value, dict):
+            nested = accumulated.setdefault(key, {})
+            for nested_key, nested_value in value.items():
+                nested[nested_key] = nested.get(nested_key, 0) + nested_value
+        elif (key in SNAPSHOT_STAT_KEYS or isinstance(value, (str, bool))
+              or value is None):
+            accumulated[key] = value
+        elif isinstance(value, (int, float)):
+            accumulated[key] = accumulated.get(key, 0) + value
+        else:
+            accumulated[key] = value
+    if 'total_capacity' in accumulated:
+        total_capacity = accumulated['total_capacity']
+        accumulated['capacity_pct'] = (
+            accumulated.get('capacity_used', 0) / total_capacity * 100
+            if total_capacity else 0)
+
+
+def _validate_venue_step_levels(steps: List[Dict], venues, geography,
+                                loop_level: str) -> None:
+    """Fail loud when a venue step targets venues above the loop level.
+
+    Such venues span multiple loop units, so per-unit allocation cannot fill
+    them coherently. Revisit if a real config needs coarse venues.
+    """
+    loop_level_index = geography.levels.index(loop_level)
+    offending: Dict[str, Set[str]] = {}
+    for step in steps:
+        if step.get('type') != 'venue':
+            continue
+        venue_type = step.get('venue_type')
+        for venue in venues.get_venues_by_type(venue_type):
+            venue_level = venue.geographical_unit.level
+            if geography.levels.index(venue_level) > loop_level_index:
+                offending.setdefault(venue_type, set()).add(venue_level)
+    if offending:
+        raise HouseholdError(
+            f"Venue step(s) target venues above loop_level '{loop_level}': "
+            f"{ {vt: sorted(levels) for vt, levels in offending.items()} }. "
+            f"Raise loop_level or move these venues to a finer level."
+        )
 
 
 def _validate_step_patterns(steps: List[Dict], vocabulary: set) -> None:
@@ -431,7 +560,9 @@ def _execute_household_promotion_step(step_config: Dict, household_distributor) 
     return stats
 
 
-def _execute_venue_step(step_config: Dict, population, venues, household_distributor) -> Dict:
+def _execute_venue_step(step_config: Dict, population, venues, household_distributor,
+                        scope_geo_unit_names: Optional[Set[str]] = None,
+                        scope_sgu_codes: Optional[Set[str]] = None) -> Dict:
     """
     Execute a venue allocation step.
 
@@ -440,6 +571,10 @@ def _execute_venue_step(step_config: Dict, population, venues, household_distrib
         population: PopulationManager
         venues: VenueManager
         household_distributor: HouseholdDistributor
+        scope_geo_unit_names: Geo-unit names in the current loop unit's
+            subtree (restricts venues); None = whole world
+        scope_sgu_codes: Smallest-level unit codes in the current loop unit
+            (restricts people); None = whole world
 
     Returns:
         dict: Statistics for this step
@@ -476,7 +611,9 @@ def _execute_venue_step(step_config: Dict, population, venues, household_distrib
         allocation_config=allocation_config,
         population=population,
         venues=venues,
-        household_distributor=household_distributor
+        household_distributor=household_distributor,
+        scope_geo_unit_names=scope_geo_unit_names,
+        scope_sgu_codes=scope_sgu_codes
     )
 
     return stats

@@ -82,9 +82,9 @@ class HouseholdExcessHandler:
                     'error': f"Unknown relationship rule '{rule_name}'"
                 }
 
-        # Refresh pools if requested
-        if refresh_pools:
-            self.distributor._prepare_person_pools(refresh=True)
+        # Prepare pools (refresh when requested; otherwise builds only if the
+        # scope changed or nothing is prepared yet)
+        self.distributor._prepare_person_pools(refresh=refresh_pools)
 
         # Find category index for the category to add
         add_cat_idx = self.distributor._validate_category_index(add_category)
@@ -96,8 +96,14 @@ class HouseholdExcessHandler:
                 'error': f"Unknown category '{add_category}'"
             }
 
-        # Filter households by target patterns
+        # Filter households by target patterns, restricted to the active
+        # geo-unit scope BEFORE shuffling so out-of-scope households cannot
+        # perturb the permutation (keeps units order-independent)
         target_households = self.distributor._filter_households_by_patterns(target_patterns)
+        if self.distributor.geo_unit_scope is not None:
+            target_households = [
+                household for household in target_households
+                if household.geographical_unit.name in self.distributor.geo_unit_scope]
         logger.info(f"Found {len(target_households)} households matching target patterns")
 
         if not target_households:
@@ -289,9 +295,9 @@ class HouseholdExcessHandler:
         logger.info("WARNING: This step IGNORES max household size constraints!")
         logger.info("")
 
-        # Refresh pools if requested
-        if refresh_pools:
-            self.distributor._prepare_person_pools(refresh=True)
+        # Prepare pools (refresh when requested; otherwise builds only if the
+        # scope changed or nothing is prepared yet)
+        self.distributor._prepare_person_pools(refresh=refresh_pools)
 
         # Find category index
         add_cat_idx = self.distributor._validate_category_index(add_category)
@@ -303,8 +309,13 @@ class HouseholdExcessHandler:
                 'error': f"Unknown category '{add_category}'"
             }
 
-        # Group households by geo_unit and pattern
+        # Group households by geo_unit and pattern (restricted to the active
+        # geo-unit scope so units stay independent of each other)
         filtered_households = self.distributor._filter_households_by_patterns(target_patterns)
+        if self.distributor.geo_unit_scope is not None:
+            filtered_households = [
+                household for household in filtered_households
+                if household.geographical_unit.name in self.distributor.geo_unit_scope]
         households_by_geo_unit_pattern = {}
         for household in filtered_households:
             geo_unit_code = household.geographical_unit.name
@@ -321,8 +332,9 @@ class HouseholdExcessHandler:
         people_added = 0
         households_modified = 0
 
-        # Progress tracking
-        geo_units_list = list(set(k[0] for k in households_by_geo_unit_pattern.keys()))
+        # Progress tracking. Sorted so iteration order is stable across
+        # processes (a raw set's order varies with string-hash randomisation).
+        geo_units_list = sorted(set(k[0] for k in households_by_geo_unit_pattern.keys()))
         total_geo_units = len(geo_units_list)
         geo_units_processed = 0
         progress_interval = max(1, total_geo_units // 10)  # Update every 10%

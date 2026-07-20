@@ -11,7 +11,7 @@ the unified household + venue allocation strategy.
 import logging
 import numpy as np
 from collections import deque
-from typing import List, Dict
+from typing import List, Dict, Optional, Set
 
 from may.utils.attribute_access import get_person_attribute
 
@@ -19,7 +19,9 @@ logger = logging.getLogger("venue_allocator")
 
 
 def _allocate_to_venue_type(venue_type: str, allocation_config: Dict,
-                            population, venues, household_distributor) -> Dict:
+                            population, venues, household_distributor,
+                            scope_geo_unit_names: Optional[Set[str]] = None,
+                            scope_sgu_codes: Optional[Set[str]] = None) -> Dict:
     """
     Allocate people to a specific venue type.
 
@@ -29,6 +31,10 @@ def _allocate_to_venue_type(venue_type: str, allocation_config: Dict,
         population: PopulationManager
         venues: VenueManager
         household_distributor: HouseholdDistributor
+        scope_geo_unit_names: When set, only venues whose geographical unit
+            name is in this set are considered (the loop unit's whole subtree)
+        scope_sgu_codes: When set, only people from these smallest-level units
+            are eligible
 
     Returns:
         dict: Statistics about this allocation
@@ -50,12 +56,17 @@ def _allocate_to_venue_type(venue_type: str, allocation_config: Dict,
             allocation_config=allocation_config,
             population=population,
             venues=venues,
-            household_distributor=household_distributor
+            household_distributor=household_distributor,
+            scope_geo_unit_names=scope_geo_unit_names,
+            scope_sgu_codes=scope_sgu_codes
         )
 
     # Otherwise, use simple allocation
     # Get all venues of this type
     venue_list = venues.get_venues_by_type(venue_type)
+    if scope_geo_unit_names is not None:
+        venue_list = [venue for venue in venue_list
+                      if venue.geographical_unit.name in scope_geo_unit_names]
     if not venue_list:
         logger.warning(f"  No venues found for type '{venue_type}'")
         return {
@@ -94,7 +105,8 @@ def _allocate_to_venue_type(venue_type: str, allocation_config: Dict,
     eligible_people = _get_eligible_people(
         population=population,
         household_distributor=household_distributor,
-        eligibility=eligibility
+        eligibility=eligibility,
+        scope_sgu_codes=scope_sgu_codes
     )
 
     logger.info(f"  Found {len(eligible_people)} eligible people")
@@ -210,7 +222,8 @@ def _allocate_to_venue_type(venue_type: str, allocation_config: Dict,
     }
 
 
-def _get_eligible_people(population, household_distributor, eligibility) -> List:
+def _get_eligible_people(population, household_distributor, eligibility,
+                         scope_sgu_codes: Optional[Set[str]] = None) -> List:
     """
     Get list of people who meet eligibility criteria.
 
@@ -234,22 +247,31 @@ def _get_eligible_people(population, household_distributor, eligibility) -> List
         population: PopulationManager
         household_distributor: HouseholdDistributor
         eligibility: List of criteria dicts or empty dict/list
+        scope_sgu_codes: When set, only people from these smallest-level
+            units are candidates (sorted iteration keeps order deterministic)
 
     Returns:
         list: List of eligible Person objects
     """
     eligible = []
 
+    # Candidate source: whole population, or only the scoped units' people
+    if scope_sgu_codes is None:
+        candidate_people = population.get_all_people()
+    else:
+        candidate_people = [person for code in sorted(scope_sgu_codes)
+                            for person in population.get_people_by_geo_unit(code)]
+
     # Handle empty eligibility (no filtering)
     if not eligibility:
         # Return all unallocated people
-        return [p for p in population.get_all_people()
+        return [p for p in candidate_people
                 if p.id not in household_distributor.allocated_people]
 
     # Support both list format (new) and dict format (legacy)
     criteria_list = eligibility if isinstance(eligibility, list) else []
 
-    for person in population.get_all_people():
+    for person in candidate_people:
         # Skip if already allocated
         if person.id in household_distributor.allocated_people:
             continue
@@ -390,7 +412,9 @@ def _check_attribute_constraints(person, venue, attribute_constraints: Dict) -> 
 
 
 def _allocate_with_attributes(venue_type: str, allocation_config: Dict,
-                               population, venues, household_distributor) -> Dict:
+                               population, venues, household_distributor,
+                               scope_geo_unit_names: Optional[Set[str]] = None,
+                               scope_sgu_codes: Optional[Set[str]] = None) -> Dict:
     """
     Allocate people to venues using attribute-aware capacity matching.
 
@@ -418,7 +442,10 @@ def _allocate_with_attributes(venue_type: str, allocation_config: Dict,
             "falling back to simple allocation"
         )
         # Fall back to simple mode (no column_mappings → simple gate)
-        return _allocate_to_venue_type(venue_type, allocation_config, population, venues, household_distributor)
+        return _allocate_to_venue_type(venue_type, allocation_config, population, venues,
+                                       household_distributor,
+                                       scope_geo_unit_names=scope_geo_unit_names,
+                                       scope_sgu_codes=scope_sgu_codes)
 
     # Cache on the venue manager so post-allocation reporting/debug code
     # (export_residence_venues, debug_output) can still find it.
@@ -426,6 +453,9 @@ def _allocate_with_attributes(venue_type: str, allocation_config: Dict,
 
     # Get all venues of this type
     venue_list = venues.get_venues_by_type(venue_type)
+    if scope_geo_unit_names is not None:
+        venue_list = [venue for venue in venue_list
+                      if venue.geographical_unit.name in scope_geo_unit_names]
     if not venue_list:
         logger.warning(f"  No venues found for type '{venue_type}'")
         return {
@@ -444,7 +474,10 @@ def _allocate_with_attributes(venue_type: str, allocation_config: Dict,
 
     if not column_mappings:
         logger.warning(f"  No column_mappings in capacity_config, falling back to simple allocation")
-        return _allocate_to_venue_type(venue_type, allocation_config, population, venues, household_distributor)
+        return _allocate_to_venue_type(venue_type, allocation_config, population, venues,
+                                       household_distributor,
+                                       scope_geo_unit_names=scope_geo_unit_names,
+                                       scope_sgu_codes=scope_sgu_codes)
 
     # Get attribute constraints (if any)
     attribute_constraints = capacity_config.get('attribute_constraints', {})
@@ -472,7 +505,8 @@ def _allocate_with_attributes(venue_type: str, allocation_config: Dict,
     eligible_people = _get_eligible_people(
         population=population,
         household_distributor=household_distributor,
-        eligibility=eligibility
+        eligibility=eligibility,
+        scope_sgu_codes=scope_sgu_codes
     )
 
     logger.info(f"  Found {len(eligible_people)} eligible people (pre-filtered)")
