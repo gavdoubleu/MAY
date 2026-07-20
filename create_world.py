@@ -22,8 +22,7 @@ from may.utils import path_resolver as pr
 
 logger = logging.getLogger("create_world")
 logging.basicConfig(
-    # MAY_LOG_LEVEL=DEBUG enables the per-stage [MEMORY] lines below.
-    level=os.environ.get("MAY_LOG_LEVEL", "INFO"),
+    level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout)
@@ -32,6 +31,11 @@ logging.basicConfig(
 
 # Suppress numexpr logging
 logging.getLogger('numexpr').setLevel(logging.WARNING)
+
+# MAY_LOG_LEVEL=DEBUG enables this module's per-stage [MEMORY] lines without
+# opening the DEBUG floodgates on every other logger (household allocation
+# alone emits millions of DEBUG lines).
+logger.setLevel(os.environ.get("MAY_LOG_LEVEL", "INFO"))
 
 def set_random_seed(seed=999):
     """
