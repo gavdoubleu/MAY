@@ -152,6 +152,20 @@ class GuttedMembers:
     def discard(self, item):
         self._refuse()
 
+    def __ior__(self, other):
+        # Operator dunders are looked up on the type, bypassing
+        # __getattr__, so `members |= ...` needs an explicit refusal.
+        self._refuse()
+
+    def __getattr__(self, name):
+        # Any set method not covered above (clear, update, pop, union,
+        # ...) must raise the curated error, not a bare AttributeError.
+        # Dunder probes (copy/pickle protocol lookups) keep AttributeError
+        # semantics so generic machinery isn't broken by the sentinel.
+        if name.startswith('__') and name.endswith('__'):
+            raise AttributeError(name)
+        self._refuse()
+
 
 class GuttedMemberMetadata:
     """Sentinel replacing `Subset.member_metadata` after gutting. Raises on

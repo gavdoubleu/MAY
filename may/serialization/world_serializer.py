@@ -295,6 +295,13 @@ class WorldSerializer:
         subset_keys = [(venue.id, subset.subset_index) for venue, subset in venue_subset_pairs]
 
         if tracker.subset_keys_already_flushed(subset_keys):
+            if not os.path.exists(staging_path):
+                raise RuntimeError(
+                    f"{venue_type!r} subsets were flushed to staging, but "
+                    f"the staging file {staging_path!r} is gone (staging/ "
+                    f"is deleted after a successful export): cannot repeat "
+                    f"a subsets flush after final export."
+                )
             logger.info(
                 f"{venue_type} subsets already flushed with same keys; skipping."
             )
@@ -498,6 +505,19 @@ class WorldSerializer:
                 f"file created by export_core() ({self._core_output_file!r})."
             )
 
+        # A successful export deletes staging/ but leaves husks and tracker
+        # state behind: a repeat export cannot stream flushed subsets back,
+        # so fail loud here rather than with a raw OSError mid-export.
+        for venue_type, tracker in self._venue_flushes.items():
+            if tracker.subsets_flushed and not os.path.exists(self._staging_path(venue_type)):
+                raise RuntimeError(
+                    f"{venue_type!r} subsets were flushed to staging, but "
+                    f"the staging file {self._staging_path(venue_type)!r} is "
+                    f"gone (staging/ is deleted after a successful export): "
+                    f"a world whose subsets were flushed can only be "
+                    f"exported once."
+                )
+
         stats = {
             'num_people': 0,
             'num_venues': 0,
@@ -505,50 +525,54 @@ class WorldSerializer:
             'num_subsets': 0,
         }
 
-        with h5py.File(output_file, 'r+' if core_written else 'w') as f:
-            # Write metadata
-            self._write_metadata(f, world, stats)
+        try:
+            with h5py.File(output_file, 'r+' if core_written else 'w') as f:
+                # Write metadata
+                self._write_metadata(f, world, stats)
 
-            # Write geography
-            logger.info("Serializing geography...")
-            if core_written:
-                # Re-derive the frozen row order (stable sort of immutable
-                # geo_unit ids — identical to the export_core() order).
-                self._geo_units_sorted, _ = self._stable_sort_by_geo_unit(
-                    list(world.geography.units_by_id.values()), geo_unit_key=lambda u: u
-                )
-            else:
-                self._write_geography_core(f, world)
-            self._write_geography_properties(f, world)
-            stats['num_geo_units'] = len(world.geography.get_all_units())
+                # Write geography
+                logger.info("Serializing geography...")
+                if core_written:
+                    # Re-derive the frozen row order (stable sort of immutable
+                    # geo_unit ids — identical to the export_core() order).
+                    self._geo_units_sorted, _ = self._stable_sort_by_geo_unit(
+                        list(world.geography.units_by_id.values()), geo_unit_key=lambda u: u
+                    )
+                else:
+                    self._write_geography_core(f, world)
+                self._write_geography_properties(f, world)
+                stats['num_geo_units'] = len(world.geography.get_all_units())
 
-            # Write population
-            logger.info("Serializing population...")
-            if core_written:
-                # Re-derive the frozen row order (stable sort of immutable
-                # geo_unit ids — identical to the export_core() order).
-                self._people_sorted, _ = self._stable_sort_by_geo_unit(world.population.people)
-            else:
-                self._write_population_core(f, world)
-            self._write_population_properties(f, world)
-            stats['num_people'] = len(world.population.people)
+                # Write population
+                logger.info("Serializing population...")
+                if core_written:
+                    # Re-derive the frozen row order (stable sort of immutable
+                    # geo_unit ids — identical to the export_core() order).
+                    self._people_sorted, _ = self._stable_sort_by_geo_unit(world.population.people)
+                else:
+                    self._write_population_core(f, world)
+                self._write_population_properties(f, world)
+                stats['num_people'] = len(world.population.people)
 
-            # Write venues
-            logger.info("Serializing venues...")
-            stats['num_subsets'] = self._write_venues(f, world)
-            stats['num_venues'] = sum(len(d) for d in world.venues.venues_by_type_and_id.values())
+                # Write venues
+                logger.info("Serializing venues...")
+                stats['num_subsets'] = self._write_venues(f, world)
+                stats['num_venues'] = sum(len(d) for d in world.venues.venues_by_type_and_id.values())
 
-            # Write activity mappings
-            logger.info("Serializing activity mappings...")
-            self._write_activity_mappings(f, world)
+                # Write activity mappings
+                logger.info("Serializing activity mappings...")
+                self._write_activity_mappings(f, world)
 
-            # Write registries (Enum mappings for C++)
-            logger.info("Writing string registries...")
-            self._write_registries(f)
+                # Write registries (Enum mappings for C++)
+                logger.info("Writing string registries...")
+                self._write_registries(f)
+        finally:
+            # Readers must close even on a failed export: a retry re-inits
+            # self._subset_staging_readers, which would orphan open handles.
+            self._close_subset_staging_readers()
 
         # Any exception above propagates before this point, so staging/
         # survives a crash automatically for inspection/retry.
-        self._close_subset_staging_readers()
         if self._core_output_file is not None:
             staging_dir = self._staging_dir()
             if os.path.isdir(staging_dir):
@@ -1292,7 +1316,7 @@ class WorldSerializer:
         # Subset-flushed cohorts must be fully closed: no live (non-gutted)
         # subset may exist on the venue_type, and every staged subset must
         # still be present as a husk — see docs/adr/0005, flush_venue_subsets.
-        from may.flushing import GuttedMembers
+        from may.flushing import GuttedMembers, GuttedMemberMetadata
         for venue_type, tracker in self._venue_flushes.items():
             venues_of_type = venues_by_type.get(venue_type, [])
             live_keys = {
@@ -1307,6 +1331,26 @@ class WorldSerializer:
                 for subset in venue.subsets.values()
             }
             tracker.check_subset_drift(live_keys, all_keys)
+
+            # A husk whose member_metadata was reassigned after gutting
+            # (plain attribute assignment bypasses the sentinel) would have
+            # its new rows silently dropped in favour of the staged
+            # metadata — fail loud instead.
+            metadata_reassigned_keys = {
+                (venue.id, subset.subset_index)
+                for venue in venues_of_type
+                for subset in venue.subsets.values()
+                if isinstance(subset.members, GuttedMembers)
+                and not isinstance(subset.member_metadata, GuttedMemberMetadata)
+            }
+            if metadata_reassigned_keys:
+                raise RuntimeError(
+                    f"{venue_type!r} subsets {sorted(metadata_reassigned_keys)} "
+                    f"had member_metadata reassigned after the subsets flush: "
+                    f"export would write the staged metadata and silently drop "
+                    f"the new rows. Reorder the timeline so metadata is "
+                    f"assigned before the flush_properties subsets step."
+                )
 
         # Configured types with zero current venues (e.g. never populated,
         # or fully removed post-flush) must still get their subgroup —
