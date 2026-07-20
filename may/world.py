@@ -251,6 +251,14 @@ class World:
         again by a later flush_properties call or picked up at final
         export once it has real values.
 
+        When both `properties` and `subsets` are given, requested property
+        names are validated up front (no I/O), then subsets are flushed
+        before properties. This makes a call that fails partway safe to
+        retry identically: if subsets fails, properties were never touched;
+        if properties fails after subsets already succeeded, the retry's
+        subsets flush is a no-op (identical keys already recorded) and only
+        properties runs for real.
+
         Args:
             target: 'population', 'geo_units' or 'venues'
             properties: list of property names to flush; may be empty iff
@@ -300,13 +308,20 @@ class World:
 
         if properties:
             spec = FLUSH_SPECS[target]
+            spec.tracker(self, venue_type).validate(
+                properties, spec.configured(self, venue_type)
+            )
+
+        if subsets:
+            self._serializer.flush_venue_subsets(self, venue_type)
+
+        if properties:
+            spec = FLUSH_SPECS[target]
             written_properties = spec.serializer_call(self, venue_type, properties)
             tombstone_objects(
                 spec.cohort(self, venue_type), written_properties,
                 spec.registry(self, venue_type),
             )
-        if subsets:
-            self._serializer.flush_venue_subsets(self, venue_type)
 
     def export_to_hdf5(self, output_file, config_file=None):
         """

@@ -1063,3 +1063,117 @@ class TestFlushPropertiesVenueSubsets:
         world.export_to_hdf5(canonical_path, config_file=None)
 
         assert not staging_dir.exists()
+
+
+class TestFlushPropertiesCombinedRetrySafety:
+    """A single flush_properties(properties=[...], subsets=True) call must
+    be safe to retry identically after a partial failure: subsets runs
+    before properties, and properties are validated up front, so neither
+    ordering leaves a retry stuck on CohortFlushTracker's "flushed twice"
+    check (see tmp/plans/fix-partial-flush-no-rollback.md)."""
+
+    VENUE_TYPE = "household"
+
+    @pytest.fixture
+    def world_with_households(self, minimal_world):
+        people = list(minimal_world.population.people)
+        sgu = minimal_world.geography.units_by_id[3]
+        from may.geography import Venue
+        household_a = Venue(name="household_a", venue_type=self.VENUE_TYPE, geographical_unit=sgu)
+        household_b = Venue(name="household_b", venue_type=self.VENUE_TYPE, geographical_unit=sgu)
+        minimal_world.venues.add_venue(household_a)
+        minimal_world.venues.add_venue(household_b)
+        for offset, household in enumerate((household_a, household_b)):
+            household.properties["capacity"] = 5 + offset
+        for person in people[:5]:
+            household_a.add_to_subset(person)
+        for person in people[5:]:
+            household_b.add_to_subset(person)
+        return minimal_world
+
+    def test_retry_after_subsets_failure_leaves_properties_untouched_then_succeeds(
+        self, world_with_households, tmp_path
+    ):
+        from may.flushing import FlushedPropertyError
+        world = world_with_households
+        canonical_path = str(tmp_path / "canonical.h5")
+        world.create_canonical_file(canonical_path, config_file="configs/2021/serialization_config.yaml")
+
+        households = world.venues.get_venues_by_type(self.VENUE_TYPE)
+
+        with patch.object(
+            world._serializer, "flush_venue_subsets",
+            side_effect=RuntimeError("staging write failed"),
+        ):
+            with pytest.raises(RuntimeError, match="staging write failed"):
+                world.flush_properties(target="venues", venue_type=self.VENUE_TYPE,
+                                       properties=["capacity"], subsets=True)
+
+        # Properties must not have been flushed by the failed call.
+        for household in households:
+            assert household.properties["capacity"] is not None
+
+        world.flush_properties(target="venues", venue_type=self.VENUE_TYPE,
+                               properties=["capacity"], subsets=True)  # retry, no raise
+
+        for household in households:
+            with pytest.raises(FlushedPropertyError):
+                household.properties["capacity"]
+            for subset in household.subsets.values():
+                with pytest.raises(FlushedPropertyError):
+                    list(subset.members)
+
+    def test_retry_after_properties_failure_skips_already_flushed_subsets(
+        self, world_with_households, tmp_path, caplog
+    ):
+        world = world_with_households
+        canonical_path = str(tmp_path / "canonical.h5")
+        world.create_canonical_file(canonical_path, config_file="configs/2021/serialization_config.yaml")
+
+        with patch.object(
+            world._serializer, "flush_venue_properties",
+            side_effect=RuntimeError("write failed"),
+        ):
+            with pytest.raises(RuntimeError, match="write failed"):
+                world.flush_properties(target="venues", venue_type=self.VENUE_TYPE,
+                                       properties=["capacity"], subsets=True)
+
+        # Subsets succeeded before properties raised.
+        households = world.venues.get_venues_by_type(self.VENUE_TYPE)
+        from may.flushing import FlushedPropertyError
+        for household in households:
+            for subset in household.subsets.values():
+                with pytest.raises(FlushedPropertyError):
+                    list(subset.members)
+
+        staging_path = tmp_path / "staging" / f"{self.VENUE_TYPE}.h5"
+        mtime_before_retry = staging_path.stat().st_mtime_ns
+
+        with caplog.at_level("INFO", logger="world_serializer"):
+            world.flush_properties(target="venues", venue_type=self.VENUE_TYPE,
+                                   properties=["capacity"], subsets=True)  # retry, no raise
+
+        assert "already flushed with same keys; skipping" in caplog.text
+        assert staging_path.stat().st_mtime_ns == mtime_before_retry
+
+        for household in households:
+            with pytest.raises(FlushedPropertyError):
+                household.properties["capacity"]
+
+    def test_unknown_property_with_subsets_fails_before_any_staging_write(
+        self, world_with_households, tmp_path
+    ):
+        world = world_with_households
+        canonical_path = str(tmp_path / "canonical.h5")
+        world.create_canonical_file(canonical_path, config_file="configs/2021/serialization_config.yaml")
+
+        with pytest.raises(ValueError, match="not_a_property"):
+            world.flush_properties(target="venues", venue_type=self.VENUE_TYPE,
+                                   properties=["not_a_property"], subsets=True)
+
+        assert not (tmp_path / "staging").exists()
+
+        households = world.venues.get_venues_by_type(self.VENUE_TYPE)
+        for household in households:
+            for subset in household.subsets.values():
+                assert list(subset.members)  # never gutted

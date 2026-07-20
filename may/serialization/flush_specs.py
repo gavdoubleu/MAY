@@ -7,7 +7,11 @@ so `flush_properties` can run one uniform tail instead of three near-copies.
 
 from collections import namedtuple
 
-FlushSpec = namedtuple("FlushSpec", ["serializer_call", "cohort", "registry"])
+from may.serialization.cohort_flush import CohortFlushTracker
+
+FlushSpec = namedtuple(
+    "FlushSpec", ["serializer_call", "cohort", "registry", "tracker", "configured"]
+)
 
 FLUSH_SPECS = {
     "population": FlushSpec(
@@ -16,6 +20,8 @@ FLUSH_SPECS = {
         ),
         cohort=lambda world, venue_type: world.population.people,
         registry=lambda world, venue_type: world._serializer._population_flush.flushed_names,
+        tracker=lambda world, venue_type: world._serializer._population_flush,
+        configured=lambda world, venue_type: world._serializer.config.get_person_properties(),
     ),
     "geo_units": FlushSpec(
         serializer_call=lambda world, venue_type, properties: (
@@ -23,6 +29,10 @@ FLUSH_SPECS = {
         ),
         cohort=lambda world, venue_type: world.geography.units_by_id.values(),
         registry=lambda world, venue_type: world._serializer._geography_flush.flushed_names,
+        tracker=lambda world, venue_type: world._serializer._geography_flush,
+        configured=lambda world, venue_type: (
+            world._serializer.config.get_geography_settings()['properties']
+        ),
     ),
     "venues": FlushSpec(
         serializer_call=lambda world, venue_type, properties: (
@@ -31,6 +41,12 @@ FLUSH_SPECS = {
         cohort=lambda world, venue_type: world.venues.get_venues_by_type(venue_type),
         registry=lambda world, venue_type: (
             world._serializer._venue_flushes[venue_type].flushed_names
+        ),
+        tracker=lambda world, venue_type: world._serializer._venue_flushes.setdefault(
+            venue_type, CohortFlushTracker(venue_type)
+        ),
+        configured=lambda world, venue_type: (
+            world._serializer.config.get_venue_properties(venue_type)
         ),
     ),
 }
