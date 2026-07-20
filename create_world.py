@@ -22,7 +22,8 @@ from may.utils import path_resolver as pr
 
 logger = logging.getLogger("create_world")
 logging.basicConfig(
-    level=logging.INFO,
+    # MAY_LOG_LEVEL=DEBUG enables the per-stage [MEMORY] lines below.
+    level=os.environ.get("MAY_LOG_LEVEL", "INFO"),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout)
@@ -46,6 +47,26 @@ def set_random_seed(seed=999):
     return
 
 set_random_seed(0)
+
+
+def log_memory_usage(stage_label):
+    """DEBUG-level VmRSS/VmHWM snapshot from /proc/self/status (Linux only).
+
+    Silent on default (INFO) runs and on platforms without procfs; run with
+    MAY_LOG_LEVEL=DEBUG to capture per-stage memory for peak-RSS comparisons
+    between flushed and unflushed configs.
+    """
+    status_path = "/proc/self/status"
+    if not os.path.exists(status_path):
+        return
+    resident = peak = None
+    with open(status_path) as status_file:
+        for line in status_file:
+            if line.startswith("VmRSS:"):
+                resident = " ".join(line.split()[1:])
+            elif line.startswith("VmHWM:"):
+                peak = " ".join(line.split()[1:])
+    logger.debug(f"[MEMORY] after {stage_label}: VmRSS={resident} VmHWM={peak}")
 
 
 VALID_POPULATION_TYPES = {"matrix", "explicit", "explicit_batch"}
@@ -326,6 +347,12 @@ def main():
             else:
                 logger.warning(f"Unknown timeline step type: {step_type}")
 
+            step_label = step_config if step_config else (
+                f"target={step.get('target')} venue_type={step.get('venue_type')}"
+                if step_type == "flush_properties" else ""
+            )
+            log_memory_usage(f"timeline step {step_type} {step_label}".rstrip())
+
         # Commute-mode verification dump (after all assignments/distributors)
         if config.get("debug_outputs", {}).get("enabled", False):
             serial_config = config.get("serialization", {})
@@ -372,6 +399,8 @@ def main():
                 logger.exception(e)
                 sys.exit(1)
 
+        log_memory_usage("relationship pipeline")
+
     # ROMANTIC RELATIONSHIPS - Sexual orientation and partnerships
     romantic_config = config.get("romantic_relationships", {})
 
@@ -393,6 +422,8 @@ def main():
             logger.exception(e)
             sys.exit(1)
 
+        log_memory_usage("romantic relationships")
+
     logger.info("")
     logger.info("=" * 60)
     logger.info("World creation complete!")
@@ -412,6 +443,7 @@ def main():
             logger.error(f"Failed to serialize world to HDF5: {e}")
             logger.exception(e)
             sys.exit(1)
+        log_memory_usage("final export")
 
     return world
 
