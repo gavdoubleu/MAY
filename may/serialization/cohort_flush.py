@@ -70,37 +70,53 @@ class CohortFlushTracker:
             raise self._drift_error(cohort_ids)
 
     def record_subset_keys(self, subset_keys):
-        """Record the `(Venue.id, subset_index)` keys staged by a real
-        subsets flush, raising if a second subsets-flush for this cohort
-        sends a different set."""
+        """Accumulate the `(Venue.id, subset_index)` keys staged by a real
+        subsets flush. Subsets may be staged in several disjoint batches
+        (one per geo unit, say), so keys add to the recorded set rather
+        than replacing it; an overlapping batch raises."""
         subset_keys = frozenset(subset_keys)
-        if (
-            self._flushed_subset_keys is not None
-            and subset_keys != self._flushed_subset_keys
-        ):
+        if self._flushed_subset_keys is None:
+            self._flushed_subset_keys = subset_keys
+            return
+        overlap = subset_keys & self._flushed_subset_keys
+        if overlap:
             raise RuntimeError(
-                f"{self.label!r} cohort subsets flushed twice with "
-                f"different subset sets: recorded "
-                f"{sorted(self._flushed_subset_keys)}, now "
-                f"{sorted(subset_keys)}."
+                f"{self.label!r} cohort subsets staged twice: "
+                f"{sorted(overlap)} already staged by an earlier batch."
             )
-        self._flushed_subset_keys = subset_keys
+        self._flushed_subset_keys |= subset_keys
 
     @property
     def subsets_flushed(self):
         """True if a real subsets flush has happened for this cohort."""
         return self._flushed_subset_keys is not None
 
-    def subset_keys_already_flushed(self, subset_keys):
-        """True if `subset_keys` exactly match an earlier real subsets
-        flush for this cohort (safe to skip re-flushing)."""
-        return self._flushed_subset_keys == frozenset(subset_keys)
+    def classify_subset_batch(self, subset_keys):
+        """Classify a batch against what this cohort has already staged:
+        'repeat' if every key was staged before (safe to skip), 'new' if
+        none were. A partial overlap raises — batches must be disjoint or
+        identical, otherwise a re-flush would double-stage some subsets."""
+        subset_keys = frozenset(subset_keys)
+        if self._flushed_subset_keys is None:
+            return 'new'
+        overlap = subset_keys & self._flushed_subset_keys
+        if not overlap:
+            return 'new'
+        if overlap == subset_keys:
+            return 'repeat'
+        raise RuntimeError(
+            f"{self.label!r} cohort subsets batch partially overlaps an "
+            f"earlier batch: {sorted(overlap)} already staged, "
+            f"{sorted(subset_keys - overlap)} not. Batches must be "
+            f"disjoint or identical."
+        )
 
     def check_subset_drift(self, live_keys, all_keys):
         """Raise if this cohort's subsets were flushed but `live_keys`
         (non-gutted subsets on a venue of this cohort) is non-empty, or a
         recorded subset is missing from `all_keys` (current husks + live
-        subsets). No-op if this cohort's subsets were never flushed."""
+        subsets). The recorded set is the union of every staged batch. No-op
+        if this cohort's subsets were never flushed."""
         if self._flushed_subset_keys is None:
             return
         if live_keys:

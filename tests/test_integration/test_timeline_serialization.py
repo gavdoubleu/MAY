@@ -1091,7 +1091,7 @@ class TestFlushPropertiesVenueSubsets:
         canonical_path = str(tmp_path / "canonical.h5")
         world.create_canonical_file(canonical_path, config_file="configs/2021/serialization_config.yaml")
 
-        with patch.object(world._serializer, "_create_dataset",
+        with patch.object(world._serializer, "_append_staging_dataset",
                           side_effect=RuntimeError("disk full")):
             with pytest.raises(RuntimeError, match="disk full"):
                 world.flush_properties(target="venues", venue_type=self.VENUE_TYPE,

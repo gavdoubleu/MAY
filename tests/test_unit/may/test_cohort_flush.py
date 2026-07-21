@@ -89,34 +89,45 @@ class TestRecordSubsetKeys:
         tracker = CohortFlushTracker("household")
         tracker.record_subset_keys({(1, 0), (1, 1)})  # no raise
 
-    def test_second_call_with_different_keys_raises(self):
+    def test_disjoint_batches_accumulate(self):
+        tracker = CohortFlushTracker("household")
+        tracker.record_subset_keys({(1, 0), (1, 1)})
+        tracker.record_subset_keys({(2, 0)})
+
+        tracker.check_subset_drift(
+            live_keys=set(), all_keys={(1, 0), (1, 1), (2, 0)}
+        )  # no raise: the union is the recorded set
+
+    def test_overlapping_batch_raises(self):
         tracker = CohortFlushTracker("household")
         tracker.record_subset_keys({(1, 0), (1, 1)})
 
-        with pytest.raises(RuntimeError, match="household"):
-            tracker.record_subset_keys({(1, 0)})
+        with pytest.raises(RuntimeError, match="already staged"):
+            tracker.record_subset_keys({(1, 0), (2, 0)})
 
-    def test_repeated_call_with_same_keys_does_not_raise(self):
+
+class TestClassifySubsetBatch:
+
+    def test_new_before_any_flush(self):
+        tracker = CohortFlushTracker("household")
+        assert tracker.classify_subset_batch({(1, 0)}) == 'new'
+
+    def test_repeat_on_exact_match(self):
         tracker = CohortFlushTracker("household")
         tracker.record_subset_keys({(1, 0), (1, 1)})
-        tracker.record_subset_keys({(1, 0), (1, 1)})  # no raise
+        assert tracker.classify_subset_batch({(1, 0), (1, 1)}) == 'repeat'
 
-
-class TestSubsetKeysAlreadyFlushed:
-
-    def test_false_before_any_flush(self):
-        tracker = CohortFlushTracker("household")
-        assert tracker.subset_keys_already_flushed({(1, 0)}) is False
-
-    def test_true_on_exact_match(self):
+    def test_new_on_disjoint_batch(self):
         tracker = CohortFlushTracker("household")
         tracker.record_subset_keys({(1, 0), (1, 1)})
-        assert tracker.subset_keys_already_flushed({(1, 0), (1, 1)}) is True
+        assert tracker.classify_subset_batch({(2, 0)}) == 'new'
 
-    def test_false_on_different_set(self):
+    def test_partial_overlap_raises(self):
         tracker = CohortFlushTracker("household")
         tracker.record_subset_keys({(1, 0), (1, 1)})
-        assert tracker.subset_keys_already_flushed({(1, 0)}) is False
+
+        with pytest.raises(RuntimeError, match="partially overlaps"):
+            tracker.classify_subset_batch({(1, 0), (2, 0)})
 
 
 class TestCheckSubsetDrift:

@@ -56,6 +56,9 @@ class WorldSerializer:
         self._population_flush_sorted = None
         self._geography_flush_sorted = None
         self._venue_flush_sorted = {}
+        # Open staging readers keyed by venue_type, for reading staged
+        # membership back mid-run; export() resets this too.
+        self._subset_staging_readers = {}
 
     def export_core(self, world, output_file):
         """
@@ -247,25 +250,58 @@ class WorldSerializer:
             log_label=venue_type,
         )
 
+    def _append_staging_dataset(self, group, name, data,
+                                back_fill_rows=0, fill_value=None):
+        """Append `data` to a resizable 1-D staging dataset, creating it on
+        first use. A dataset created after earlier batches were staged (a
+        metadata field that only appears in a later batch) is back-filled
+        with `fill_value` for those `back_fill_rows` rows, so every column
+        stays row-aligned. Returns the (start, count) region written, for
+        write-back verification."""
+        data = np.asarray(data)
+        if name not in group:
+            dataset = group.create_dataset(
+                name, shape=(0,), maxshape=(None,), dtype=data.dtype,
+                chunks=True,
+            )
+            if back_fill_rows:
+                dataset.resize((back_fill_rows,))
+                dataset[:] = fill_value
+        else:
+            dataset = group[name]
+        start = dataset.shape[0]
+        dataset.resize((start + len(data),))
+        dataset[start:] = data
+        return start, len(data)
+
     def _staging_dir(self):
         return os.path.join(os.path.dirname(self._core_output_file), 'staging')
 
     def _staging_path(self, venue_type):
         return os.path.join(self._staging_dir(), f'{venue_type}.h5')
 
-    def flush_venue_subsets(self, world, venue_type):
+    def flush_venue_subsets(self, world, venue_type, subset_keys=None):
         """
         Stage one venue type's subset membership to
         `<staging_dir>/<venue_type>.h5` and gut the live subsets, freeing
         their `.members`/`.member_metadata` (see may/flushing.py,
-        docs/adr/0002). The cohort's `(Venue.id, subset_index)` keys are
-        recorded on this venue_type's CohortFlushTracker and re-verified
-        at final export (docs/adr/0005): no live subset may exist on this
-        venue_type afterwards, and every staged subset must still be
-        present as a husk.
+        docs/adr/0002).
 
-        Staging is skipped, with a warning, if the venue_type currently
-        has no subsets at all (mirrors the all-None property policy).
+        `subset_keys` optionally restricts the flush to a batch of
+        `(Venue.id, subset_index)` keys, so a venue_type's subsets can be
+        staged incrementally — one batch per geo unit during allocation,
+        rather than the whole world at once. Batches append to the staging
+        datasets and must be disjoint (an identical repeat is skipped);
+        staged order is flush-call order, and the final export re-indexes
+        by key. Omitting `subset_keys` stages every live subset of the type.
+
+        The staged keys accumulate on this venue_type's CohortFlushTracker
+        and their union is re-verified at final export (docs/adr/0005): no
+        live subset may exist on this venue_type afterwards, and every
+        staged subset must still be present as a husk.
+
+        Staging is skipped, with a warning, if the batch is empty (mirrors
+        the all-None property policy).
         """
         from may.flushing import gut_subset
 
@@ -282,6 +318,20 @@ class WorldSerializer:
             for venue in world.venues.get_venues_by_type(venue_type)
             for subset in venue.subsets.values()
         ]
+        if subset_keys is not None:
+            requested = set(subset_keys)
+            venue_subset_pairs = [
+                (venue, subset) for venue, subset in venue_subset_pairs
+                if (venue.id, subset.subset_index) in requested
+            ]
+            missing = requested - {
+                (venue.id, subset.subset_index) for venue, subset in venue_subset_pairs
+            }
+            if missing:
+                raise RuntimeError(
+                    f"Cannot stage {venue_type!r} subsets {sorted(missing)}: "
+                    f"no such subset on any venue of this type."
+                )
         if not venue_subset_pairs:
             logger.warning(
                 f"No subsets to flush for venue_type {venue_type!r}; skipping."
@@ -292,9 +342,9 @@ class WorldSerializer:
         os.makedirs(staging_dir, exist_ok=True)
         staging_path = self._staging_path(venue_type)
 
-        subset_keys = [(venue.id, subset.subset_index) for venue, subset in venue_subset_pairs]
+        batch_keys = [(venue.id, subset.subset_index) for venue, subset in venue_subset_pairs]
 
-        if tracker.subset_keys_already_flushed(subset_keys):
+        if tracker.classify_subset_batch(batch_keys) == 'repeat':
             if not os.path.exists(staging_path):
                 raise RuntimeError(
                     f"{venue_type!r} subsets were flushed to staging, but "
@@ -307,16 +357,18 @@ class WorldSerializer:
             )
             return
 
+        # Only subsets in *this* batch may not be gutted yet — husks left by
+        # an earlier batch are expected and were filtered out above.
         from may.flushing import GuttedMembers
         already_gutted = [
-            key for key, (_, subset) in zip(subset_keys, venue_subset_pairs)
+            key for key, (_, subset) in zip(batch_keys, venue_subset_pairs)
             if isinstance(subset.members, GuttedMembers)
         ]
         if already_gutted:
             raise RuntimeError(
-                f"{venue_type!r} subsets partially flushed already: cannot "
-                f"mix already-gutted subsets {sorted(already_gutted)} with "
-                f"a new flush_venue_subsets call."
+                f"{venue_type!r} subsets {sorted(already_gutted)} are already "
+                f"gutted but were not staged by an earlier batch: their "
+                f"membership is gone and cannot be staged now."
             )
 
         subset_names = [subset.subset_name for _, subset in venue_subset_pairs]
@@ -325,9 +377,9 @@ class WorldSerializer:
         total_members = sum(member_counts)
 
         # Discover the union of member_metadata field names (first-seen
-        # order) across this venue_type's subsets, and each subset's
-        # metadata row count, before gutting destroys the live dicts.
-        meta_field_names = []
+        # order) across this batch's subsets, and each subset's metadata row
+        # count, before gutting destroys the live dicts.
+        batch_field_names = []
         meta_field_set = set()
         meta_row_counts = []
         for _, subset in venue_subset_pairs:
@@ -337,13 +389,13 @@ class WorldSerializer:
                 for field_name in fields.keys():
                     if field_name not in meta_field_set:
                         meta_field_set.add(field_name)
-                        meta_field_names.append(field_name)
+                        batch_field_names.append(field_name)
         total_meta_rows = sum(meta_row_counts)
 
         meta_person_ids = np.empty(total_meta_rows, dtype=np.int32)
         meta_per_field = {
             field_name: np.full(total_meta_rows, -1.0, dtype=np.float32)
-            for field_name in meta_field_names
+            for field_name in batch_field_names
         }
         row = 0
         for _, subset in venue_subset_pairs:
@@ -353,62 +405,90 @@ class WorldSerializer:
                     meta_per_field[field_name][row] = float(value)
                 row += 1
 
-        with h5py.File(staging_path, 'w') as f:
-            subsets_group = f.create_group('subsets')
-            self._create_dataset(
+        members_flat = np.array(
+            [person_id for members in member_lists for person_id in members],
+            dtype=np.int32,
+        )
+
+        # A reader cached from an earlier batch holds stale indices.
+        self._invalidate_subset_staging_reader(venue_type)
+
+        with h5py.File(staging_path, 'a') as f:
+            subsets_group = f.require_group('subsets')
+            self._append_staging_dataset(
                 subsets_group, 'venue_ids',
-                np.array([key[0] for key in subset_keys], dtype=np.int32),
+                np.array([key[0] for key in batch_keys], dtype=np.int32),
             )
-            self._create_dataset(
+            self._append_staging_dataset(
                 subsets_group, 'subset_indices',
-                np.array([key[1] for key in subset_keys], dtype=np.int32),
+                np.array([key[1] for key in batch_keys], dtype=np.int32),
             )
-            self._create_dataset(
+            self._append_staging_dataset(
                 subsets_group, 'subset_names',
                 np.array(subset_names, dtype=h5py.string_dtype()),
             )
-            self._create_dataset(
+            self._append_staging_dataset(
                 subsets_group, 'member_counts',
                 np.array(member_counts, dtype=np.int32),
             )
-            members_flat = np.array(
-                [person_id for members in member_lists for person_id in members],
-                dtype=np.int32,
-            )
-            self._create_dataset(subsets_group, 'members_flat', members_flat)
+            members_start, _ = self._append_staging_dataset(
+                subsets_group, 'members_flat', members_flat)
 
-            meta_group = f.create_group('membership_metadata')
-            self._create_dataset(
+            meta_group = f.require_group('membership_metadata')
+            # Rows staged by earlier batches, needed to back-fill a field
+            # that first appears in this one.
+            prior_meta_rows = (meta_group['person_ids'].shape[0]
+                               if 'person_ids' in meta_group else 0)
+            staged_field_names = (
+                list(meta_group['field_names'].asstr()[:])
+                if 'field_names' in meta_group else []
+            )
+            self._append_staging_dataset(
                 meta_group, 'row_counts', np.array(meta_row_counts, dtype=np.int32),
             )
-            self._create_dataset(meta_group, 'person_ids', meta_person_ids)
-            self._create_dataset(
+            meta_start, _ = self._append_staging_dataset(
+                meta_group, 'person_ids', meta_person_ids)
+            new_field_names = [name for name in batch_field_names
+                               if name not in staged_field_names]
+            # Appended even when empty, so the dataset always exists for
+            # readers (a batch may carry no metadata at all).
+            self._append_staging_dataset(
                 meta_group, 'field_names',
-                np.array(meta_field_names, dtype=h5py.string_dtype()),
+                np.array(new_field_names, dtype=h5py.string_dtype()),
             )
-            for field_name in meta_field_names:
-                self._create_dataset(meta_group, field_name, meta_per_field[field_name])
+            # Fields staged earlier but absent from this batch still need
+            # their rows, filled with the -1.0 "no value" marker.
+            for field_name in staged_field_names + new_field_names:
+                column = meta_per_field.get(
+                    field_name, np.full(total_meta_rows, -1.0, dtype=np.float32))
+                self._append_staging_dataset(
+                    meta_group, field_name, column,
+                    back_fill_rows=prior_meta_rows, fill_value=-1.0,
+                )
 
+        # Write-back verify over the region this batch appended.
         with h5py.File(staging_path, 'r') as f:
-            written_total = f['subsets/members_flat'].shape[0]
-            written_meta_total = f['membership_metadata/person_ids'].shape[0]
-        if written_total != total_members:
+            written_members = f['subsets/members_flat'][
+                members_start:members_start + total_members]
+            written_meta_ids = f['membership_metadata/person_ids'][
+                meta_start:meta_start + total_meta_rows]
+        if not np.array_equal(written_members, members_flat):
             raise RuntimeError(
                 f"Staging write for venue_type {venue_type!r} verification "
-                f"failed: expected {total_members} staged members, found "
-                f"{written_total}."
+                f"failed: the {total_members} members appended at row "
+                f"{members_start} do not read back as written."
             )
-        if written_meta_total != total_meta_rows:
+        if not np.array_equal(written_meta_ids, meta_person_ids):
             raise RuntimeError(
                 f"Staging write for venue_type {venue_type!r} verification "
-                f"failed: expected {total_meta_rows} staged metadata rows, "
-                f"found {written_meta_total}."
+                f"failed: the {total_meta_rows} metadata rows appended at row "
+                f"{meta_start} do not read back as written."
             )
 
         for (venue, subset), member_count in zip(venue_subset_pairs, member_counts):
             gut_subset(subset, member_count)
 
-        tracker.record_subset_keys(subset_keys)
+        tracker.record_subset_keys(batch_keys)
         logger.info(
             f"  Flushed {venue_type} subsets to staging: "
             f"{len(venue_subset_pairs)} subsets, {total_members} memberships"
@@ -473,6 +553,13 @@ class WorldSerializer:
             for field_name in field_names
         }
         return person_ids, field_values
+
+    def _invalidate_subset_staging_reader(self, venue_type):
+        """Drop the cached reader for `venue_type` so the next staged read
+        rebuilds its indices — a further batch has appended to the file."""
+        cached = self._subset_staging_readers.pop(venue_type, None)
+        if cached is not None:
+            cached[0].close()
 
     def _close_subset_staging_readers(self):
         for reader, *_ in self._subset_staging_readers.values():
