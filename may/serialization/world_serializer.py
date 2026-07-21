@@ -18,6 +18,15 @@ from .cohort_flush import CohortFlushTracker
 logger = logging.getLogger("world_serializer")
 
 
+class StagedMembersUnavailableError(RuntimeError):
+    """A subset's membership was asked for from staging, but was never
+    staged there. Distinct from FlushedPropertyError: that one says "this
+    husk's members are gone, use the staged read API"; this one says "the
+    staged read API has nothing for this subset either", which means the
+    subset is still live (read `.members`) or the flush never ran.
+    """
+
+
 class WorldSerializer:
     """
     Serializes World object to HDF5 format for C++ consumption.
@@ -493,6 +502,52 @@ class WorldSerializer:
             f"  Flushed {venue_type} subsets to staging: "
             f"{len(venue_subset_pairs)} subsets, {total_members} memberships"
         )
+
+    def get_staged_member_ids(self, subset):
+        """Return a flushed subset's member ids, read back from staging in
+        their staged order.
+
+        This is the only supported way to see a husk's membership:
+        `.members` stays fail-loud by design (docs/adr/0002), so nothing
+        silently reads through to disk. Raises
+        StagedMembersUnavailableError if this subset was never staged.
+        """
+        venue_type = subset.venue.type
+        key = (subset.venue.id, subset.subset_index)
+        if not os.path.exists(self._staging_path(venue_type)):
+            raise StagedMembersUnavailableError(
+                f"Subset {key} of venue_type {venue_type!r} was never staged: "
+                f"no subsets of this venue_type have been flushed. If it is "
+                f"still live, read its `.members` directly."
+            )
+        _, index, _, _ = self._subset_staging_index(venue_type)
+        if key not in index:
+            raise StagedMembersUnavailableError(
+                f"Subset {key} of venue_type {subset.venue.type!r} was never "
+                f"staged: no flush batch included it. If it is still live, "
+                f"read its `.members` directly."
+            )
+        return self._staged_member_ids(subset)
+
+    def get_staged_members(self, subset, population):
+        """Resolve a flushed subset's staged member ids to `Person` objects
+        via `population`, preserving staged order.
+
+        A staged id the population cannot resolve is fatal: returning the
+        membership minus that member would quietly hand back a smaller
+        subset than the one that was staged.
+        """
+        people = []
+        for person_id in self.get_staged_member_ids(subset):
+            person = population.get_person(person_id)
+            if person is None:
+                raise StagedMembersUnavailableError(
+                    f"Staged member {person_id} of subset "
+                    f"{(subset.venue.id, subset.subset_index)} is not in the "
+                    f"population: staging and population have drifted apart."
+                )
+            people.append(person)
+        return people
 
     def _subset_staging_index(self, venue_type):
         """Lazily open the staging file for `venue_type` (if this run

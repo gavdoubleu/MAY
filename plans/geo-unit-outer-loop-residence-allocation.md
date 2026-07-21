@@ -93,6 +93,8 @@ Restructure `execute_allocation_strategy`: parse `loop_level`, validate patterns
 
 ## Phase 6: Staged-member read API
 
+> Built with the `tdd` skill: acceptance criteria as failing tests first.
+
 **PRD needs**: explicit staged-member read API.
 
 ### What to build
@@ -106,6 +108,8 @@ Serializer API: husk → staged member ids (reuse `_subset_staging_index`/`_stag
 ---
 
 ## Phase 7: Wire `flush_per_unit` end-to-end
+
+> Built with the `tdd` skill: acceptance criteria as failing tests first.
 
 **PRD needs**: config sketch (`flush_per_unit: true`); flush requires serialization.
 
@@ -122,6 +126,7 @@ In the unit loop: after a unit's steps, collect its household subset keys, call 
 
 ## Verification (overall)
 
+- **Phases 6 and 7 are built with the `tdd` skill**: red-green-refactor, acceptance criteria written as failing tests first. Phases 4 and 5 were verified by throwaway scripts instead, at the user's direction, so their criteria carry no regression coverage — backfill those tests opportunistically when touching the same code.
 - Full pytest suite per phase (`tests/test_unit`, `tests/test_integration`).
 - After Phase 4: run `create_world.py` on the example/2021 config, compare summary stats to a pre-change run (statistical equivalence, not bit-identity).
 - After Phase 7: full-flush 2021 config run with per-unit household flushing; confirm memory drop via existing DEBUG per-stage memory logging; final export verifies staged union.
