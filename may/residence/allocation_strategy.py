@@ -9,12 +9,50 @@ import hashlib
 import logging
 import yaml
 import numpy as np
-from typing import Dict, List, Optional, Set, Tuple
+from itertools import islice
+from typing import Callable, Dict, List, Optional, Set, Tuple
 from .venue_allocator import _allocate_to_venue_type
 from .household_distributor import HouseholdError
 from may.utils import path_resolver as pr
 
 logger = logging.getLogger("allocation_strategy")
+
+# The venue type per-unit flushing stages: households are what allocation
+# creates, and what dominates peak memory
+HOUSEHOLD_VENUE_TYPE = 'household'
+
+
+def _household_venue_count(venues) -> int:
+    return len(venues.venues_by_type_and_id.get(HOUSEHOLD_VENUE_TYPE, {}))
+
+
+def _new_household_subset_keys(venues, count_before_unit, scope_sgu_codes,
+                               unit_code) -> List[Tuple[int, int]]:
+    """Subset keys of the households created during the geo unit that just
+    finished.
+
+    Households are appended to the venue manager's per-type dict in creation
+    order, so the unit's own are its tail — walked backwards so the cost is
+    in the new households, not the whole world's. Each one's geo unit is
+    checked against the unit's scope: if anything ever removes a household
+    mid-run the tail arithmetic would silently pick the wrong venues, and
+    staging the wrong membership is not a failure worth discovering later.
+    """
+    households = venues.venues_by_type_and_id.get(HOUSEHOLD_VENUE_TYPE, {})
+    new_household_count = len(households) - count_before_unit
+    subset_keys = []
+    for venue in islice(reversed(households.values()), new_household_count):
+        if venue.geographical_unit.name not in scope_sgu_codes:
+            raise HouseholdError(
+                f"Household venue {venue.id} sits in "
+                f"'{venue.geographical_unit.name}', outside geo unit "
+                f"'{unit_code}', but was counted among the {new_household_count} "
+                f"households it created — the venue manager's household "
+                f"ordering cannot be trusted to stage per-unit batches."
+            )
+        subset_keys.extend((venue.id, subset.subset_index)
+                           for subset in venue.subsets.values())
+    return subset_keys
 
 
 def execute_allocation_strategy(population,
@@ -22,7 +60,8 @@ def execute_allocation_strategy(population,
                                 household_distributor,
                                 strategy_file: str = "data/households/allocation_strategy.yaml",
                                 export_debug_csv: bool = False,
-                                random_seed: Optional[int] = None):
+                                random_seed: Optional[int] = None,
+                                subset_flusher: Optional[Callable] = None):
     """
     Execute a unified allocation strategy from YAML configuration.
 
@@ -41,6 +80,10 @@ def execute_allocation_strategy(population,
         random_seed: Global seed for the per-unit random streams (each unit's
             stream is spawned from SeedSequence((random_seed, digest(unit)))).
             When None, seed 0 is used — matching the historical default.
+        subset_flusher: Callable (venue_type, subset_keys) staging a batch of
+            subsets and gutting them. Required when the strategy sets
+            `flush_per_unit: true`; called once per geo unit with the
+            household subsets that unit created.
 
     Returns:
         dict: Complete statistics for all steps, aggregated across units
@@ -82,10 +125,12 @@ def execute_allocation_strategy(population,
             f"configured geography levels: {geography.levels}"
         )
 
-    if strategy.get('flush_per_unit', False):
+    flush_per_unit = strategy.get('flush_per_unit', False)
+    if flush_per_unit and subset_flusher is None:
         raise HouseholdError(
-            f"flush_per_unit: true in {strategy_file} is not yet supported — "
-            f"per-unit flushing arrives with incremental subset staging"
+            f"flush_per_unit: true in {strategy_file} requires serialization "
+            f"to be enabled: staged subsets are written beside the canonical "
+            f"HDF5 file, which does not exist for this run"
         )
 
     _validate_step_patterns(steps, household_distributor.household_pattern_vocabulary)
@@ -134,6 +179,8 @@ def execute_allocation_strategy(population,
                                               in unit.get_descendants()}
         household_distributor.set_geo_unit_scope(scope_sgu_codes)
 
+        household_count_before_unit = _household_venue_count(venues)
+
         logger.info("=" * 60)
         logger.info(f"Geo unit {unit_index}/{total_units}: {unit_code} "
                     f"({len(scope_sgu_codes)} {smallest_level} unit(s))")
@@ -167,6 +214,14 @@ def execute_allocation_strategy(population,
                 step_name, {'type': step_type, 'step_number': step_number})
             _merge_step_stats(accumulated, stats)
             logger.info("")
+
+        if flush_per_unit:
+            subset_keys = _new_household_subset_keys(
+                venues, household_count_before_unit, scope_sgu_codes, unit_code)
+            if subset_keys:
+                subset_flusher(HOUSEHOLD_VENUE_TYPE, subset_keys)
+                logger.info(f"[{unit_code}] Flushed {len(subset_keys)} household "
+                            f"subsets to staging")
 
         if unit_index % progress_interval == 0 or unit_index == total_units:
             percent_complete = (unit_index / total_units) * 100

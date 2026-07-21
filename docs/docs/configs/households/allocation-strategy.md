@@ -12,6 +12,8 @@ Defines the complete ordered sequence of allocation steps executed during world 
 | Key | Description |
 |---|---|
 | `enabled` | Activates household allocation; set `false` to skip entirely |
+| `loop_level` | Geography level the outer allocation loop runs over |
+| `flush_per_unit` | Stage each unit's household membership to disk as it completes |
 | `steps` | Ordered list of allocation steps; five step types are available |
 
 ---
@@ -23,6 +25,49 @@ enabled: true
 ```
 
 Set to `false` to bypass all household and venue allocation. Agents remain unhoused.
+
+---
+
+## `loop_level`
+
+```yaml
+loop_level: MGU
+```
+
+The geography level of the outer loop: the full step sequence runs to
+completion for one unit at that level before moving to the next, rather than
+running each step across the whole world in turn. Must name a level from the
+geography config. Defaults to the largest configured level, which keeps the
+behaviour closest to a single whole-world pass.
+
+A finer level means fewer people and households held in memory at once. Each
+unit draws from its own random stream, derived from the global seed and the
+unit's code, so results do not depend on the order the units are visited.
+
+Venue steps whose venues sit above `loop_level` are rejected at load: such a
+venue spans several loop units and cannot be filled by any one of them.
+
+---
+
+## `flush_per_unit`
+
+```yaml
+flush_per_unit: true
+```
+
+Once a unit's steps finish, write the household membership it created to
+staging and free it from memory. Peak memory then holds roughly one unit's
+households instead of the whole world's. The final export reads the staged
+batches back, so the exported file is unchanged.
+
+Requires serialization to be enabled — staging is written beside the
+canonical `.h5` file, and a run without one raises rather than silently
+skipping the flush. Defaults to `false`.
+
+Flushed membership is gone from memory: a subset's `.members` raises
+`FlushedPropertyError` afterwards. Anything needing it must ask the
+serializer (`get_staged_member_ids`, `get_staged_members`). Attribute
+assignment reads the population directly and is unaffected.
 
 ---
 

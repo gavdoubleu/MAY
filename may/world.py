@@ -324,6 +324,24 @@ class World:
                 spec.registry(self, venue_type),
             )
 
+    def flush_subsets_batch(self, venue_type, subset_keys):
+        """Stage one batch of `venue_type` subsets and gut them.
+
+        The batch form of `flush_properties(subsets=True)`, for callers that
+        flush a venue_type incrementally rather than all at once — residence
+        allocation stages each geo unit's households as that unit finishes.
+        Batches must be disjoint; the staged keys accumulate and their union
+        is verified at final export.
+        """
+        if self._serializer is None:
+            raise RuntimeError(
+                "flush_subsets_batch requires the canonical HDF5 file: "
+                "serialization must be enabled and create_canonical_file() "
+                "called before the timeline."
+            )
+        self._serializer.flush_venue_subsets(self, venue_type,
+                                             subset_keys=subset_keys)
+
     def export_to_hdf5(self, output_file, config_file=None):
         """
         Export world state to HDF5 file for C++ simulation.
@@ -379,7 +397,19 @@ class World:
         return stats
 
 
-def setup_households(geo, population, venues, config, strategy_file=None):
+def _household_membership_is_staged(households):
+    """True if household subsets have been gutted by a per-unit flush, so
+    their members live in staging rather than memory."""
+    from may.flushing import GuttedMembers
+
+    for household in households:
+        for subset in household.subsets.values():
+            return isinstance(subset.members, GuttedMembers)
+    return False
+
+
+def setup_households(geo, population, venues, config, strategy_file=None,
+                     world=None):
     """
     Setup and distribute households based on configuration.
 
@@ -399,6 +429,9 @@ def setup_households(geo, population, venues, config, strategy_file=None):
             single source of truth for which strategy runs and where it runs in
             the timeline. When ``None`` (e.g. a direct programmatic caller),
             falls back to ``config["households"]["strategy_file"]``.
+        world: The World being built, when one exists. Supplies the subset
+            flusher a `flush_per_unit: true` strategy needs; without it such
+            a strategy is a config error.
 
     Returns:
         HouseholdDistributor object with allocated households
@@ -428,6 +461,12 @@ def setup_households(geo, population, venues, config, strategy_file=None):
 
     debug_outputs_enabled = config.get("debug_outputs", {}).get("enabled", False)
 
+    # Only offered when serialization is live; the strategy raises if it
+    # asked for flush_per_unit and there is nothing to stage into.
+    subset_flusher = (world.flush_subsets_batch
+                      if world is not None and world._serializer is not None
+                      else None)
+
     if strategy_file:
         # Mode 1: Unified strategy (households + venues in order)
         logger.info(f"Using unified allocation strategy from {strategy_file}")
@@ -437,6 +476,7 @@ def setup_households(geo, population, venues, config, strategy_file=None):
             household_distributor,
             strategy_file,
             export_debug_csv=debug_outputs_enabled,
+            subset_flusher=subset_flusher,
         )
 
     # Show where households are located and examples
@@ -455,8 +495,16 @@ def setup_households(geo, population, venues, config, strategy_file=None):
     logger.info("  2. venues.get_venue_by_type_and_id('household', id)  -> Specific household by ID")
     logger.info("")
 
+    # The illustrative logging below walks household members, which a
+    # flush_per_unit run has already staged and freed. Skip it rather than
+    # read membership back off disk purely to print five examples.
+    membership_staged = _household_membership_is_staged(all_households)
+    if membership_staged:
+        logger.info("Household membership was flushed to staging during "
+                    "allocation; skipping example households and residents.")
+
     # Show a few example households
-    if all_households:
+    if all_households and not membership_staged:
         logger.info("Example Households (5 random):")
         n = len(all_households)
         sampled_indices = set(sample(range(n), min(5, n)))
@@ -483,7 +531,7 @@ def setup_households(geo, population, venues, config, strategy_file=None):
     logger.info("=" * 60)
 
     # Show how to access people's households
-    if household_distributor.allocated_people:
+    if household_distributor.allocated_people and not membership_staged:
         example_person_ids = sample(list(household_distributor.allocated_people), 5)
 
         for person_id in example_person_ids:

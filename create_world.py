@@ -279,7 +279,8 @@ def main():
                     )
                 try:
                     world.household_distributor = setup_households(
-                        geo, population, venues, config, strategy_file=step_config
+                        geo, population, venues, config,
+                        strategy_file=step_config, world=world
                     )
                 except HouseholdError as e:
                     logger.error(f"Household allocation failed: {e}")
