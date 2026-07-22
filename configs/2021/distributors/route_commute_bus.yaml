@@ -1,8 +1,6 @@
-# Bus commute legs (RouteDistributor). NOTE: bus routes have not been
-# generated yet (D8 — synthetic per-LGU pseudo-routes, deferred). The routing
-# table contains no mode_class=bus rows, so every bus commuter is a miss and
-# falls back to walk via on_miss. This config is wired in now so adding the
-# bus routes later is a data-only change.
+# Bus commute legs (RouteDistributor). Bus routes (D8 — synthetic
+# per-LGU pseudo-routes) are generated: the routing table holds 5.81M
+# mode_class=bus rows.
 distributor_type: "route"
 distributor_name: "route_commute_bus"
 
@@ -10,7 +8,6 @@ activity_map_key: "commute"
 leg_venue_type: "bus_line"
 leg_subset_key: "rider"
 
-routes_table: "${data_root}/activities/commute/routes.csv"
 legs_table:   "${data_root}/activities/commute/route_legs.csv"
 
 origin_source:

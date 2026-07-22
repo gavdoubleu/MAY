@@ -20,13 +20,14 @@ origin_source/destination_source the config defined.
 """
 
 import logging
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, Optional, Any
 
 import pandas as pd
 
 from .base_distributor import BaseDistributor
+from .route_legs_index import RouteLegsIndex
 
 logger = logging.getLogger("route_distributor")
 
@@ -69,11 +70,9 @@ class RouteDistributor(BaseDistributor):
         # (typically ['commute_mode']).
         self.require_properties = c.get("require_properties", [])
 
-        # Resolve table paths relative to project root if the config came from
+        # Resolve table path relative to project root if the config came from
         # a file under configs/.
-        self.routes_table_path = c.get("routes_table", "data/activities/commute/routes.csv")
         self.legs_table_path = c.get("legs_table", "data/activities/commute/route_legs.csv")
-        self.routes_table_path = self._resolve_path(self.routes_table_path)
         self.legs_table_path = self._resolve_path(self.legs_table_path)
 
         # Lazy state, populated in allocate()
@@ -102,52 +101,15 @@ class RouteDistributor(BaseDistributor):
                 return str(candidate)
         return str(path)
 
-    def _load_legs_table(self) -> Dict[Tuple[str, str, str], List[Dict[str, Any]]]:
-        """Load route_legs.csv and index by (origin_mgu, dest_mgu, mode_class)."""
-        legs_path = Path(self.legs_table_path)
-        if not legs_path.exists():
-            logger.warning(
-                f"Legs table not found: {legs_path}. "
-                f"All eligible people will be treated as route misses."
-            )
-            return {}
-
-        # Filter rows by the relevant routing-table mode classes if we have a
-        # class_filter — keeps memory bounded on huge national tables.
-        mode_classes_keep = None
-        if self.class_filter is not None:
-            mapped = self.class_map.get(self.class_filter, self.class_filter)
-            mode_classes_keep = {mapped}
-
-        logger.info(f"Loading legs table: {legs_path}")
-        df = pd.read_csv(legs_path)
-        if mode_classes_keep is not None:
-            df = df[df["mode_class"].isin(mode_classes_keep)]
-
-        # Required columns + the per-leg metadata columns the config asked for.
-        required = {"origin_mgu", "dest_mgu", "mode_class", "leg_idx", "line_id",
-                    "board_mgu", "alight_mgu"}
-        missing = required - set(df.columns)
-        if missing:
-            raise ValueError(f"legs table {legs_path} missing columns: {missing}")
-
-        meta_cols = list(self.leg_metadata.values())
-        meta_missing = [c for c in meta_cols if c not in df.columns]
-        if meta_missing:
-            raise ValueError(
-                f"legs table missing metadata columns referenced by config: {meta_missing}"
-            )
-
-        # Build the index. Sort by leg_idx so the list is leg-ordered.
-        df = df.sort_values(["origin_mgu", "dest_mgu", "mode_class", "leg_idx"])
-        index: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
-        cols = ["leg_idx", "line_id", "board_mgu", "alight_mgu"] + meta_cols
-        for row in df[["origin_mgu", "dest_mgu", "mode_class", *cols]].itertuples(index=False):
-            key = (row.origin_mgu, row.dest_mgu, row.mode_class)
-            entry = {c: getattr(row, c) for c in cols}
-            index[key].append(entry)
-        logger.info(f"  Indexed {len(df):,} legs across {len(index):,} (O,D,class) routes")
-        return dict(index)
+    def _load_legs_table(self) -> RouteLegsIndex:
+        """Load route_legs.csv into a memory-bounded, columnar RouteLegsIndex
+        (chunked read, filtered to this step's mode class)."""
+        return RouteLegsIndex(
+            legs_table_path=self.legs_table_path,
+            class_filter=self.class_filter,
+            class_map=self.class_map,
+            leg_metadata=self.leg_metadata,
+        )
 
     def _derive_key(self, person, world, source: Dict[str, Any]) -> Optional[str]:
         """Derive an MGU-name key for a person from a configured source.
@@ -305,7 +267,7 @@ class RouteDistributor(BaseDistributor):
                 self._apply_miss(person)
                 continue
 
-            legs = self._legs_index.get((origin, dest, mode_class))
+            legs = self._legs_index.get(origin, dest, mode_class)
             if not legs:
                 self._apply_miss(person)
                 continue
