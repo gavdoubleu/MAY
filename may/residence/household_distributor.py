@@ -1281,11 +1281,34 @@ class HouseholdDistributor:
         """Get the number of people currently available (not allocated)."""
         return len(self.population.get_all_people()) - len(self.allocated_people)
 
+    def people_in_scope(self) -> List['Person']:
+        """People the active geo-unit scope covers, whole world if unscoped.
+
+        Read off the geographical units rather than filtering the world's
+        population: under a fine `loop_level` this runs once per step per
+        unit, so a whole-world scan per call is what makes the outer loop
+        cost O(population x units) instead of O(population).
+        """
+        if self.geo_unit_scope is None:
+            return self.population.get_all_people()
+
+        people = []
+        for unit_code in self.geo_unit_scope:
+            unit = self.geography.get_unit(unit_code)
+            if unit is not None:
+                people.extend(unit.people)
+        return people
+
     def get_available_people_by_category(self) -> Dict[str, int]:
-        """Get counts of available people by category."""
+        """Counts of available people by category, within the active scope.
+
+        Scoped rather than global on purpose: these counts are logged per
+        step, and under the geo_unit-outer loop a step belongs to one unit,
+        so the unit's own remainder is the meaningful figure.
+        """
         counts = {cat.name: 0 for cat in self.categories}
 
-        for person in self.population.get_all_people():
+        for person in self.people_in_scope():
             if person.id not in self.allocated_people:
                 for cat in self.categories:
                     if cat.matches(person):
