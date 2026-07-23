@@ -48,5 +48,13 @@ def parallel_map(worker_fn: Callable, slices: Sequence[Slice], *,
     — the pool drains the Slices from a shared queue.
     """
     payloads = [(worker_fn, unit_slice, global_seed) for unit_slice in slices]
-    with _FORK_CONTEXT.Pool(processes=resolve_worker_count(workers)) as pool:
+    # Never fork more workers than there are Slices to run.
+    worker_count = min(resolve_worker_count(workers), len(payloads)) if payloads else 0
+    # A single worker runs in-process: no fork, identical seeding. Keeps callers
+    # that route every invocation through parallel_map (incl. single-Slice
+    # worlds) cheap and fork-safe, and gives the Tier-1 gate a genuine
+    # in-process-vs-forked comparison.
+    if worker_count <= 1:
+        return [_seed_and_invoke(payload) for payload in payloads]
+    with _FORK_CONTEXT.Pool(processes=worker_count) as pool:
         return pool.map(_seed_and_invoke, payloads)

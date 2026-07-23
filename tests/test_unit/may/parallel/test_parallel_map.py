@@ -110,3 +110,28 @@ def test_readonly_shared_state_rides_fork_cow():
     results = parallel_map(_lookup_shared, slices, workers=2)
 
     assert results == [50, 170, 420, 30]
+
+
+_PID_MARKER = None
+
+
+def _return_pid(unit_slice, rng):
+    import os
+    return os.getpid()
+
+
+def test_single_worker_runs_in_process_no_fork():
+    # workers=1 must run in the calling process (no child pids) so the large
+    # existing suites that route through parallel_map stay cheap and fork-safe.
+    import os
+    slices = [GeoUnitSlice(['E1']), GeoUnitSlice(['E2']), GeoUnitSlice(['E3'])]
+    pids = parallel_map(_return_pid, slices, workers=1)
+    assert pids == [os.getpid(), os.getpid(), os.getpid()]
+
+
+def test_worker_count_capped_at_slice_count():
+    # No point forking more workers than Slices; one Slice runs in-process
+    # however many workers were requested.
+    import os
+    pids = parallel_map(_return_pid, [GeoUnitSlice(['E1'])], workers=8)
+    assert pids == [os.getpid()]

@@ -7,8 +7,15 @@ from .assignment_config import AttributeAssignmentConfig
 from .data_sources import DataSourceManager
 from .strategies import StrategyFactory
 from may.utils.attribute_access import get_person_attribute
+from may.parallel import parallel_map, PopulationSlice, GeoUnitSlice
 
 logger = logging.getLogger("may.attribute_assignment.assigner")
+
+# Set by the parent immediately before a parallel_map dispatch and read by the
+# worker over fork copy-on-write, so the (large, read-only) world graph is never
+# pickled into a Slice payload (ADR-0003). Holds the live assigner plus the
+# id->person index the worker rebuilds its Slice's people from.
+_ACTIVE_ASSIGNMENT_CONTEXT = None
 
 
 class AttributeAssignmentError(Exception):
@@ -81,6 +88,11 @@ class AttributeAssigner:
         # Logging settings
         self.verbose = config.settings.get('logging', {}).get('detailed_assignment_logging', False)
 
+        # Global seed for per-Slice RNG streams under parallel assignment. A
+        # Slice's stream is derived from this plus the Slice's stable person-id
+        # digest (ADR-0002), so output is reproducible across worker count.
+        self._global_seed = config.settings.get('random_seed', 0) if config.settings else 0
+
         # Cache strategy objects to avoid repeated creation
         self._strategy_cache = {}  # Maps strategy config hash to strategy instance
 
@@ -126,7 +138,14 @@ class AttributeAssigner:
         self._exclude_activities = self._activity_filters.get('exclude', [])
 
         # Statistics
-        self.stats = {
+        self.stats = self._fresh_stats()
+
+    @staticmethod
+    def _fresh_stats() -> Dict[str, Any]:
+        """A zeroed statistics structure. Reused per-Slice in workers so each
+        Slice reports only its own contribution, which the parent then merges
+        (see _merge_assignment_stats)."""
+        return {
             'total_people': 0,
             'people_in_households': 0,
             'people_in_other_residences': 0,
@@ -169,7 +188,7 @@ class AttributeAssigner:
 
         return self._strategy_cache[config_key]
 
-    def assign_all(self, venue_manager, population=None) -> Dict[str, Any]:
+    def assign_all(self, venue_manager, population=None, workers=None) -> Dict[str, Any]:
         """
         Assign attribute based on assignment level (household or person).
 
@@ -178,6 +197,9 @@ class AttributeAssigner:
             population: Population manager; required for person-level
                 assignment (the population is read directly, not rebuilt
                 from venue membership, so gutted subsets stay untouched)
+            workers: Process-pool size for the geo_unit-partitioned parallel
+                assignment. None resolves to the SLURM/CPU default; 1 runs
+                in-process (no fork). Output is identical across worker count.
 
         Returns:
             Dictionary with assignment statistics
@@ -194,9 +216,9 @@ class AttributeAssigner:
                     f"population manager — people are collected from the population, "
                     f"not from venue membership"
                 )
-            self._assign_all_people(population)
+            self._assign_all_people(population, workers=workers)
         elif self.config.assignment_level == "person_by_residence":
-            self._assign_all_residences(venue_manager)
+            self._assign_all_residences(venue_manager, workers=workers)
         else:
             raise ValueError(f"Unknown assignment_level: '{self.config.assignment_level}'. "
                            f"Expected 'person' or 'person_by_residence'.")
@@ -218,9 +240,14 @@ class AttributeAssigner:
 
         return self.stats
 
-    def _assign_all_residences(self, venue_manager):
-        """Assign attributes at residence level (households and communal establishments)."""
-        # Get all venues
+    def _assign_all_residences(self, venue_manager, workers=None):
+        """Assign attributes at residence level (households and communal
+        establishments).
+
+        Venues are partitioned into geo_unit Slices — a residence sits wholly in
+        one geo_unit, so each household's members and role logic stay within a
+        single Slice. Each worker runs its geo_unit's residences and returns
+        compact (person-id, value) arrays the parent applies (ADR-0003)."""
         all_venues = venue_manager.get_all_venues_list()
         logger.info(f"Found {len(all_venues)} total venues")
 
@@ -231,42 +258,34 @@ class AttributeAssigner:
         # (defaults to ["household"]); other residences use venue_assignment_rules.
         residence_venue_types = self.config.residence_venue_types or ["household"]
 
-        # Separate structure-assigned residences from the rest based on config
-        households = [v for v in all_venues if v.type in residence_venue_types]
-        other_residences = [v for v in all_venues if v.type not in residence_venue_types]
-        people_in_other_residences = sum(venue.size() for venue in other_residences)
-
-        logger.info(f"  Households: {len(households)}")
-        if other_residences:
-            logger.info(f"  Other residences: {len(other_residences)} (containing {people_in_other_residences} people)")
-        logger.info("")
-
-        # Process households with structure-based logic
-        logger.info("Processing households...")
-        total = len(households)
-        progress_interval = max(1, total // 20)  # Report every 5%
-
-        for i, household in enumerate(households):
-            self._assign_household(household)
-
-            # Log progress
-            if (i + 1) % progress_interval == 0 or (i + 1) == total:
-                progress = ((i + 1) / total) * 100
-                logger.info(f"  Progress: {i+1:,}/{total:,} ({progress:.1f}%)")
-
-        logger.info(f"✓ Processed {self.stats['households_processed']} households")
-        logger.info("")
-
-        # Process other residences (care homes, dorms, etc.) with simpler logic
-        people_assigned_in_other_residences = 0
-        if other_residences:
-            logger.info(f"Processing {len(other_residences)} other residences (care homes, dorms, etc.)...")
-            people_assigned_in_other_residences = self._assign_other_residences(other_residences)
-            logger.info(f"✓ Assigned {people_assigned_in_other_residences} people in other residences")
-            logger.info("")
+        # Partition into geo_unit Slices and dispatch.
+        slices, geo_to_venues, id_to_person = _partition_venues_by_geo(all_venues)
+        logger.info(f"  Residences across {len(slices)} geo_unit(s)")
+        results = self._dispatch_residence_slices(
+            slices, geo_to_venues, id_to_person, residence_venue_types, workers)
+        self._apply_assignment_results(results, id_to_person)
 
         # Set total_people from the authoritative venue count
         self.stats['total_people'] = total_people_in_simulation
+        logger.info(f"✓ Processed {self.stats['households_processed']} households")
+        if self.stats['other_residences_processed']:
+            logger.info(f"✓ Assigned {self.stats['people_in_other_residences']} "
+                        f"people in other residences")
+
+    def _dispatch_residence_slices(self, slices, geo_to_venues, id_to_person,
+                                   residence_venue_types, workers):
+        """Publish the world to workers via the module-global context (read over
+        fork copy-on-write, never pickled), run each geo_unit Slice, then clear
+        it."""
+        global _ACTIVE_ASSIGNMENT_CONTEXT
+        _ACTIVE_ASSIGNMENT_CONTEXT = _AssignmentContext(
+            assigner=self, id_to_person=id_to_person,
+            geo_to_venues=geo_to_venues, residence_venue_types=residence_venue_types)
+        try:
+            return parallel_map(_assign_residence_slice, slices,
+                                global_seed=self._global_seed, workers=workers)
+        finally:
+            _ACTIVE_ASSIGNMENT_CONTEXT = None
 
     def _assign_other_residences(self, venues):
         """
@@ -422,13 +441,17 @@ class AttributeAssigner:
 
         return True
 
-    def _assign_all_people(self, population):
+    def _assign_all_people(self, population, workers=None):
         """
         Assign attributes at person level.
 
         People come straight from the population manager: no venue-membership
         iteration, so each person is seen exactly once and gutted subsets
         (flushed household membership) never block assignment.
+
+        Eligible people are partitioned into geo_unit-keyed population Slices and
+        assigned across a bounded process pool; each worker returns compact
+        (person-id, value) arrays which the parent applies (ADR-0003).
         """
         all_people = population.get_all_people()
 
@@ -465,21 +488,55 @@ class AttributeAssigner:
             logger.info("")
             return
 
-        strategy = self._get_or_create_strategy(rule.assignment)
+        # Capture parent-computed pre-filter counters before dispatch: the
+        # in-process (single-worker) path shares this assigner and resets
+        # self.stats per Slice, so they cannot be read back afterwards.
+        preserved = {
+            'filtered_people': self.stats['filtered_people'],
+            'total_people': self.stats['total_people'],
+            'value_excluded': self.stats['value_excluded'],
+        }
 
-        # Check if strategy supports batch assignment
-        if hasattr(strategy, 'assign_batch') and callable(getattr(strategy, 'assign_batch')):
-            logger.info("Using batch assignment...")
-            self._assign_all_people_batch(eligible_people, strategy)
-        else:
-            logger.info("Using standard assignment...")
-            self._assign_all_people_sequential(eligible_people, strategy)
+        # Partition into geo_unit-keyed population Slices and dispatch.
+        slices, id_to_person = _partition_people_by_geo(eligible_people)
+        results = self._dispatch_person_slices(slices, id_to_person, rule, workers)
+        self._apply_assignment_results(results, id_to_person, preserved)
 
         logger.info(f"✓ Processed {len(all_people)} people")
         logger.info(f"✓ Filtered {self.stats['filtered_people']} people (age/activity filters)")
         logger.info(f"✓ Assigned {self.stats['assigned_people']} people")
         logger.info(f"✓ Unassigned {self.stats['unassigned_people']} people (failed assignment)")
         logger.info("")
+
+    def _dispatch_person_slices(self, slices, id_to_person, rule, workers):
+        """Publish the world to workers via the module-global context (read over
+        fork copy-on-write, never pickled), run each Slice, then clear it."""
+        global _ACTIVE_ASSIGNMENT_CONTEXT
+        _ACTIVE_ASSIGNMENT_CONTEXT = _AssignmentContext(
+            assigner=self, id_to_person=id_to_person, rule=rule)
+        try:
+            return parallel_map(_assign_person_slice, slices,
+                                global_seed=self._global_seed, workers=workers)
+        finally:
+            _ACTIVE_ASSIGNMENT_CONTEXT = None
+
+    def _apply_assignment_results(self, results, id_to_person, preserved=None):
+        """Apply each Slice's returned values to the parent's Person objects and
+        merge the per-Slice stats. `preserved` carries any parent-computed
+        counters (e.g. filtered/total/value_excluded) that must survive the
+        merge unchanged."""
+        merged = self._fresh_stats()
+        for ids, values, extras, slice_stats in results:
+            for person_id, value in zip(ids.tolist(), values.tolist()):
+                if value is not None:
+                    id_to_person[person_id].properties[self.attribute_name] = value
+            for person_id, extra in extras.items():
+                id_to_person[person_id].properties.update(extra)
+            _merge_assignment_stats(merged, slice_stats)
+
+        if preserved:
+            merged.update(preserved)
+        self.stats = merged
 
     def _assign_all_people_batch(self, eligible_people, strategy):
         """
@@ -967,3 +1024,167 @@ class AttributeAssigner:
             logger.info("")
 
         logger.info("=" * 80)
+
+class _AssignmentContext:
+    """Read-only handle the parent hands to workers over fork copy-on-write.
+    Holds the live assigner (config, data_manager, strategy cache), the
+    id->person index a Slice applies its values through, and the axis-specific
+    payload: `rule` for the person axis; `geo_to_venues` +
+    `residence_venue_types` for the residence axis."""
+    __slots__ = ('assigner', 'id_to_person', 'rule',
+                 'geo_to_venues', 'residence_venue_types')
+
+    def __init__(self, assigner, id_to_person, rule=None,
+                 geo_to_venues=None, residence_venue_types=None):
+        self.assigner = assigner
+        self.id_to_person = id_to_person
+        self.rule = rule
+        self.geo_to_venues = geo_to_venues
+        self.residence_venue_types = residence_venue_types
+
+
+def _partition_people_by_geo(people):
+    """Partition people into geo_unit-keyed population Slices. A household sits
+    in one geo_unit, so household-keyed strategies stay whole within a Slice.
+    Slices and their person-ids are sorted for a stable dispatch order; each
+    Slice's RNG stream derives from its sorted person-ids (ADR-0002)."""
+    buckets = defaultdict(list)
+    for person in people:
+        geo_unit = getattr(getattr(person, 'geographical_unit', None),
+                           'name', None) or '__no_geo__'
+        buckets[geo_unit].append(person)
+
+    slices = []
+    id_to_person = {}
+    for geo_unit in sorted(buckets):
+        person_ids = sorted(person.id for person in buckets[geo_unit])
+        slices.append(PopulationSlice(person_ids))
+        for person in buckets[geo_unit]:
+            id_to_person[person.id] = person
+    return slices, id_to_person
+
+
+def _assign_person_slice(population_slice, rng):
+    """Worker: assign one population Slice and return compact arrays for the
+    parent to apply. Seeds process-global np.random from the Slice's identity
+    (strategies draw from global np.random), so the stream is fixed by the
+    Slice, not by which worker runs it (ADR-0002)."""
+    context = _ACTIVE_ASSIGNMENT_CONTEXT
+    assigner = context.assigner
+    np.random.seed(int(rng.integers(0, 2 ** 32)))
+
+    people = [context.id_to_person[person_id]
+              for person_id in population_slice.person_ids]
+    # Isolate this Slice's stats; the parent merges each Slice's contribution.
+    assigner.stats = assigner._fresh_stats()
+    keys_before = [set(person.properties) for person in people]
+
+    strategy = assigner._get_or_create_strategy(context.rule.assignment)
+    if hasattr(strategy, 'assign_batch') and callable(getattr(strategy, 'assign_batch')):
+        assigner._assign_all_people_batch(people, strategy)
+    else:
+        assigner._assign_all_people_sequential(people, strategy)
+
+    return _collect_slice_result(assigner, people, keys_before)
+
+
+def _collect_slice_result(assigner, people, keys_before):
+    """Build the (ids, values, extras, stats) return for a processed Slice.
+
+    `values` is the primary attribute per person shipped as one array (a raw
+    unicode buffer for the common categorical case, object otherwise — no
+    per-person tuple pickling). `extras` carries any additional keys written by
+    multi-attribute strategies, keyed by person-id."""
+    attribute_name = assigner.attribute_name
+    person_ids = np.fromiter((person.id for person in people),
+                             dtype=np.int64, count=len(people))
+    assigned = [person.properties.get(attribute_name) for person in people]
+    try:
+        # Inferred dtype: a raw unicode/numeric buffer for the common
+        # categorical or scalar attribute — no per-person object pickling.
+        values = np.array(assigned)
+    except ValueError:
+        # Ragged (list-valued strategies) — fall back to an object array.
+        values = np.array(assigned, dtype=object)
+
+    extras = {}
+    for person, previous_keys in zip(people, keys_before):
+        added = set(person.properties) - previous_keys - {attribute_name}
+        if added:
+            extras[person.id] = {key: person.properties[key] for key in added}
+
+    return person_ids, values, extras, _plain_stats(assigner.stats)
+
+
+def _plain_stats(stats):
+    """Convert nested defaultdicts to plain dicts for clean cross-process
+    transport."""
+    return {key: (dict(value) if isinstance(value, dict) else value)
+            for key, value in stats.items()}
+
+
+def _merge_assignment_stats(accumulated, slice_stats):
+    """Fold one Slice's assignment stats into the running totals: counts add,
+    nested count dicts add per key."""
+    for key, value in slice_stats.items():
+        if isinstance(value, dict):
+            nested = accumulated.setdefault(key, defaultdict(int))
+            for nested_key, nested_value in value.items():
+                nested[nested_key] = nested.get(nested_key, 0) + nested_value
+        elif isinstance(value, (int, float)):
+            accumulated[key] = accumulated.get(key, 0) + value
+
+
+def _partition_venues_by_geo(all_venues):
+    """Partition residences into geo_unit Slices. Venues within a geo_unit are
+    ordered by id for a stable per-Slice processing order (so RNG draws are
+    fixed by the Slice, not by worker count). Builds the id->person index over
+    every member so the parent can apply returned values."""
+    geo_to_venues = defaultdict(list)
+    id_to_person = {}
+    for venue in all_venues:
+        geo_unit = getattr(getattr(venue, 'geographical_unit', None),
+                           'name', None) or '__no_geo__'
+        geo_to_venues[geo_unit].append(venue)
+        for member in venue.get_all_members():
+            id_to_person[member.id] = member
+
+    for venues in geo_to_venues.values():
+        venues.sort(key=lambda venue: venue.id)
+    slices = [GeoUnitSlice([geo_unit]) for geo_unit in sorted(geo_to_venues)]
+    return slices, dict(geo_to_venues), id_to_person
+
+
+def _assign_residence_slice(geo_slice, rng):
+    """Worker: assign every residence in one geo_unit Slice and return compact
+    arrays for the parent to apply. Seeds process-global np.random from the
+    Slice's geo_unit identity (ADR-0002)."""
+    context = _ACTIVE_ASSIGNMENT_CONTEXT
+    assigner = context.assigner
+    np.random.seed(int(rng.integers(0, 2 ** 32)))
+
+    venues = []
+    for geo_unit in geo_slice.unit_codes:
+        venues.extend(context.geo_to_venues.get(geo_unit, []))
+    residence_types = context.residence_venue_types
+    households = [venue for venue in venues if venue.type in residence_types]
+    other_residences = [venue for venue in venues if venue.type not in residence_types]
+
+    # Distinct members across all residences in the Slice, for value collection.
+    members = []
+    seen_ids = set()
+    for venue in venues:
+        for member in venue.get_all_members():
+            if member.id not in seen_ids:
+                seen_ids.add(member.id)
+                members.append(member)
+
+    assigner.stats = assigner._fresh_stats()
+    keys_before = [set(member.properties) for member in members]
+
+    for household in households:
+        assigner._assign_household(household)
+    if other_residences:
+        assigner._assign_other_residences(other_residences)
+
+    return _collect_slice_result(assigner, members, keys_before)
