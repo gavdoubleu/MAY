@@ -26,6 +26,8 @@ class CodeTable:
 
     def encode_series(self, series: pd.Series) -> np.ndarray:
         local_codes, uniques = pd.factorize(series.to_numpy())
+        if (local_codes == -1).any():
+            raise ValueError("CodeTable.encode_series: missing/NaN value in series")
         global_of_local = np.empty(len(uniques), dtype=np.int32)
         code_of = self._code_of
         decode = self.decode
