@@ -374,31 +374,61 @@ class TestPairProbabilitySource:
 
 # OriginDestinationMatrixSource Tests
 
+def write_od_csv(path, origin, destination, likelihood, extra_columns=None):
+    """extra_columns: Dict[column_name, List[value]] aligned with the rows."""
+    data = {"origin": origin, "destination": destination, "likelihood": likelihood}
+    if extra_columns:
+        data.update(extra_columns)
+    pd.DataFrame(data).to_csv(path, index=False)
+    return path
+
+
+def make_od_config(csv_path, out_of_boundary="error", metadata_columns=None,
+                    exclude_destinations=None, on_empty=None, outside_value=None,
+                    redistributed_flag=None, chunk_size=None):
+    file_config = {
+        "path": str(csv_path),
+        "key_columns": {"origin": None},
+        "destination_column": "destination",
+        "likelihood_column": "likelihood",
+        "metadata_columns": metadata_columns or {},
+        "exclude_destinations": exclude_destinations or [],
+    }
+    config = {"files": [file_config], "out_of_boundary": out_of_boundary}
+    if on_empty is not None:
+        config["on_empty"] = on_empty
+    if outside_value is not None:
+        config["outside_value"] = outside_value
+    if redistributed_flag is not None:
+        config["redistributed_flag"] = redistributed_flag
+    if chunk_size is not None:
+        config["chunk_size"] = chunk_size
+    return config
+
+
 class TestOriginDestinationMatrixSource:
-    """Tests O-D matrix loading and lookup."""
+    """Tests O-D matrix loading and lookup, via the public load_data()/lookup()
+    interface only — never the internal columnar/array layout."""
 
-    def _make_source_with_data(self, lookup_data):
-        source = OriginDestinationMatrixSource("test_od", {"files": [], "out_of_boundary": "error"})
-        source._lookup = lookup_data
-        source._data_loaded = True
-        return source
-
-    def test_lookup_existing_origin(self):
-        source = self._make_source_with_data({
-            "ORIGIN_A": [
-                ("DEST_1", {"mode": "car"}, 0.7),
-                ("DEST_2", {"mode": "bus"}, 0.3),
-            ]
-        })
+    def test_lookup_existing_origin(self, tmp_path):
+        csv_path = write_od_csv(
+            tmp_path / "od.csv", ["ORIGIN_A", "ORIGIN_A"], ["DEST_1", "DEST_2"], [0.7, 0.3],
+            extra_columns={"mode": ["car", "bus"]},
+        )
+        source = OriginDestinationMatrixSource(
+            "test_od", make_od_config(csv_path, metadata_columns={"mode": "mode"})
+        )
+        source.load_data()
         result = source.lookup("ORIGIN_A")
         assert len(result) == 2
         assert result[0][0] == "DEST_1"
-        assert result[0][2] == 0.7
+        assert abs(result[0][2] - 0.7) < 1e-10
+        assert result[0][1]["mode"] == "car"
 
-    def test_lookup_missing_origin_raises(self):
-        source = self._make_source_with_data({
-            "ORIGIN_A": [("DEST_1", {}, 1.0)]
-        })
+    def test_lookup_missing_origin_raises(self, tmp_path):
+        csv_path = write_od_csv(tmp_path / "od.csv", ["ORIGIN_A"], ["DEST_1"], [1.0])
+        source = OriginDestinationMatrixSource("test_od", make_od_config(csv_path))
+        source.load_data()
         with pytest.raises(KeyError, match="no destinations for origin"):
             source.lookup("MISSING")
 
@@ -407,87 +437,173 @@ class TestOriginDestinationMatrixSource:
         with pytest.raises(RuntimeError, match="Data not loaded"):
             source.lookup("ORIGIN_A")
 
-    def test_destination_exclusion_in_parsing(self):
+    def test_destination_exclusion(self, tmp_path):
         """Excluded destinations should not appear in lookup results."""
-        source = OriginDestinationMatrixSource("test_od", {"files": [], "out_of_boundary": "error"})
-        df = pd.DataFrame({
-            "origin": ["A", "A", "A"],
-            "destination": ["D1", "D2", "D3"],
-            "likelihood": [5.0, 3.0, 2.0],
-        })
-        result = source._parse_od_dataframe(
-            df, "origin", "destination", "likelihood",
-            metadata_columns={},
-            exclude_destinations=["D2"],
+        csv_path = write_od_csv(
+            tmp_path / "od.csv", ["A", "A", "A"], ["D1", "D2", "D3"], [5.0, 3.0, 2.0]
         )
-        destinations = [d[0] for d in result["A"]]
+        source = OriginDestinationMatrixSource(
+            "test_od", make_od_config(csv_path, exclude_destinations=["D2"])
+        )
+        source.load_data()
+        destinations = [d[0] for d in source.lookup("A")]
         assert "D1" in destinations
         assert "D2" not in destinations
         assert "D3" in destinations
 
-    def test_likelihood_normalization(self):
+    def test_likelihood_normalization(self, tmp_path):
         """Likelihoods should be normalized to sum to 1.0 per origin."""
-        source = OriginDestinationMatrixSource("test_od", {"files": [], "out_of_boundary": "error"})
-        df = pd.DataFrame({
-            "origin": ["A", "A"],
-            "destination": ["D1", "D2"],
-            "likelihood": [3.0, 7.0],
-        })
-        result = source._parse_od_dataframe(
-            df, "origin", "destination", "likelihood", {}, [],
-        )
-        total = sum(lik for _, _, lik in result["A"])
+        csv_path = write_od_csv(tmp_path / "od.csv", ["A", "A"], ["D1", "D2"], [3.0, 7.0])
+        source = OriginDestinationMatrixSource("test_od", make_od_config(csv_path))
+        source.load_data()
+        result = source.lookup("A")
+        total = sum(lik for _, _, lik in result)
         assert abs(total - 1.0) < 1e-10
-        assert abs(result["A"][0][2] - 0.3) < 1e-10  # D1
-        assert abs(result["A"][1][2] - 0.7) < 1e-10  # D2
+        by_dest = {d: lik for d, _, lik in result}
+        assert abs(by_dest["D1"] - 0.3) < 1e-10
+        assert abs(by_dest["D2"] - 0.7) < 1e-10
 
-    def test_metadata_columns_collected(self):
-        source = OriginDestinationMatrixSource("test_od", {"files": [], "out_of_boundary": "error"})
-        df = pd.DataFrame({
-            "origin": ["A"],
-            "destination": ["D1"],
-            "likelihood": [1.0],
-            "mode": ["car"],
-            "distance": [10.5],
-        })
-        result = source._parse_od_dataframe(
-            df, "origin", "destination", "likelihood",
-            metadata_columns={"mode": "mode", "distance": "distance"},
-            exclude_destinations=[],
+    def test_metadata_columns_collected(self, tmp_path):
+        csv_path = write_od_csv(
+            tmp_path / "od.csv", ["A"], ["D1"], [1.0],
+            extra_columns={"mode": ["car"], "distance": [10.5]},
         )
-        meta = result["A"][0][1]
+        source = OriginDestinationMatrixSource(
+            "test_od",
+            make_od_config(csv_path, metadata_columns={"mode": "mode", "distance": "distance"}),
+        )
+        source.load_data()
+        meta = source.lookup("A")[0][1]
         assert meta["mode"] == "car"
         assert meta["distance"] == 10.5
 
-    def test_multiple_origins(self):
-        source = OriginDestinationMatrixSource("test_od", {"files": [], "out_of_boundary": "error"})
-        df = pd.DataFrame({
-            "origin": ["A", "A", "B"],
-            "destination": ["D1", "D2", "D3"],
-            "likelihood": [0.6, 0.4, 1.0],
-        })
-        result = source._parse_od_dataframe(
-            df, "origin", "destination", "likelihood", {}, [],
+    def test_multiple_origins(self, tmp_path):
+        csv_path = write_od_csv(
+            tmp_path / "od.csv", ["A", "A", "B"], ["D1", "D2", "D3"], [0.6, 0.4, 1.0]
         )
-        assert "A" in result
-        assert "B" in result
-        assert len(result["A"]) == 2
-        assert len(result["B"]) == 1
+        source = OriginDestinationMatrixSource("test_od", make_od_config(csv_path))
+        source.load_data()
+        assert len(source.lookup("A")) == 2
+        assert len(source.lookup("B")) == 1
 
-    def test_exclusion_with_all_destinations_excluded(self):
-        """If all destinations are excluded, origin has empty list."""
-        source = OriginDestinationMatrixSource("test_od", {"files": [], "out_of_boundary": "error"})
-        df = pd.DataFrame({
-            "origin": ["A"],
-            "destination": ["D1"],
-            "likelihood": [1.0],
-        })
-        result = source._parse_od_dataframe(
-            df, "origin", "destination", "likelihood", {},
-            exclude_destinations=["D1"],
+    def test_exclusion_with_all_destinations_excluded(self, tmp_path):
+        """If all destinations are excluded, origin has empty list, not a
+        missing key."""
+        csv_path = write_od_csv(tmp_path / "od.csv", ["A"], ["D1"], [1.0])
+        source = OriginDestinationMatrixSource(
+            "test_od", make_od_config(csv_path, exclude_destinations=["D1"])
         )
-        # Origin A has no destinations after exclusion
-        assert result["A"] == []
+        source.load_data()
+        assert source.lookup("A") == []
+
+    def test_missing_file_fails_loud_at_load(self):
+        source = OriginDestinationMatrixSource("test_od", {
+            "files": [{"path": "/no/such/file.csv", "key_columns": {"origin": None},
+                       "destination_column": "destination", "likelihood_column": "likelihood"}],
+            "out_of_boundary": "error",
+        })
+        with pytest.raises(FileNotFoundError, match="not found"):
+            source.load_data()
+
+    def test_chunking_splits_single_origin_across_chunks(self, tmp_path):
+        """An origin's rows split across chunk boundaries must still end up
+        grouped together under one lookup() call."""
+        origins = ["A"] * 5
+        destinations = [f"D{i}" for i in range(5)]
+        likelihoods = [1.0] * 5
+        csv_path = write_od_csv(tmp_path / "od.csv", origins, destinations, likelihoods)
+        source = OriginDestinationMatrixSource(
+            "test_od", make_od_config(csv_path, chunk_size=2)
+        )
+        source.load_data()
+        result = source.lookup("A")
+        assert {d for d, _, _ in result} == set(destinations)
+
+    def test_geo_units_filter_restricts_origins(self, tmp_path):
+        csv_path = write_od_csv(
+            tmp_path / "od.csv", ["A", "B"], ["D1", "D2"], [1.0, 1.0]
+        )
+        source = OriginDestinationMatrixSource("test_od", make_od_config(csv_path))
+        source.load_data(geo_units={"A", "D1", "D2"})
+        assert source.lookup("A") is not None
+        with pytest.raises(KeyError):
+            source.lookup("B")
+
+
+class TestOriginDestinationMatrixBoundaryPolicy:
+    """Tests the out_of_boundary/on_empty/outside_value region-run policy,
+    exercised via load_data(geo_units=...) + lookup() only."""
+
+    def test_error_raises_when_out_of_boundary_destination_present(self, tmp_path):
+        csv_path = write_od_csv(
+            tmp_path / "od.csv", ["A", "A"], ["IN", "OUT"], [0.5, 0.5]
+        )
+        source = OriginDestinationMatrixSource(
+            "test_od", make_od_config(csv_path, out_of_boundary="error")
+        )
+        with pytest.raises(ValueError, match="out_of_boundary='error'"):
+            source.load_data(geo_units={"A", "IN"})
+
+    def test_redistribute_renormalizes_to_in_boundary_only(self, tmp_path):
+        csv_path = write_od_csv(
+            tmp_path / "od.csv", ["A", "A"], ["IN", "OUT"], [0.5, 0.5]
+        )
+        source = OriginDestinationMatrixSource(
+            "test_od", make_od_config(csv_path, out_of_boundary="redistribute", on_empty="error")
+        )
+        source.load_data(geo_units={"A", "IN"})
+        result = source.lookup("A")
+        assert len(result) == 1
+        assert result[0][0] == "IN"
+        assert abs(result[0][2] - 1.0) < 1e-10
+        assert source._redistributed_fraction["A"] == 0.5
+
+    def test_redistribute_on_empty_error_raises(self, tmp_path):
+        csv_path = write_od_csv(tmp_path / "od.csv", ["A"], ["OUT"], [1.0])
+        source = OriginDestinationMatrixSource(
+            "test_od", make_od_config(csv_path, out_of_boundary="redistribute", on_empty="error")
+        )
+        with pytest.raises(ValueError, match="on_empty='error'"):
+            source.load_data(geo_units={"A"})
+
+    def test_redistribute_on_empty_outside_uses_sentinel(self, tmp_path):
+        csv_path = write_od_csv(tmp_path / "od.csv", ["A"], ["OUT"], [1.0])
+        source = OriginDestinationMatrixSource(
+            "test_od",
+            make_od_config(csv_path, out_of_boundary="redistribute", on_empty="outside",
+                            outside_value="OUTSIDE"),
+        )
+        source.load_data(geo_units={"A"})
+        result = source.lookup("A")
+        assert len(result) == 1
+        assert result[0][0] == "OUTSIDE"
+        assert abs(result[0][2] - 1.0) < 1e-10
+
+    def test_outside_policy_collapses_out_of_boundary_mass_to_sentinel(self, tmp_path):
+        csv_path = write_od_csv(
+            tmp_path / "od.csv", ["A", "A", "A"], ["IN", "OUT1", "OUT2"], [0.5, 0.3, 0.2],
+            extra_columns={"mode": ["car", "bus", "bus"]},
+        )
+        source = OriginDestinationMatrixSource(
+            "test_od",
+            make_od_config(csv_path, out_of_boundary="outside", outside_value="OUTSIDE",
+                            metadata_columns={"mode": "mode"}),
+        )
+        source.load_data(geo_units={"A", "IN"})
+        result = source.lookup("A")
+        by_dest = {d: (m, lik) for d, m, lik in result}
+        assert set(by_dest) == {"IN", "OUTSIDE"}
+        assert abs(by_dest["IN"][1] - 0.5) < 1e-10
+        assert abs(by_dest["OUTSIDE"][1] - 0.5) < 1e-10
+        assert by_dest["OUTSIDE"][0]["mode"] == "OUTSIDE"
+
+    def test_no_geo_units_is_a_no_op(self, tmp_path):
+        csv_path = write_od_csv(tmp_path / "od.csv", ["A"], ["OUT"], [1.0])
+        source = OriginDestinationMatrixSource(
+            "test_od", make_od_config(csv_path, out_of_boundary="error")
+        )
+        source.load_data(geo_units=None)
+        assert source.lookup("A") == [("OUT", {}, 1.0)]
 
 
 # GUSamplerSource Tests

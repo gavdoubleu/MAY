@@ -30,6 +30,8 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from may.common.code_table import CodeTable
+
 logger = logging.getLogger("route_legs_index")
 
 REQUIRED_COLUMNS = {"origin_mgu", "dest_mgu", "mode_class", "leg_idx", "line_id",
@@ -56,44 +58,6 @@ def _pack_key(origin_code: np.ndarray, dest_code: np.ndarray, mode_class_code: n
             | mode_class_code.astype(np.int64))
 
 
-class _CodeTable:
-    """String <-> int32 code, assigned in first-appearance order. No need to
-    match pandas' string-lexicographic sort order — see PRD requirement 4:
-    within-key leg order is not guaranteed, so code assignment order is
-    unconstrained.
-
-    Encoding is vectorised per chunk via pandas.factorize: the per-row cost
-    is paid only once per *unique* value in the chunk (line/board/alight/
-    MGU names repeat heavily — far fewer uniques than rows), not once per
-    row. The running `_code_of` dict is sized by vocabulary (thousands),
-    never by row count.
-    """
-
-    def __init__(self):
-        self._code_of: Dict[str, int] = {}
-        self.decode: List[str] = []
-
-    def encode_series(self, series: pd.Series) -> np.ndarray:
-        local_codes, uniques = pd.factorize(series.to_numpy())
-        global_of_local = np.empty(len(uniques), dtype=np.int32)
-        code_of = self._code_of
-        decode = self.decode
-        for local_code, value in enumerate(uniques):
-            code = code_of.get(value)
-            if code is None:
-                code = len(decode)
-                code_of[value] = code
-                decode.append(value)
-            global_of_local[local_code] = code
-        return global_of_local[local_codes]
-
-    def code_of(self, value: str) -> Optional[int]:
-        return self._code_of.get(value)
-
-    def __getitem__(self, code: int) -> str:
-        return self.decode[code]
-
-
 class RouteLegsIndex:
     """(origin, dest, mode_class) -> legs, built from a chunked, mode-filtered
     read of the national legs CSV. See module docstring for the lookup
@@ -115,8 +79,8 @@ class RouteLegsIndex:
         self._meta_arrays: Dict[str, np.ndarray] = {}
         self._string_codes: Dict[str, np.ndarray] = {name: np.empty(0, dtype=np.int32)
                                                        for name in STRING_FIELDS}
-        self._code_tables: Dict[str, _CodeTable] = {name: _CodeTable() for name in STRING_FIELDS}
-        self._key_code_tables: Dict[str, _CodeTable] = {name: _CodeTable() for name in KEY_FIELDS}
+        self._code_tables: Dict[str, CodeTable] = {name: CodeTable() for name in STRING_FIELDS}
+        self._key_code_tables: Dict[str, CodeTable] = {name: CodeTable() for name in KEY_FIELDS}
         # Sorted (ascending) packed keys, one per distinct (origin, dest,
         # mode_class); group_starts/group_stops are aligned index-for-index.
         self._sorted_group_keys = np.empty(0, dtype=np.int64)

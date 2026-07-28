@@ -8,9 +8,11 @@ This module handles loading demographic data from CSV files with:
 """
 
 import logging
+import numpy as np
 import pandas as pd
 from typing import Dict, List, Any, Optional, Tuple
 from pathlib import Path
+from may.common.code_table import CodeTable
 from may.utils import path_resolver as pr
 from may.utils.attribute_access import get_person_attribute, get_nested_value
 
@@ -702,11 +704,30 @@ class OriginDestinationMatrixSource(DataSource):
     Returns all possible destinations for a given origin with associated likelihoods.
     """
 
+    #: Default rows per chunk for the chunked CSV read, matching
+    #: RouteLegsIndex (may/venue_distributor/route_legs_index.py) — the
+    #: precedent this columnar design follows. Overridable per file_config
+    #: via 'chunk_size'.
+    _DEFAULT_CHUNK_SIZE = 500_000
+
     def __init__(self, name: str, config: Dict[str, Any]):
         """Initialize O-D matrix source."""
         super().__init__(name, config)
-        # Lookup: origin_code -> [(destination, metadata_dict, likelihood), ...]
-        self._lookup: Dict[str, List[Tuple[str, Dict[str, Any], float]]] = {}
+        # Columnar storage, populated by load_data(). Empty/absent until then
+        # — see module note on OriginDestinationMatrixSource for why this is
+        # not a Dict[str, List[Tuple[...]]] any more (memory at ~92M-row
+        # scale). self._origin_code_table maps origin string -> dense int32
+        # code; self._group_starts/_group_stops (indexed by that code) give
+        # the row range in self._dest_codes/_likelihoods/_metadata_arrays for
+        # that origin.
+        self._origin_code_table = CodeTable()
+        self._dest_code_table = CodeTable()
+        self._metadata_code_tables: Dict[str, CodeTable] = {}
+        self._dest_codes = np.empty(0, dtype=np.int32)
+        self._likelihoods = np.empty(0, dtype=np.float64)
+        self._metadata_arrays: Dict[str, np.ndarray] = {}
+        self._group_starts = np.empty(0, dtype=np.int64)
+        self._group_stops = np.empty(0, dtype=np.int64)
         self._file_configs = config.get('files', [])
 
         # Out-of-boundary destination policy. Required, no default —
@@ -761,68 +782,166 @@ class OriginDestinationMatrixSource(DataSource):
         self._redistributed_fraction: Dict[str, float] = {}
 
     def load_data(self, geo_units: Optional[set] = None):
-        """Load origin-destination flow data from CSV."""
+        """Load origin-destination flow data from CSV, chunked and columnar
+        (never a full-file DataFrame or a per-row Python object) so a
+        ~92M-row table stays memory-bounded. See RouteLegsIndex
+        (may/venue_distributor/route_legs_index.py) for the precedent this
+        follows.
+
+        Note: as with the pre-existing behaviour, multiple file_configs are
+        NOT merged — each fully replaces the previous one's loaded data. In
+        practice exactly one file_config is used in production.
+        """
         logger.info(f"Loading data for source '{self.name}'...")
 
         for file_config in self._file_configs:
             file_path = Path(pr.resolve(file_config['path']))
 
-            if file_path.exists():
-                try:
-                    df = pd.read_csv(file_path)
-
-                    # Get column configuration
-                    key_columns_config = file_config.get('key_columns', {})
-                    destination_column = file_config.get('destination_column')
-                    likelihood_column = file_config.get('likelihood_column')
-                    metadata_columns = file_config.get('metadata_columns', {})
-                    exclude_destinations = file_config.get('exclude_destinations', [])
-
-                    # Origin column is the first key in key_columns
-                    if not key_columns_config:
-                        raise ValueError(
-                            f"O-D source '{self.name}' has no 'key_columns'; cannot "
-                            "determine the origin column."
-                        )
-                    origin_column = list(key_columns_config.keys())[0]
-
-                    # Filter to only relevant geographical units
-                    # Only filter if geo_units values actually match origin column values
-                    if geo_units and origin_column and origin_column in df.columns:
-                        # Check if there's any overlap between geo_units and origin values
-                        origin_values = set(df[origin_column].unique())
-                        overlap = origin_values.intersection(geo_units)
-
-                        if overlap:  # Only filter if there's matching values
-                            original_len = len(df)
-                            df = df[df[origin_column].isin(geo_units)]
-                            logger.info(f"  Filtered O-D matrix from {original_len} to {len(df)} rows based on {len(overlap)} matching origins")
-
-                    # Parse DataFrame
-                    self._lookup = self._parse_od_dataframe(
-                        df,
-                        origin_column,
-                        destination_column,
-                        likelihood_column,
-                        metadata_columns,
-                        exclude_destinations
-                    )
-
-                    logger.info(f"  ✓ Loaded {len(self._lookup)} origins from {file_path.name}")
-
-                except Exception as e:
-                    # Fail loud on a load/parse error.
-                    raise RuntimeError(
-                        f"failed to load data source file {file_path}: {e}"
-                    ) from e
-            else:
+            if not file_path.exists():
                 raise FileNotFoundError(f"data source file not found: {file_path}")
+
+            try:
+                self._load_file(file_path, file_config, geo_units)
+            except Exception as e:
+                # Fail loud on a load/parse error.
+                raise RuntimeError(
+                    f"failed to load data source file {file_path}: {e}"
+                ) from e
 
         # Apply the out-of-boundary policy AFTER parsing and OUTSIDE the
         # per-file try/except above — policy violations must fail loud.
         self._apply_boundary_policy(geo_units)
 
         self._data_loaded = True
+
+    def _load_file(self, file_path: Path, file_config: Dict[str, Any],
+                    geo_units: Optional[set]) -> None:
+        origin_column = _ordered_key_columns(file_config, self.name, expected=1)[0]
+        destination_column = file_config.get('destination_column')
+        likelihood_column = file_config.get('likelihood_column')
+        metadata_columns = file_config.get('metadata_columns', {})
+        exclude_destinations = set(file_config.get('exclude_destinations', []))
+        chunk_size = file_config.get('chunk_size', self._DEFAULT_CHUNK_SIZE)
+
+        # Overlap pre-pass: only filter by geo_units if origin values in this
+        # file actually overlap with it (some O-D files are keyed at a level
+        # geo_units never matches, e.g. LGU origins under OA/SGU geo_units —
+        # they must stay unfiltered). Reads only the origin column, chunked.
+        should_filter = False
+        if geo_units:
+            origin_values = set()
+            for chunk in pd.read_csv(file_path, usecols=[origin_column], chunksize=chunk_size):
+                origin_values.update(chunk[origin_column].unique())
+            overlap = origin_values & geo_units
+            should_filter = bool(overlap)
+            if should_filter:
+                logger.info(f"  Filtering O-D matrix based on {len(overlap)} matching origins")
+
+        origin_code_table = CodeTable()
+        dest_code_table = CodeTable()
+        metadata_code_tables: Dict[str, CodeTable] = {}
+        metadata_is_numeric: Dict[str, bool] = {}
+
+        origin_code_chunks: List[np.ndarray] = []
+        dest_code_chunks: List[np.ndarray] = []
+        likelihood_chunks: List[np.ndarray] = []
+        metadata_chunks: Dict[str, List[np.ndarray]] = {}
+        n_rows = 0
+
+        for chunk in pd.read_csv(file_path, chunksize=chunk_size):
+            if should_filter:
+                chunk = chunk[chunk[origin_column].isin(geo_units)]
+            if chunk.empty:
+                continue
+
+            # Register every origin appearing (post geo_units-filter, PRE
+            # exclude_destinations) so it gets a dense code even if all its
+            # destinations end up excluded below — a known origin with zero
+            # destinations must resolve to [], not a missing key.
+            origin_codes = origin_code_table.encode_series(chunk[origin_column])
+
+            if exclude_destinations:
+                keep_mask = (~chunk[destination_column].isin(exclude_destinations)).to_numpy()
+                chunk = chunk[keep_mask]
+                origin_codes = origin_codes[keep_mask]
+            if chunk.empty:
+                continue
+
+            dest_codes = dest_code_table.encode_series(chunk[destination_column])
+            likelihoods = chunk[likelihood_column].to_numpy(dtype=np.float64)
+
+            origin_code_chunks.append(origin_codes)
+            dest_code_chunks.append(dest_codes)
+            likelihood_chunks.append(likelihoods)
+
+            for meta_key, meta_column in metadata_columns.items():
+                if meta_column not in chunk.columns:
+                    continue  # silently skipped, matching prior behaviour
+                series = chunk[meta_column]
+                if meta_key not in metadata_is_numeric:
+                    metadata_is_numeric[meta_key] = pd.api.types.is_numeric_dtype(series)
+                    if not metadata_is_numeric[meta_key]:
+                        metadata_code_tables[meta_key] = CodeTable()
+                    metadata_chunks[meta_key] = []
+                if metadata_is_numeric[meta_key]:
+                    metadata_chunks[meta_key].append(series.to_numpy())
+                else:
+                    metadata_chunks[meta_key].append(metadata_code_tables[meta_key].encode_series(series))
+
+            n_rows += len(chunk)
+
+        if origin_code_chunks:
+            origin_codes = np.concatenate(origin_code_chunks)
+            dest_codes = np.concatenate(dest_code_chunks)
+            likelihoods = np.concatenate(likelihood_chunks)
+        else:
+            origin_codes = np.empty(0, dtype=np.int32)
+            dest_codes = np.empty(0, dtype=np.int32)
+            likelihoods = np.empty(0, dtype=np.float64)
+        metadata_arrays = {
+            meta_key: (np.concatenate(chunks) if chunks else np.empty(0))
+            for meta_key, chunks in metadata_chunks.items()
+        }
+
+        # Sort by origin code (stable, to preserve within-origin file order —
+        # matches the old groupby+iterrows behaviour), then group densely:
+        # origin codes are 0..V-1 by construction, so bincount/cumsum gives
+        # O(1) direct-index group lookup — simpler than a sorted-key binary
+        # search, which RouteLegsIndex needs only because its key is a
+        # 3-field composite (sparse keyspace), unlike this single-field one.
+        order = np.argsort(origin_codes, kind='stable')
+        origin_codes = origin_codes[order]
+        dest_codes = dest_codes[order]
+        likelihoods = likelihoods[order]
+        metadata_arrays = {k: v[order] for k, v in metadata_arrays.items()}
+
+        vocab_size = len(origin_code_table)
+        counts = np.bincount(origin_codes, minlength=vocab_size) if len(origin_codes) else np.zeros(vocab_size, dtype=np.int64)
+        group_stops = np.cumsum(counts)
+        group_starts = group_stops - counts
+
+        # Normalise likelihoods to sum to 1.0 per origin. A numpy-slice loop
+        # over origins (~thousands to low hundred-thousands), not a
+        # Python-tuple loop over rows — the row count was the memory/time
+        # problem, not the origin count.
+        for code in range(vocab_size):
+            start, stop = int(group_starts[code]), int(group_stops[code])
+            if stop <= start:
+                continue
+            total = likelihoods[start:stop].sum()
+            if total > 0:
+                likelihoods[start:stop] /= total
+
+        self._origin_code_table = origin_code_table
+        self._dest_code_table = dest_code_table
+        self._metadata_code_tables = metadata_code_tables
+        self._dest_codes = dest_codes
+        self._likelihoods = likelihoods
+        self._metadata_arrays = metadata_arrays
+        self._group_starts = group_starts
+        self._group_stops = group_stops
+
+        logger.info(f"  ✓ Loaded {vocab_size} origins from {file_path.name}")
 
     def _apply_boundary_policy(self, geo_units: Optional[set]):
         """
@@ -832,19 +951,40 @@ class OriginDestinationMatrixSource(DataSource):
         Boundary membership is "destination value is among the loaded geo_units".
         With no geo_units (an unbounded / whole-world run) there is no boundary,
         so the policy is a no-op.
+
+        Operates on the columnar arrays: a single vectorised membership check
+        over all rows, then a per-origin-group loop over numpy slices
+        (mirrors the original per-origin Python-list loop structure, just
+        without a Python tuple/dict per row).
         """
         if not geo_units:
             return
 
-        # Metadata keys carried per destination (e.g. work_mode) — the sentinel
-        # destination must carry the same keys so output wiring still resolves.
-        meta_keys = []
-        for fc in self._file_configs:
-            for k in fc.get('metadata_columns', {}).keys():
-                if k not in meta_keys:
-                    meta_keys.append(k)
+        vocab_size = len(self._origin_code_table)
+        dest_codes = self._dest_codes
+        likelihoods = self._likelihoods
+        metadata_arrays = self._metadata_arrays
+        group_starts = self._group_starts
+        group_stops = self._group_stops
 
-        new_lookup: Dict[str, List[Tuple[str, Dict[str, Any], float]]] = {}
+        dest_in_boundary_by_code = np.array(
+            [d in geo_units for d in self._dest_code_table.decode], dtype=bool
+        )
+        row_in_boundary = (dest_in_boundary_by_code[dest_codes]
+                            if len(dest_codes) else np.empty(0, dtype=bool))
+
+        # Sentinel destination code, allocated lazily (only if the 'outside'
+        # outcome can actually occur) — never fed back into row_in_boundary,
+        # so it's safe to add to dest_code_table mid-pass.
+        outside_code: Optional[int] = None
+
+        def get_outside_code() -> int:
+            nonlocal outside_code
+            if outside_code is None:
+                outside_code = int(self._dest_code_table.encode_series(
+                    pd.Series([self._outside_value]))[0])
+            return outside_code
+
         error_offenders: Dict[str, List[str]] = {}
         empty_origins: List[str] = []
         origins_with_out = 0
@@ -852,36 +992,74 @@ class OriginDestinationMatrixSource(DataSource):
         out_mass_total = 0.0
         outside_origins = 0
 
-        for origin, dests in self._lookup.items():
-            in_b = [(d, m, l) for (d, m, l) in dests if d in geo_units]
-            out_b = [(d, m, l) for (d, m, l) in dests if d not in geo_units]
-            if not out_b:
-                new_lookup[origin] = dests
+        new_dest_chunks: List[np.ndarray] = []
+        new_likelihood_chunks: List[np.ndarray] = []
+        new_metadata_chunks: Dict[str, List[np.ndarray]] = {k: [] for k in metadata_arrays}
+        new_counts = np.zeros(vocab_size, dtype=np.int64)
+
+        def append_rows(code: int, dest_slice: np.ndarray, lik_slice: np.ndarray,
+                        meta_slices: Dict[str, np.ndarray]) -> None:
+            new_dest_chunks.append(dest_slice)
+            new_likelihood_chunks.append(lik_slice)
+            for k in metadata_arrays:
+                new_metadata_chunks[k].append(meta_slices[k])
+            new_counts[code] = len(dest_slice)
+
+        for code in range(vocab_size):
+            start, stop = int(group_starts[code]), int(group_stops[code])
+            if stop <= start:
+                continue
+            origin_str = self._origin_code_table[code]
+            in_b = row_in_boundary[start:stop]
+
+            if in_b.all():
+                append_rows(code, dest_codes[start:stop], likelihoods[start:stop],
+                            {k: v[start:stop] for k, v in metadata_arrays.items()})
                 continue
 
             origins_with_out += 1
-            out_mass = sum(l for _, _, l in out_b)
+            out_mass = float(likelihoods[start:stop][~in_b].sum())
             out_mass_total += out_mass
 
             if self._out_of_boundary == 'error':
-                error_offenders[origin] = [d for d, _, _ in out_b]
-                new_lookup[origin] = dests
+                error_offenders[origin_str] = [
+                    self._dest_code_table[c] for c in dest_codes[start:stop][~in_b]
+                ]
+                append_rows(code, dest_codes[start:stop], likelihoods[start:stop],
+                            {k: v[start:stop] for k, v in metadata_arrays.items()})
             elif self._out_of_boundary == 'redistribute':
-                dropped_options += len(out_b)
-                in_total = sum(l for _, _, l in in_b)
+                dropped_options += int((~in_b).sum())
+                in_total = float(likelihoods[start:stop][in_b].sum())
                 if in_total <= 0:
-                    empty_origins.append(origin)
-                    new_lookup[origin] = []  # resolved by on_empty below
+                    empty_origins.append(origin_str)
+                    if self._on_empty == 'outside':
+                        code_ = get_outside_code()
+                        append_rows(
+                            code, np.array([code_], dtype=dest_codes.dtype),
+                            np.array([1.0], dtype=likelihoods.dtype),
+                            {k: np.zeros(1, dtype=v.dtype) for k, v in metadata_arrays.items()},
+                        )
+                    # else: on_empty='error' — will raise below, leave empty.
                 else:
-                    new_lookup[origin] = [(d, m, l / in_total) for (d, m, l) in in_b]
+                    append_rows(
+                        code, dest_codes[start:stop][in_b],
+                        likelihoods[start:stop][in_b] / in_total,
+                        {k: v[start:stop][in_b] for k, v in metadata_arrays.items()},
+                    )
                     # Probability a worker from this origin was bounced back in
                     # (= the out-of-boundary mass that got redistributed). Drives
                     # the per-person Bernoulli mark in the strategy.
-                    self._redistributed_fraction[origin] = out_mass
+                    self._redistributed_fraction[origin_str] = out_mass
             else:  # 'outside'
                 outside_origins += 1
-                sentinel_meta = {k: self._outside_value for k in meta_keys}
-                new_lookup[origin] = in_b + [(self._outside_value, sentinel_meta, out_mass)]
+                code_ = get_outside_code()
+                append_rows(
+                    code,
+                    np.concatenate([dest_codes[start:stop][in_b], [code_]]).astype(dest_codes.dtype),
+                    np.concatenate([likelihoods[start:stop][in_b], [out_mass]]).astype(likelihoods.dtype),
+                    {k: np.concatenate([v[start:stop][in_b], np.zeros(1, dtype=v.dtype)])
+                     for k, v in metadata_arrays.items()},
+                )
 
         if self._out_of_boundary == 'error' and error_offenders:
             sample = sorted({d for ds in error_offenders.values() for d in ds})[:15]
@@ -905,9 +1083,6 @@ class OriginDestinationMatrixSource(DataSource):
                         f"(e.g. {empty_origins[:15]}). Switch on_empty to 'outside', or "
                         "shrink/extend the world."
                     )
-                for origin in empty_origins:
-                    sentinel_meta = {k: self._outside_value for k in meta_keys}
-                    new_lookup[origin] = [(self._outside_value, sentinel_meta, 1.0)]
             mean_pct = 100.0 * out_mass_total / origins_with_out if origins_with_out else 0.0
             logger.info(
                 f"  [out_of_boundary=redistribute] dropped {dropped_options} out-of-boundary "
@@ -920,62 +1095,16 @@ class OriginDestinationMatrixSource(DataSource):
                 f"out-of-boundary flow to sentinel '{self._outside_value}'."
             )
 
-        self._lookup = new_lookup
-
-    def _parse_od_dataframe(self, df: pd.DataFrame,
-                           origin_column: str,
-                           destination_column: str,
-                           likelihood_column: str,
-                           metadata_columns: Dict[str, str],
-                           exclude_destinations: List[str]) -> Dict[str, List[Tuple[str, Dict[str, Any], float]]]:
-        """
-        Parse O-D DataFrame into lookup dictionary.
-
-        Args:
-            df: DataFrame to parse
-            origin_column: Column with origin codes
-            destination_column: Column with destination codes
-            likelihood_column: Column with likelihood/probability values
-            metadata_columns: Additional columns to include (e.g., work_mode)
-            exclude_destinations: List of destination codes to exclude
-
-        Returns:
-            Dictionary mapping origin codes to list of (destination, metadata, likelihood) tuples
-        """
-        lookup = {}
-
-        # Group by origin
-        for origin, group in df.groupby(origin_column):
-            destinations = []
-
-            for _, row in group.iterrows():
-                destination = row[destination_column]
-
-                # Skip excluded destinations
-                if destination in exclude_destinations:
-                    continue
-
-                likelihood = float(row[likelihood_column])
-
-                # Collect metadata
-                metadata = {}
-                for meta_key, meta_column in metadata_columns.items():
-                    if meta_column in df.columns:
-                        metadata[meta_key] = row[meta_column]
-
-                destinations.append((destination, metadata, likelihood))
-
-            # Normalize likelihoods to sum to 1.0
-            total_likelihood = sum(lik for _, _, lik in destinations)
-            if total_likelihood > 0:
-                destinations = [
-                    (dest, meta, lik / total_likelihood)
-                    for dest, meta, lik in destinations
-                ]
-
-            lookup[origin] = destinations
-
-        return lookup
+        self._dest_codes = (np.concatenate(new_dest_chunks) if new_dest_chunks
+                             else np.empty(0, dtype=np.int32))
+        self._likelihoods = (np.concatenate(new_likelihood_chunks) if new_likelihood_chunks
+                              else np.empty(0, dtype=np.float64))
+        self._metadata_arrays = {
+            k: (np.concatenate(v) if v else np.empty(0, dtype=metadata_arrays[k].dtype))
+            for k, v in new_metadata_chunks.items()
+        }
+        self._group_stops = np.cumsum(new_counts)
+        self._group_starts = self._group_stops - new_counts
 
     def lookup(self, origin: str) -> List[Tuple[str, Dict[str, Any], float]]:
         """
@@ -991,12 +1120,30 @@ class OriginDestinationMatrixSource(DataSource):
             raise RuntimeError(
                 f"Data not loaded for source '{self.name}'. No fallbacks."
             )
-        if origin not in self._lookup:
+        code = self._origin_code_table.code_of(origin)
+        if code is None:
             raise KeyError(
                 f"Source '{self.name}' has no destinations for origin '{origin}'. "
                 "No fallbacks. The O-D matrix must cover every origin."
             )
-        return self._lookup[origin]
+        start, stop = int(self._group_starts[code]), int(self._group_stops[code])
+        result = []
+        for i in range(start, stop):
+            dest = self._dest_code_table[int(self._dest_codes[i])]
+            likelihood = float(self._likelihoods[i])
+            if self._outside_value is not None and dest == self._outside_value:
+                metadata = {k: self._outside_value for k in self._metadata_arrays}
+            else:
+                metadata = {}
+                for meta_key, arr in self._metadata_arrays.items():
+                    value = arr[i]
+                    if meta_key in self._metadata_code_tables:
+                        value = self._metadata_code_tables[meta_key][int(value)]
+                    elif hasattr(value, 'item'):
+                        value = value.item()
+                    metadata[meta_key] = value
+            result.append((dest, metadata, likelihood))
+        return result
 
 class GUSamplerSource(DataSource):
     """
