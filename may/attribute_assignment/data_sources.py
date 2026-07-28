@@ -878,11 +878,20 @@ class OriginDestinationMatrixSource(DataSource):
                 if meta_column not in chunk.columns:
                     continue  # silently skipped, matching prior behaviour
                 series = chunk[meta_column]
+                is_numeric = pd.api.types.is_numeric_dtype(series)
                 if meta_key not in metadata_is_numeric:
-                    metadata_is_numeric[meta_key] = pd.api.types.is_numeric_dtype(series)
-                    if not metadata_is_numeric[meta_key]:
+                    metadata_is_numeric[meta_key] = is_numeric
+                    if not is_numeric:
                         metadata_code_tables[meta_key] = CodeTable()
                     metadata_chunks[meta_key] = []
+                elif metadata_is_numeric[meta_key] != is_numeric:
+                    # pandas infers dtype per chunk, so a column that's numeric
+                    # in one chunk and stringy in another must fail loud rather
+                    # than have the wrong-typed chunk silently skip encoding.
+                    raise ValueError(
+                        f"metadata column '{meta_column}' has inconsistent dtype "
+                        f"across chunks (numeric vs non-numeric)"
+                    )
                 if metadata_is_numeric[meta_key]:
                     metadata_chunks[meta_key].append(series.to_numpy())
                 else:
