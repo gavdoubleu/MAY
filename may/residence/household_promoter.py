@@ -103,11 +103,30 @@ class HouseholdPromoter:
 
         return True
 
+    def _households_in_scope(self) -> List:
+        """Households the active geo-unit scope covers, whole world if unscoped.
+
+        Creation order either way, so the indexes built from this are
+        order-identical to the whole-world scan they replace.
+        """
+        venue_manager = self.distributor.venue_manager
+        if self.distributor.geo_unit_scope is None:
+            return venue_manager.get_venues_by_type("household")
+        return venue_manager.get_venues_by_type_in_scope(
+            "household", self.distributor.geo_unit_scope)
+
     def _get_households_by_geo_unit(self) -> Dict[str, List]:
-        """Index households by geo_unit if not already done."""
+        """Index households by geo_unit if not already done.
+
+        Built from the active geo-unit scope, not the whole world:
+        `set_geo_unit_scope` invalidates this index, so a world scan here
+        costs O(units x households) across the run. Out-of-scope codes are
+        never read anyway — the sole consumer iterates
+        `person_pool_by_geo_unit`, which is itself scoped.
+        """
         if self._households_by_geo_unit is None:
             self._households_by_geo_unit = {}
-            all_households = self.distributor.venue_manager.get_venues_by_type("household")
+            all_households = self._households_in_scope()
             for hh in all_households:
                 geo_code = hh.geographical_unit.name
                 if geo_code not in self._households_by_geo_unit:
@@ -116,10 +135,17 @@ class HouseholdPromoter:
         return self._households_by_geo_unit
 
     def _get_households_by_pattern(self) -> Dict[str, List]:
-        """Index households by actual_pattern if not already done."""
+        """Index households by actual_pattern if not already done.
+
+        Scoped for the same reason as the geo_unit index: rebuilt per loop
+        unit, so a world scan costs O(units x households). The rule loop
+        skips any household whose geo code is absent from
+        `person_pool_by_geo_unit`, so out-of-scope entries were only ever
+        iterated to be discarded.
+        """
         if self._households_by_pattern is None:
             self._households_by_pattern = {}
-            all_households = self.distributor.venue_manager.get_venues_by_type("household")
+            all_households = self._households_in_scope()
             for hh in all_households:
                 pattern = hh.properties.get('allocation_pattern', '')
                 if pattern not in self._households_by_pattern:
