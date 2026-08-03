@@ -265,9 +265,11 @@ class HouseholdRoundDistributor:
             if max_households is not None and households_created >= max_households:
                 break
 
-        # Calculate round statistics
-        # Get household count from VenueManager
-        all_households = self.distributor.venue_manager.get_venues_by_type("household")
+        # Calculate round statistics. The household total is world-wide and
+        # stays that way under a scope — it is a running total for the log,
+        # not a per-unit figure. Counted rather than listed: the list was
+        # built once per round per loop unit only to be measured.
+        total_households = self.distributor.venue_manager.count_venues_by_type("household")
 
         round_stats = {
             'round_name': round_label,
@@ -276,7 +278,7 @@ class HouseholdRoundDistributor:
             'households_requested': total_requested,
             'households_with_demotion': total_demoted,
             'people_allocated_this_round': len(self.distributor.allocated_people) - round_start_allocated,
-            'total_households': len(all_households),
+            'total_households': total_households,
             'total_people_allocated': len(self.distributor.allocated_people),
             'total_people_remaining': len(self.distributor.population.get_all_people()) - len(self.distributor.allocated_people)
         }

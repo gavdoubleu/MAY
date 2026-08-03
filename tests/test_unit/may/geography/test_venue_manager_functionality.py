@@ -581,3 +581,26 @@ class TestScopedVenueLookup:
             expected = [venue for venue in vm.get_venues_by_type(venue_type)
                         if venue.geographical_unit.name in scope]
             assert vm.get_venues_by_type_in_scope(venue_type, scope) == expected
+
+
+class TestVenueCount:
+    """Counting a venue type must not build a list of it.
+
+    Round statistics report the world-wide household total once per round,
+    per loop unit. `get_venues_by_type` copies every household into a fresh
+    list to be thrown away after `len`, which under a fine `loop_level`
+    costs O(households x units) for a number already known.
+    """
+
+    def test_counts_every_venue_of_the_type(self, loaded_geography):
+        vm = VenueManager(geography=loaded_geography, filter_by_geography=False)
+        sgu = loaded_geography.get_unit('SGU_001')
+        other_sgu = loaded_geography.get_unit('SGU_002')
+        for _ in range(7):
+            vm.create_venue('household', sgu)
+        vm.create_venue('household', other_sgu)
+        vm.create_venue('care_home', sgu)
+
+        assert vm.count_venues_by_type('household') == 8
+        assert vm.count_venues_by_type('care_home') == 1
+        assert vm.count_venues_by_type('hospital') == 0

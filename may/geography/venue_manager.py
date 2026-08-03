@@ -527,6 +527,14 @@ class VenueManager:
         """Get all venues of a specific type as a list."""
         return list(self.venues_by_type_and_id.get(venue_type, {}).values())
 
+    def count_venues_by_type(self, venue_type):
+        """How many venues of `venue_type` exist, world-wide.
+
+        `get_venues_by_type` copies the whole type into a new list, so taking
+        its length is O(venues) for a number the index already holds.
+        """
+        return len(self.venues_by_type_and_id.get(venue_type, {}))
+
     def get_venues_by_type_in_scope(self, venue_type, geo_unit_names):
         """Venues of `venue_type` inside `geo_unit_names`, in creation order.
 
