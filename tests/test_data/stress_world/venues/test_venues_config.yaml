@@ -19,5 +19,15 @@ venue_types:
     filename: boarding_schools.csv
     is_residence: true
 
+  # Sits at MGU, above the smallest level, and deliberately has no allocation
+  # step. Its only job is to give geo-unit scoping a venue that
+  # `scope_geo_unit_names` includes (it is inside the loop unit's subtree) but
+  # `scope_sgu_codes` does not — the distinction every other venue here is too
+  # flat to expose.
+  regional_hub:
+    enabled: true
+    filename: regional_hubs.csv
+    is_residence: false
+
 settings:
   filter_by_geography: true
