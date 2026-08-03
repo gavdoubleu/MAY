@@ -32,6 +32,7 @@ from may.residence.venue_allocator import (
     _check_attribute_constraints,
     _allocate_to_venue_type,
     _allocate_with_attributes,
+    _venues_in_scope,
 )
 
 STRESS_DATA = "tests/test_data/stress_world"
@@ -792,3 +793,31 @@ class TestVenueMembershipSideEffects:
         assert shelter_ids.isdisjoint(care_ids), (
             "A person must not be resident in both a shelter and a care home"
         )
+
+
+class TestVenuesInScope:
+    """The scope filter every venue step applies before allocating.
+
+    Behaviourally this is a pure performance filter — both allocation paths
+    key candidates by exact geographical-unit identity, so an out-of-scope
+    venue simply finds nobody. What it must not do is return *too few*
+    venues, or return them out of creation order: `_apply_strategy` draws
+    from the random stream per attribute slot, so either moves world output.
+
+    It takes the loop unit's whole subtree, not its smallest-level codes.
+    Venues may sit above the smallest level (`regional_hub_0` at MGU_S1),
+    and only the unit tests can see the difference — such a venue has no
+    allocation step, precisely because `_validate_venue_step_levels` refuses
+    a venue step above the loop level.
+    """
+
+    def test_includes_venues_above_the_smallest_level(self, hd):
+        smallest_level_codes = {"SGU_S1", "SGU_S2", "SGU_S3"}
+        subtree = {"LGU_S1", "MGU_S1"} | smallest_level_codes
+
+        in_subtree = _venues_in_scope(hd.venue_manager, "regional_hub", subtree)
+        in_smallest_level_only = _venues_in_scope(
+            hd.venue_manager, "regional_hub", smallest_level_codes)
+
+        assert [venue.name for venue in in_subtree] == ["regional_hub_0"]
+        assert in_smallest_level_only == []

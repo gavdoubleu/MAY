@@ -18,6 +18,24 @@ from may.utils.attribute_access import get_person_attribute
 logger = logging.getLogger("venue_allocator")
 
 
+def _venues_in_scope(venues, venue_type: str,
+                     scope_geo_unit_names: Optional[Set[str]]) -> List:
+    """Venues of `venue_type` inside the scope, in creation order.
+
+    `scope_geo_unit_names` is the loop unit's whole **subtree**, not its
+    smallest-level codes: venues may sit above the smallest level, and one
+    named at an intermediate level would otherwise vanish from its own
+    unit's scope.
+
+    None means the whole world. Reading the geographical units rather than
+    scanning every venue of the type matters because venue steps run once
+    per loop unit, which turns a world scan into O(venues x loop units).
+    """
+    if scope_geo_unit_names is None:
+        return venues.get_venues_by_type(venue_type)
+    return venues.get_venues_by_type_in_scope(venue_type, scope_geo_unit_names)
+
+
 def _allocate_to_venue_type(venue_type: str, allocation_config: Dict,
                             population, venues, household_distributor,
                             scope_geo_unit_names: Optional[Set[str]] = None,
@@ -62,11 +80,8 @@ def _allocate_to_venue_type(venue_type: str, allocation_config: Dict,
         )
 
     # Otherwise, use simple allocation
-    # Get all venues of this type
-    venue_list = venues.get_venues_by_type(venue_type)
-    if scope_geo_unit_names is not None:
-        venue_list = [venue for venue in venue_list
-                      if venue.geographical_unit.name in scope_geo_unit_names]
+    # Venues of this type inside the loop unit's subtree
+    venue_list = _venues_in_scope(venues, venue_type, scope_geo_unit_names)
     if not venue_list:
         logger.warning(f"  No venues found for type '{venue_type}'")
         return {
@@ -451,11 +466,8 @@ def _allocate_with_attributes(venue_type: str, allocation_config: Dict,
     # (export_residence_venues, debug_output) can still find it.
     venues.capacity_configs[venue_type] = capacity_config
 
-    # Get all venues of this type
-    venue_list = venues.get_venues_by_type(venue_type)
-    if scope_geo_unit_names is not None:
-        venue_list = [venue for venue in venue_list
-                      if venue.geographical_unit.name in scope_geo_unit_names]
+    # Venues of this type inside the loop unit's subtree
+    venue_list = _venues_in_scope(venues, venue_type, scope_geo_unit_names)
     if not venue_list:
         logger.warning(f"  No venues found for type '{venue_type}'")
         return {
