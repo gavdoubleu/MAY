@@ -14,7 +14,7 @@ import yaml
 import math
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Tuple, Optional, Set, Any
+from typing import Dict, List, Tuple, Optional, Set, Any, Iterable, Iterator
 from itertools import islice
 from collections import defaultdict
 
@@ -100,6 +100,10 @@ class HouseholdDistributor:
         self.category_name_to_idx = {cat.name: idx for idx, cat in enumerate(self.categories)}
 
         self.household_counts_by_geo_unit: Dict[str, Dict[str, int]] = {}
+        # Each geo unit's position in the world-wide count table, so a scoped
+        # view can be rebuilt in that order without rescanning the table.
+        # Written only by load_household_data, alongside the table itself.
+        self._counts_position_by_geo_unit: Dict[str, int] = {}
         # The set of composition-pattern column headers in households.csv — the
         # vocabulary allocation steps may reference. Populated by load_household_data.
         self.household_pattern_vocabulary: Set[str] = set()
@@ -153,6 +157,11 @@ class HouseholdDistributor:
         # subset of smallest-level unit codes. None means the whole world.
         self.geo_unit_scope: Optional[Set[str]] = None
 
+        # Target patterns seen and matched by `_filter_households_by_patterns`,
+        # keyed by the property they were matched against
+        self._target_patterns_requested: Dict[str, Set[str]] = {}
+        self._target_patterns_matched: Dict[str, Set[str]] = {}
+
         logger.info(f"Initialized HouseholdDistributor with {len(self.categories)} categories")
         for cat in self.categories:
             logger.info(f"  - {cat}")
@@ -177,13 +186,37 @@ class HouseholdDistributor:
         self.pools_prepared = False
         self.promoter.reset_indexes()
 
+    def households_in_scope(self) -> List[Venue]:
+        """Households the active geo-unit scope covers, whole world if unscoped.
+
+        Creation order either way, so anything built from this is
+        order-identical to the whole-world scan it replaces.
+        """
+        if self.geo_unit_scope is None:
+            return self.venue_manager.get_venues_by_type("household")
+        return self.venue_manager.get_venues_by_type_in_scope(
+            "household", self.geo_unit_scope)
+
     def scoped_household_counts(self) -> Dict[str, Dict[str, int]]:
-        """Household counts filtered to the active geo-unit scope."""
+        """Household counts filtered to the active geo-unit scope.
+
+        Built by walking the scope, not the world-wide table: this runs once
+        per household step per loop unit, so scanning the table would cost
+        O(all geo units x loop units) to return a handful of rows.
+
+        Insertion order still follows the table, because households are
+        created in the order this dict yields and creation order is what the
+        world's identity is keyed on. `_counts_position_by_geo_unit` supplies
+        that order; the `KeyError` it raises fails loud should anything ever
+        write the count table outside `load_household_data`.
+        """
         if self.geo_unit_scope is None:
             return self.household_counts_by_geo_unit
-        return {code: counts
-                for code, counts in self.household_counts_by_geo_unit.items()
-                if code in self.geo_unit_scope}
+        codes_in_scope = self.geo_unit_scope & self.household_counts_by_geo_unit.keys()
+        return {code: self.household_counts_by_geo_unit[code]
+                for code in sorted(
+                    codes_in_scope,
+                    key=self._counts_position_by_geo_unit.__getitem__)}
 
     def _parse_categories(self) -> List[Category]:
         """Parse categories from config."""
@@ -280,6 +313,11 @@ class HouseholdDistributor:
                 f"No household data matched the loaded geography in {filepath} "
                 f"(check data_dir and the geography filter)."
             )
+
+        self._counts_position_by_geo_unit = {
+            geo_unit_code: position for position, geo_unit_code
+            in enumerate(self.household_counts_by_geo_unit)
+        }
 
         logger.info(f"Loaded household data for {len(self.household_counts_by_geo_unit)} geographical units")
 
@@ -1281,23 +1319,31 @@ class HouseholdDistributor:
         """Get the number of people currently available (not allocated)."""
         return len(self.population.get_all_people()) - len(self.allocated_people)
 
-    def people_in_scope(self) -> List['Person']:
+    def people_in_scope(self) -> Iterator['Person']:
         """People the active geo-unit scope covers, whole world if unscoped.
 
         Read off the geographical units rather than filtering the world's
         population: under a fine `loop_level` this runs once per step per
         unit, so a whole-world scan per call is what makes the outer loop
         cost O(population x units) instead of O(population).
+
+        A single-pass scan, not a list: the sole consumer counts, so
+        collecting the people first would allocate a per-unit copy of the
+        population for nothing. Callers wanting to iterate twice must
+        materialise it themselves.
         """
         if self.geo_unit_scope is None:
-            return self.population.get_all_people()
+            return iter(self.population.get_all_people())
 
-        people = []
-        for unit_code in self.geo_unit_scope:
+        return self._people_in_units(self.geo_unit_scope)
+
+    def _people_in_units(self, unit_codes: Iterable[str]) -> Iterator['Person']:
+        """Every person of every named unit, skipping codes the geography
+        does not know."""
+        for unit_code in unit_codes:
             unit = self.geography.get_unit(unit_code)
             if unit is not None:
-                people.extend(unit.people)
-        return people
+                yield from unit.people
 
     def get_available_people_by_category(self) -> Dict[str, int]:
         """Counts of available people by category, within the active scope.
@@ -1383,8 +1429,11 @@ class HouseholdDistributor:
         Returns:
             List of households matching the target patterns
         """
-        # Get all household venues from VenueManager
-        all_households = self.venue_manager.get_venues_by_type("household")
+        # Households inside the active scope: both callers sit in the per-unit
+        # loop body and narrow the result to the scope immediately, so a
+        # whole-world scan here costs O(households x units) for no difference
+        # in outcome. Creation order holds either way.
+        all_households = self.households_in_scope()
 
         target_set = set(target_patterns)
         matched_patterns = set()
@@ -1397,15 +1446,45 @@ class HouseholdDistributor:
 
         # Matching is exact-string: a requested pattern matches only households
         # whose stored pattern equals it literally (a typo, stray space, or
-        # wrong operator matches nothing). Warn so these dead entries surface.
-        unmatched = target_set - matched_patterns
-        if unmatched:
-            logger.warning(
-                f"{len(unmatched)} target pattern(s) matched no households on "
-                f"'{pattern_property}' and will be ignored: {sorted(unmatched)}"
-            )
+        # wrong operator matches nothing). Accumulate rather than warn here —
+        # under a scope this call sees one loop unit, and a pattern absent from
+        # this unit but present elsewhere is not a typo. Only the world-wide
+        # union means anything, so `report_unmatched_target_patterns` warns
+        # once, after the loop has covered every unit.
+        self._target_patterns_requested.setdefault(
+            pattern_property, set()).update(target_set)
+        self._target_patterns_matched.setdefault(
+            pattern_property, set()).update(matched_patterns)
 
         return filtered
+
+    def report_unmatched_target_patterns(self) -> None:
+        """Warn once about target patterns that matched no household anywhere.
+
+        Keyed by the property matched against: `original_pattern` and
+        `allocation_pattern` are separate namespaces, so a pattern unmatched
+        against one says nothing about the other, and merging them would
+        report typos that are not there.
+
+        `_validate_step_patterns` checks only that requested patterns parse,
+        deferring excess and overflow `target_patterns` to this warning, so it
+        is the sole check that a configured pattern is actually reachable.
+
+        Drains what it reports, so a second strategy run over the same
+        distributor starts clean rather than re-warning about the first.
+        """
+        for pattern_property, requested in sorted(
+                self._target_patterns_requested.items()):
+            unmatched = requested - self._target_patterns_matched.get(
+                pattern_property, set())
+            if unmatched:
+                logger.warning(
+                    f"{len(unmatched)} target pattern(s) matched no households "
+                    f"on '{pattern_property}' and were ignored: "
+                    f"{sorted(unmatched)}"
+                )
+        self._target_patterns_requested.clear()
+        self._target_patterns_matched.clear()
 
     def _setup_allocation_logging(self, geo_unit_code: str) -> int:
         """

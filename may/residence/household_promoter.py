@@ -103,18 +103,6 @@ class HouseholdPromoter:
 
         return True
 
-    def _households_in_scope(self) -> List:
-        """Households the active geo-unit scope covers, whole world if unscoped.
-
-        Creation order either way, so the indexes built from this are
-        order-identical to the whole-world scan they replace.
-        """
-        venue_manager = self.distributor.venue_manager
-        if self.distributor.geo_unit_scope is None:
-            return venue_manager.get_venues_by_type("household")
-        return venue_manager.get_venues_by_type_in_scope(
-            "household", self.distributor.geo_unit_scope)
-
     def _get_households_by_geo_unit(self) -> Dict[str, List]:
         """Index households by geo_unit if not already done.
 
@@ -126,7 +114,7 @@ class HouseholdPromoter:
         """
         if self._households_by_geo_unit is None:
             self._households_by_geo_unit = {}
-            all_households = self._households_in_scope()
+            all_households = self.distributor.households_in_scope()
             for hh in all_households:
                 geo_code = hh.geographical_unit.name
                 if geo_code not in self._households_by_geo_unit:
@@ -145,7 +133,7 @@ class HouseholdPromoter:
         """
         if self._households_by_pattern is None:
             self._households_by_pattern = {}
-            all_households = self._households_in_scope()
+            all_households = self.distributor.households_in_scope()
             for hh in all_households:
                 pattern = hh.properties.get('allocation_pattern', '')
                 if pattern not in self._households_by_pattern:

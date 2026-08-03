@@ -232,6 +232,10 @@ def execute_allocation_strategy(population,
     # Clear the scope so any later use of the distributor sees the whole world
     household_distributor.set_geo_unit_scope(None)
 
+    # Target patterns are matched per unit, so only the union over every unit
+    # distinguishes a typo from a pattern that is simply absent locally
+    household_distributor.report_unmatched_target_patterns()
+
     # Print overall summary
     logger.info("=" * 60)
     logger.info("UNIFIED ALLOCATION STRATEGY SUMMARY")

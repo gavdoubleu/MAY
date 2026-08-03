@@ -77,3 +77,21 @@ class TestScopedRemainingCounts:
         distributor_with_people.set_geo_unit_scope(None)
 
         assert total(distributor_with_people.get_available_people_by_category()) == 2
+
+
+class TestScopedScanIsLazy:
+    """The scan itself must not build a list of the people it counts.
+
+    `get_available_people_by_category` only ever counts, so the intermediate
+    list is pure allocation — once per step per loop unit, sized by the
+    unit's population. Counting is order-independent, so consuming the scan
+    lazily cannot change the result.
+    """
+
+    def test_people_in_scope_is_a_single_pass_scan(self, distributor_with_people):
+        distributor_with_people.set_geo_unit_scope({'A'})
+
+        people = distributor_with_people.people_in_scope()
+
+        assert iter(people) is people
+        assert [person.geographical_unit.name for person in people] == ['A']
