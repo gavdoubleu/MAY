@@ -527,6 +527,51 @@ class VenueManager:
         """Get all venues of a specific type as a list."""
         return list(self.venues_by_type_and_id.get(venue_type, {}).values())
 
+    def get_venues_by_type_in_scope(self, venue_type, geo_unit_names):
+        """Venues of `venue_type` inside `geo_unit_names`, in creation order.
+
+        Read off the geographical units that already hold them rather than
+        scanning every venue of the type: under a fine `loop_level` this runs
+        once per step per loop unit, so a whole-world scan per call makes the
+        outer loop cost O(venues x units) instead of O(venues).
+
+        `geo_unit_names` may name units at any level — the caller passes the
+        loop unit's whole subtree, because venues can sit above the smallest
+        level.
+
+        Sorted by id because `GeographicalUnit.venues` is a set: its order is
+        reproducible (`Venue.__hash__` is `hash(self.id)`) but is not creation
+        order, and callers shuffle the result and draw RNG per element. Ids
+        come from one global monotonic counter, so sorting by id reproduces
+        global creation order exactly — the order `get_venues_by_type` gives.
+        """
+        venues_of_type = self.venues_by_type_and_id.get(venue_type, {})
+
+        # `GeographicalUnit.venues` holds every type at once, so it is
+        # dominated by households. For a sparse type under a coarse
+        # `loop_level` the subtree can hold far more venues than the type has
+        # world-wide, which would make the "scoped" read the more expensive
+        # of the two. Take whichever source is smaller; both yield the same
+        # list, so this is a cost choice only.
+        venues_in_scope_upper_bound = sum(
+            len(unit.venues)
+            for unit in (self.geography.get_unit(name) for name in geo_unit_names)
+            if unit is not None
+        )
+        if len(venues_of_type) <= venues_in_scope_upper_bound:
+            return [venue for venue in venues_of_type.values()
+                    if venue.geographical_unit.name in geo_unit_names]
+
+        in_scope = []
+        for unit_name in geo_unit_names:
+            unit = self.geography.get_unit(unit_name)
+            if unit is None:
+                continue
+            in_scope.extend(venue for venue in unit.venues
+                            if venue.type == venue_type)
+        in_scope.sort(key=lambda venue: venue.id)
+        return in_scope
+
     def get_all_venues_list(self):
         """Get all venues as a flat list from venues_by_type_and_id (authoritative source)."""
         all_venues = []

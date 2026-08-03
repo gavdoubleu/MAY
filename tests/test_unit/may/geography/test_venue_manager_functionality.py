@@ -514,3 +514,70 @@ class TestRemoveVenue:
         vm.remove_venue(classroom)
 
         assert classroom not in school.children
+
+
+class TestScopedVenueLookup:
+    """`get_venues_by_type_in_scope` — the per-loop-unit venue lookup.
+
+    Callers shuffle the result and draw RNG per element, so order is part of
+    the contract, not an incidental detail: it must match the unscoped
+    `get_venues_by_type`, which is global creation order.
+    """
+
+    def test_returns_that_types_venues_inside_scope_in_creation_order(self, loaded_geography):
+        vm = VenueManager(geography=loaded_geography, filter_by_geography=False)
+        sgu_1 = loaded_geography.get_unit('SGU_001')
+        sgu_2 = loaded_geography.get_unit('SGU_002')
+        sgu_3 = loaded_geography.get_unit('SGU_003')
+
+        # Interleave units and types so set iteration order cannot coincide
+        # with creation order by luck
+        first = vm.create_venue('school', sgu_1)
+        vm.create_venue('hospital', sgu_2)
+        second = vm.create_venue('school', sgu_2)
+        vm.create_venue('school', sgu_3)
+        third = vm.create_venue('school', sgu_1)
+
+        in_scope = vm.get_venues_by_type_in_scope('school', {'SGU_001', 'SGU_002'})
+
+        assert in_scope == [first, second, third]
+
+    def test_includes_venues_above_the_smallest_level(self, loaded_geography):
+        """Scope is the loop unit's whole subtree, not its smallest-level codes.
+
+        A venue can sit between the loop level and the smallest level. Nobody
+        lives there, so passing smallest-level codes instead would drop it
+        without changing any allocation outcome — invisible end to end, hence
+        asserted here.
+        """
+        vm = VenueManager(geography=loaded_geography, filter_by_geography=False)
+        mgu = loaded_geography.get_unit('MGU_01')
+        regional_hub = vm.create_venue('hospital', mgu)
+
+        subtree_scope = {'MGU_01', 'SGU_001', 'SGU_002'}
+        smallest_level_scope = {'SGU_001', 'SGU_002'}
+
+        assert vm.get_venues_by_type_in_scope('hospital', subtree_scope) == [regional_hub]
+        assert vm.get_venues_by_type_in_scope('hospital', smallest_level_scope) == []
+
+    def test_matches_the_unscoped_lookup_filtered_to_scope(self, loaded_geography):
+        """The scoped lookup is a pure performance filter: same venues, same
+        order as filtering `get_venues_by_type` by hand. Holds for a type with
+        many venues and a type with few, which is what lets the lookup pick
+        whichever source is cheaper.
+        """
+        vm = VenueManager(geography=loaded_geography, filter_by_geography=False)
+        units = [loaded_geography.get_unit(name)
+                 for name in ('SGU_001', 'SGU_002', 'SGU_003', 'SGU_004')]
+
+        for round_number in range(25):
+            for unit in units:
+                vm.create_venue('household', unit)
+            if round_number % 12 == 0:
+                vm.create_venue('care_home', units[round_number % len(units)])
+
+        scope = {'SGU_001', 'SGU_003'}
+        for venue_type in ('household', 'care_home'):
+            expected = [venue for venue in vm.get_venues_by_type(venue_type)
+                        if venue.geographical_unit.name in scope]
+            assert vm.get_venues_by_type_in_scope(venue_type, scope) == expected
