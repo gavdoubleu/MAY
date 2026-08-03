@@ -1,0 +1,145 @@
+# Household strategy plus the two venue steps, used only by the Phase 4b
+# golden fingerprint (tests/test_integration/golden_fingerprint.py).
+#
+# Kept separate from test_allocation_strategy.yaml because the venue steps
+# change what the household steps see — the elderly go to care homes rather
+# than form couples — and several tests there assert the household-only
+# outcomes. This file exists so `venue_allocator`'s scoping is inside the
+# bit-for-bit gate at all.
+#
+# The venue steps run first, so their effect propagates through every
+# subsequent household step.
+
+enabled: true
+
+steps:
+  # Step 1: Elderly to care homes (venue step)
+  # care_home_0 is in SGU_S1, care_home_1 in SGU_S2, and each one's slots are
+  # filled exactly by its own SGU's elderly — so a loop unit that reaches
+  # outside its scope allocates the wrong people and the fingerprint moves.
+  - name: "Elderly to Care Homes"
+    type: "venue"
+    description: "Allocate elderly to care homes with age/sex matching"
+    venue_type: "care_home"
+    subset_key: "resident"
+    eligibility:
+      - attribute: "age"
+        min: 50
+    capacity_config:
+      total_capacity_column: "capacity"
+      attribute_capacities:
+        column_mappings:
+          age_65_74_male:
+            age_band: [65, 74]
+            sex: "male"
+          age_65_74_female:
+            age_band: [65, 74]
+            sex: "female"
+          age_75_84_male:
+            age_band: [75, 84]
+            sex: "male"
+          age_75_84_female:
+            age_band: [75, 84]
+            sex: "female"
+    strategy: "oldest_first"
+
+  # Step 2: Kids to boarding schools (venue step)
+  # boarding_school_0 is in SGU_S1 only, so SGU_S2 and SGU_S3 must see an
+  # empty venue list — the other half of the scoping contract.
+  - name: "Kids to Boarding Schools"
+    type: "venue"
+    description: "Allocate kids to boarding schools with age-band matching"
+    venue_type: "boarding_school"
+    subset_key: "resident"
+    eligibility: {}
+    capacity_config:
+      attribute_capacities:
+        column_mappings:
+          n_0_15_male:
+            age_band: [0, 15]
+            sex: "male"
+          n_0_15_female:
+            age_band: [0, 15]
+            sex: "female"
+      attribute_constraints:
+        age:
+          min_column: "StatutoryLowAge"
+          max_column: "StatutoryHighAge"
+    strategy: "random"
+
+  # Step 3: Two-adult families with children
+  # SGU_S1 requests 3 of ">=2 >=0 2 0" but only has 3 adults -> forces demotion
+  # Demotion switches from "Two-adult" to "Single-adult" rule
+  - name: "Two-Adult Families with Children"
+    type: "household"
+    description: "Allocate two-adult families with kids, with demotion to single-adult"
+    rule: "Two-adult family with kids"
+    patterns:
+      - ">=2 >=0 2 0"
+      - "1 >=0 2 0"
+    demotion_rules:
+      ">=2 >=0 1 0": "Single-adult family with kids"
+      "1 >=0 1 0": "Single-adult family with kids"
+
+  # Step 4: Elderly couples
+  - name: "Elderly Couples"
+    type: "household"
+    description: "Allocate elderly couples using pair matching"
+    rule: "Elderly pair"
+    patterns:
+      - "0 0 0 2"
+
+  # Step 5: Adult couples (rule-based pair matching)
+  - name: "Adult Couples"
+    type: "household"
+    description: "Allocate adult couples with romantic pairing"
+    rule: "Adult pair"
+    patterns:
+      - "0 0 2 0"
+
+  # Step 6: YA pairs (with pattern assumption)
+  # Census says "0 >=0 0 0" (flexible) but we assume exactly 2 YA
+  - name: "YA Pairs"
+    type: "household"
+    description: "Allocate young adult pairs using assumption"
+    patterns:
+      - pattern: "0 >=0 0 0"
+        assumption: "0 2 0 0"
+    allocate_flexible: false
+
+  # Step 7: Excess kids -> add remaining kids to family households
+  - name: "Add Excess Kids to Families"
+    type: "household_excess"
+    description: "Add remaining kids to existing family households"
+    target_patterns:
+      - ">=2 >=0 2 0"
+      - ">=2 >=0 1 0"
+      - "1 >=0 2 0"
+      - "1 >=0 1 0"
+    add_category: "Kids"
+    constraints:
+      - category_sum: ["Kids"]
+        max: 5
+    add_distribution:
+      type: "weighted"
+      probabilities: {"1": 1.0}
+
+  # Step 8: Overflow remaining Young Adults
+  - name: "Overflow Young Adults"
+    type: "household_overflow"
+    description: "Distribute ALL remaining YA balancedly across eligible households"
+    target_patterns:
+      - ">=2 >=0 2 0"
+      - ">=2 >=0 1 0"
+      - "1 >=0 2 0"
+      - "1 >=0 1 0"
+      - "0 >=0 0 0"
+      - "0 0 2 0"
+    add_category: "Young Adults"
+
+  # Step 9: Promote and allocate all remaining people
+  - name: "Promote and Allocate Remaining"
+    type: "household_promotion"
+    description: "Promote households to accept any remaining people"
+    target_categories: ["Kids", "Young Adults", "Adults", "Old Adults"]
+    refresh_pools: true

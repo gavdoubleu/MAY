@@ -11,8 +11,11 @@ under one `MGU_S1` (`geography/hierarchy.csv`), so `MGU` and `LGU` both give a
 single loop unit and exercise no scoping. `LGU` is captured alongside it as the
 whole-world-scope control.
 
-Caveat: the stress strategy has no `venue` step, so this fingerprint does not
-cover `venue_allocator`.
+The strategy is `test_allocation_strategy_with_venues.yaml` — the stress
+strategy plus two `venue` steps, so `venue_allocator`'s scoping is inside the
+gate. It is a separate file because those steps change what the household steps
+see, and the tests in `test_allocation_strategy_integration.py` assert the
+household-only outcomes.
 """
 import hashlib
 import json
@@ -25,7 +28,7 @@ from may.residence.allocation_strategy import execute_allocation_strategy
 from may.residence.household_distributor import HouseholdDistributor
 
 STRESS_DATA = "tests/test_data/stress_world"
-STRATEGY_FILE = f"{STRESS_DATA}/households/test_allocation_strategy.yaml"
+STRATEGY_FILE = f"{STRESS_DATA}/households/test_allocation_strategy_with_venues.yaml"
 GOLDEN_PATH = f"{STRESS_DATA}/golden_fingerprint.json"
 
 # SGU is the only level with more than one loop unit; LGU is the single-unit
@@ -80,24 +83,42 @@ def _strategy_file_at_loop_level(loop_level, tmp_dir):
     return path
 
 
-def fingerprint_households(venue_manager):
-    """sha256 over every household's identity, membership and pattern.
+def fingerprint_venues(venue_manager):
+    """sha256 over every venue's identity, per-subset membership and pattern.
 
     Ordered by venue id, which is global creation order (`Venue._next_venue_id`
-    is one monotonic counter), so a change in the order households are created
-    changes the digest — that is the point.
+    is one monotonic counter), so a change in the order venues are created
+    changes the digest — that is the point. Membership is broken out per
+    subset key, so a person landing in the right venue under the wrong subset
+    is still caught.
+
+    The digest carries each venue's *rank* in that order, never the raw id:
+    `_next_venue_id` is a process-global that no fixture resets, so raw ids
+    depend on how many venues earlier tests in the same session happened to
+    create. Rank captures the ordering this gate cares about and nothing else.
+
+    Covers all venue types, not just households: the `venue` steps allocate
+    into care homes and boarding schools, which no household digest would see.
     """
     digest = hashlib.sha256()
-    households = sorted(venue_manager.get_venues_by_type("household"),
-                        key=lambda venue: venue.id)
-    for household in households:
-        member_ids = sorted(person.id for person in household.get_all_members())
+    all_venues = sorted(
+        (venue for venue_type in sorted(venue_manager.venues_by_type_and_id)
+         for venue in venue_manager.venues_by_type_and_id[venue_type].values()),
+        key=lambda venue: venue.id)
+    for rank, venue in enumerate(all_venues):
         digest.update("{}|{}|{}|{}\n".format(
-            household.id,
-            household.geographical_unit.name,
-            household.properties.get('allocation_pattern', ''),
-            ",".join(str(member_id) for member_id in member_ids),
+            rank,
+            venue.type,
+            venue.geographical_unit.name,
+            venue.properties.get('allocation_pattern', ''),
         ).encode())
+        for subset_key in sorted(venue.subsets, key=repr):
+            member_ids = sorted(
+                person.id for person in venue.subsets[subset_key].members)
+            digest.update("  {}|{}\n".format(
+                subset_key,
+                ",".join(str(member_id) for member_id in member_ids),
+            ).encode())
     return digest.hexdigest()
 
 
@@ -110,7 +131,7 @@ def run_and_fingerprint(loop_level, tmp_dir):
         strategy_file=_strategy_file_at_loop_level(loop_level, tmp_dir),
         random_seed=RANDOM_SEED,
     )
-    return fingerprint_households(venue_manager)
+    return fingerprint_venues(venue_manager)
 
 
 def build_fingerprints():
