@@ -312,7 +312,20 @@ def execute_allocation_strategy(population,
     logger.info(f"  People in venues: {total_venue_alloc:,}")
 
     logger.info(f"  Total allocated: {len(household_distributor.allocated_people):,}")
-    logger.info(f"  Remaining unallocated: {household_distributor.get_available_people_count():,}")
+    remaining_unallocated = household_distributor.get_available_people_count()
+    logger.info(f"  Remaining unallocated: {remaining_unallocated:,}")
+
+    # The scope was cleared above, so this is the whole world — the one place
+    # a full breakdown is worth an O(population) scan. The per-step version of
+    # this report is DEBUG only, because it costs a scan per step per unit.
+    if remaining_unallocated:
+        leftovers_by_category = household_distributor.get_available_people_by_category()
+        logger.info("  Remaining by category:")
+        for category in household_distributor.categories:
+            logger.info(f"    {category.name}: "
+                        f"{leftovers_by_category.get(category.name, 0):,}")
+
+    _check_per_unit_counts_against_the_world(all_stats, remaining_unallocated)
 
     total_pop = len(population.get_all_people())
     alloc_pct = (len(household_distributor.allocated_people) / total_pop * 100) if total_pop > 0 else 0
@@ -369,6 +382,36 @@ def _merge_step_stats(accumulated: Dict, unit_stats: Dict) -> None:
         accumulated['capacity_pct'] = (
             accumulated.get('capacity_used', 0) / total_capacity * 100
             if total_capacity else 0)
+
+
+def _check_per_unit_counts_against_the_world(all_stats: Dict,
+                                             remaining_unallocated: int) -> None:
+    """Warn when the summed per-unit leftovers disagree with the exact count.
+
+    Each unit reports what is left in its own scope, and the world's leftovers
+    are those sums added up — but only while everything a unit allocates lies
+    inside that unit's scope. Household and venue steps both allocate within
+    the scope; `mark_people_as_allocated` does not have to. One O(population)
+    comparison per run buys a loud complaint instead of a quietly wrong total.
+
+    Only the run's final step is comparable: an earlier step's total predates
+    whatever ran after it. A final step that reports no counts (a venue step)
+    leaves nothing to compare, so the check stands down.
+    """
+    if not all_stats:
+        return
+    final_step = max(all_stats.values(), key=lambda stats: stats.get('step_number', 0))
+    if 'total_people_remaining' not in final_step:
+        return
+
+    remaining_by_arithmetic = final_step['total_people_remaining']
+    if remaining_by_arithmetic != remaining_unallocated:
+        logger.warning(
+            f"  Per-unit people counts do not add up to the world: units report "
+            f"{remaining_by_arithmetic:,} unallocated, an exact scan finds "
+            f"{remaining_unallocated:,}. Something was allocated outside the "
+            f"scope of the unit that was running, so the per-step totals above "
+            f"are unreliable.")
 
 
 def _validate_venue_step_levels(steps: List[Dict], venues, geography,
