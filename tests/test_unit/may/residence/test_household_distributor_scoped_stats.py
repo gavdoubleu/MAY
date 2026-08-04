@@ -79,6 +79,53 @@ class TestScopedRemainingCounts:
         assert total(distributor_with_people.get_available_people_by_category()) == 2
 
 
+class TestScopedRemainingIsCheap:
+    """`total_people_remaining` is logged once per step per loop unit, so it
+    cannot afford a scan. It is derived from a per-unit baseline and the
+    allocated set, which only grows — never from person pool sizes, which are
+    a deliberately stale snapshot.
+    """
+
+    def test_unscoped_remaining_covers_the_whole_world(self, distributor_with_people):
+        assert distributor_with_people.get_available_people_count_in_scope() == 2
+
+    def test_setting_a_scope_narrows_the_count(self, distributor_with_people):
+        """The baseline is per-unit state: reading it before the scope is set
+        must not pin the whole-world figure for the rest of the run."""
+        assert distributor_with_people.get_available_people_count_in_scope() == 2
+
+        distributor_with_people.set_geo_unit_scope({'A'})
+
+        assert distributor_with_people.get_available_people_count_in_scope() == 1
+
+    def test_allocating_in_scope_moves_both_counts(self, distributor_with_people):
+        """`mark_people_as_allocated` is the external entry point and does not
+        touch person pools, so a count read off pool sizes would miss this.
+        Both counts follow the allocated set instead."""
+        distributor_with_people.set_geo_unit_scope({'A'})
+        person_in_scope = distributor_with_people.geography.get_unit('A').people[0]
+
+        assert distributor_with_people.get_allocated_people_count_in_scope() == 0
+
+        distributor_with_people.mark_people_as_allocated([person_in_scope])
+
+        assert distributor_with_people.get_allocated_people_count_in_scope() == 1
+        assert distributor_with_people.get_available_people_count_in_scope() == 0
+
+    def test_people_allocated_before_the_unit_still_count_as_allocated(
+            self, distributor_with_people):
+        """A venue step may allocate someone before household allocation
+        reaches their unit. The unit's allocated count describes the unit, not
+        only what this loop iteration did, so those people are included."""
+        person_in_scope = distributor_with_people.geography.get_unit('A').people[0]
+        distributor_with_people.mark_people_as_allocated([person_in_scope])
+
+        distributor_with_people.set_geo_unit_scope({'A'})
+
+        assert distributor_with_people.get_allocated_people_count_in_scope() == 1
+        assert distributor_with_people.get_available_people_count_in_scope() == 0
+
+
 class TestScopedScanIsLazy:
     """The scan itself must not build a list of the people it counts.
 

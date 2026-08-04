@@ -115,6 +115,9 @@ class HouseholdDistributor:
         # be stale (checked against the dict on probe) — see _sample_candidates.
         self._sample_lists: Dict[str, Dict[int, List['Person']]] = {}
         self._warned_large_pool = False
+        # (population size, available, allocated) for the active scope, taken
+        # once per scope — see _scope_baseline
+        self._scope_baseline_cache: Optional[tuple] = None
 
         # Structure mixture: set by the allocation strategy
         # loader when the strategy has a `mixture:` block; None otherwise.
@@ -193,6 +196,7 @@ class HouseholdDistributor:
                                else set(scope_sgu_codes))
         self.person_pool_by_geo_unit = {}
         self.pools_prepared = False
+        self._scope_baseline_cache = None
         self.promoter.reset_indexes()
 
     def households_in_scope(self) -> List[Venue]:
@@ -1527,6 +1531,45 @@ class HouseholdDistributor:
         """Get the number of people currently available (not allocated)."""
         return len(self.population.get_all_people()) - len(self.allocated_people)
 
+    def _scope_baseline(self) -> tuple:
+        """Population size and available count for the active scope, taken
+        once and cached until the scope changes.
+
+        The walk is O(scope), but it happens once per loop unit rather than
+        once per step, which is what makes the counts derived from it free.
+        """
+        if self._scope_baseline_cache is None:
+            population_size = 0
+            available = 0
+            for person in self.people_in_scope():
+                population_size += 1
+                if person.id not in self.allocated_people:
+                    available += 1
+            self._scope_baseline_cache = (population_size, available,
+                                          len(self.allocated_people))
+        return self._scope_baseline_cache
+
+    def get_available_people_count_in_scope(self) -> int:
+        """People in the active scope not yet allocated, whole world if unscoped.
+
+        O(1) after the per-unit baseline. Derived from `allocated_people`,
+        which only ever grows, so the count follows it exactly — person pool
+        sizes are a stale snapshot and are never consulted.
+        """
+        _, available_at_start, allocated_at_start = self._scope_baseline()
+        allocated_since = len(self.allocated_people) - allocated_at_start
+        return max(0, available_at_start - allocated_since)
+
+    def get_allocated_people_count_in_scope(self) -> int:
+        """People in the active scope already allocated to anything.
+
+        The scope's whole population less what is still available, so it
+        counts people allocated before this unit's turn as well as during it.
+        Summed across loop units this gives the world-wide figure.
+        """
+        population_size, _, _ = self._scope_baseline()
+        return population_size - self.get_available_people_count_in_scope()
+
     def people_in_scope(self) -> Iterator['Person']:
         """People the active geo-unit scope covers, whole world if unscoped.
 
@@ -1744,47 +1787,6 @@ class HouseholdDistributor:
         logger.info("=" * 60)
 
         return round_label
-
-    def _log_round_summary(self, round_label: str, stats: Dict, show_remaining: bool = True):
-        """
-        Log summary statistics for an allocation round.
-
-        Args:
-            round_label: Name of the round
-            stats: Statistics dictionary with round results
-            show_remaining: If True, show remaining people by category
-        """
-        logger.info("=" * 60)
-        logger.info(f"{round_label} complete!")
-
-        # Log round-specific metrics based on what's in stats
-        if 'households_created' in stats:
-            logger.info(f"  Households created: {stats['households_created']:,}")
-        if 'households_modified' in stats:
-            logger.info(f"  Households modified: {stats['households_modified']:,}")
-        if 'households_promoted' in stats:
-            logger.info(f"  Households promoted: {stats['households_promoted']:,}")
-        if 'people_added' in stats:
-            logger.info(f"  People added: {stats['people_added']:,}")
-        if 'people_allocated_this_round' in stats:
-            logger.info(f"  People allocated this round: {stats['people_allocated_this_round']:,}")
-        if 'households_with_demotion' in stats and stats['households_with_demotion'] > 0:
-            logger.info(f"  Households using demotion: {stats['households_with_demotion']:,}")
-
-        # Always show totals
-        logger.info(f"  Total people allocated: {len(self.allocated_people):,}")
-        logger.info(f"  People remaining: {stats['total_people_remaining']:,}")
-
-        # Show remaining by category if requested
-        if show_remaining:
-            remaining_by_category = self.get_available_people_by_category()
-            logger.info("")
-            logger.info("  Remaining by category:")
-            for cat_name in [cat.name for cat in self.categories]:
-                count = remaining_by_category.get(cat_name, 0)
-                logger.info(f"    {cat_name}: {count:,}")
-
-        logger.info("=" * 60)
 
     def _allocate_person_to_household(self, household: Venue, person: Person,
                                       pool: Optional[List[Person]] = None):
