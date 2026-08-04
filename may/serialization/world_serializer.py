@@ -289,6 +289,41 @@ class WorldSerializer:
     def _staging_path(self, venue_type):
         return os.path.join(self._staging_dir(), f'{venue_type}.h5')
 
+    @staticmethod
+    def _resolve_subset_keys(world, venue_type, subset_keys):
+        """Look up a batch's `(Venue.id, subset_index)` keys directly.
+
+        Returns the found `(venue, subset)` pairs and the set of keys that
+        matched nothing. Cost is in the batch: the venue manager indexes
+        venues of a type by id, and a venue holds few enough subsets that
+        finding one by `subset_index` is trivial. Building the candidate list
+        by walking the whole venue type instead made every batch cost
+        O(venues of the type) however small it was, so a run flushing once per
+        loop unit paid that per unit.
+
+        Sorted, so the batch stages in venue creation order — venue ids come
+        from one global monotonic counter and `subset_index` is a per-venue
+        ordinal, which is exactly the order the whole-type walk gave. Callers
+        do not necessarily supply it: residence allocation walks its new
+        households backwards. De-duplicated for the same reason: the old
+        membership test against a set of requested keys silently ignored a
+        repeat.
+        """
+        venue_subset_pairs = []
+        missing = set()
+        for key in sorted(set(subset_keys)):
+            venue_id, subset_index = key
+            venue = world.venues.get_venue_by_type_and_id(venue_type, venue_id)
+            subset = None
+            if venue is not None:
+                subset = next((candidate for candidate in venue.subsets.values()
+                               if candidate.subset_index == subset_index), None)
+            if subset is None:
+                missing.add(key)
+            else:
+                venue_subset_pairs.append((venue, subset))
+        return venue_subset_pairs, missing
+
     def flush_venue_subsets(self, world, venue_type, subset_keys=None):
         """
         Stage one venue type's subset membership to
@@ -322,20 +357,15 @@ class WorldSerializer:
 
         tracker = self._venue_flushes.setdefault(venue_type, CohortFlushTracker(venue_type))
 
-        venue_subset_pairs = [
-            (venue, subset)
-            for venue in world.venues.get_venues_by_type(venue_type)
-            for subset in venue.subsets.values()
-        ]
-        if subset_keys is not None:
-            requested = set(subset_keys)
+        if subset_keys is None:
             venue_subset_pairs = [
-                (venue, subset) for venue, subset in venue_subset_pairs
-                if (venue.id, subset.subset_index) in requested
+                (venue, subset)
+                for venue in world.venues.get_venues_by_type(venue_type)
+                for subset in venue.subsets.values()
             ]
-            missing = requested - {
-                (venue.id, subset.subset_index) for venue, subset in venue_subset_pairs
-            }
+        else:
+            venue_subset_pairs, missing = self._resolve_subset_keys(
+                world, venue_type, subset_keys)
             if missing:
                 raise RuntimeError(
                     f"Cannot stage {venue_type!r} subsets {sorted(missing)}: "

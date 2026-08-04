@@ -211,6 +211,89 @@ class TestFlushedRunMatchesUnflushedRun:
         assert len(members_flat) == expected_members
 
 
+class TestBatchedFlushCostIsInTheBatch:
+    """A batched flush must not enumerate the world.
+
+    Building the candidate list by walking every venue of the type made each
+    flush O(total households) whatever the batch size, so across a run it cost
+    O(loop units x total households) — invisible at nine XLGU units, ~6,856x at
+    MGU. The batch's keys are (Venue.id, subset_index) and the venue manager
+    indexes venues by exactly that id, so the candidates are lookups.
+    """
+
+    def test_flushing_a_batch_never_enumerates_the_venue_type(self, tmp_path):
+        """The contract is a call count, not a wall clock: a timing assertion
+        at stress-world scale would be flaky, and the defect is precisely that
+        a whole-type enumeration happens at all."""
+        from may.geography.venue_manager import VenueManager
+
+        enumerations = []
+        inside_flush = False
+        original_get_venues_by_type = VenueManager.get_venues_by_type
+
+        def recording_get_venues_by_type(self, venue_type):
+            if inside_flush:
+                enumerations.append(venue_type)
+            return original_get_venues_by_type(self, venue_type)
+
+        strategy_file = write_strategy(tmp_path, loop_level="SGU",
+                                       flush_per_unit=True)
+        geo, population, venues, distributor = build_fixtures()
+        world = build_world(population, venues, geo, tmp_path)
+
+        def flusher(venue_type, subset_keys):
+            nonlocal inside_flush
+            inside_flush = True
+            try:
+                world.flush_subsets_batch(venue_type, subset_keys)
+            finally:
+                inside_flush = False
+
+        VenueManager.get_venues_by_type = recording_get_venues_by_type
+        try:
+            execute_allocation_strategy(
+                population=population, venues=venues,
+                household_distributor=distributor,
+                strategy_file=strategy_file, random_seed=42,
+                subset_flusher=flusher,
+            )
+        finally:
+            VenueManager.get_venues_by_type = original_get_venues_by_type
+
+        assert enumerations == []
+
+    def test_batches_are_staged_in_venue_creation_order(self, tmp_path):
+        """Characterisation guard on the order the removed scan imposed.
+
+        `_new_household_subset_keys` walks the venue manager's households
+        backwards, so the caller's keys arrive in reverse creation order; the
+        scan silently re-sorted them. Loop units run in creation order too, so
+        staged venue ids are non-decreasing across the whole run — a batch
+        staged in caller order would descend within each unit.
+        """
+        import h5py
+
+        strategy_file = write_strategy(tmp_path, loop_level="SGU",
+                                       flush_per_unit=True)
+        geo, population, venues, distributor = build_fixtures()
+        world = build_world(population, venues, geo, tmp_path)
+        execute_allocation_strategy(
+            population=population, venues=venues,
+            household_distributor=distributor,
+            strategy_file=strategy_file, random_seed=42,
+            subset_flusher=world.flush_subsets_batch,
+        )
+
+        staging_path = world._serializer._staging_path("household")
+        with h5py.File(staging_path, "r") as staged:
+            venue_ids = staged["subsets/venue_ids"][:]
+            subset_indices = staged["subsets/subset_indices"][:]
+
+        assert len(venue_ids) > 1, "the stress world should stage many subsets"
+        keys = list(zip(venue_ids.tolist(), subset_indices.tolist()))
+        assert keys == sorted(keys)
+
+
 class TestSetupHouseholdsPlumbing:
 
     def test_world_argument_enables_per_unit_flushing(self, tmp_path):

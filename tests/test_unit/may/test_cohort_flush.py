@@ -105,6 +105,24 @@ class TestRecordSubsetKeys:
         with pytest.raises(RuntimeError, match="already staged"):
             tracker.record_subset_keys({(1, 0), (2, 0)})
 
+    def test_recording_a_batch_costs_the_batch_not_the_run(self):
+        """The accumulated set grows in place.
+
+        Held as a frozenset it could only grow by rebinding to a fresh copy
+        of every key staged so far, so each flush cost O(total staged) and
+        briefly held two copies — inside the mode whose whole purpose is to
+        free memory. Identity is the only observable: a size assertion
+        passes either way.
+        """
+        tracker = CohortFlushTracker("household")
+        tracker.record_subset_keys({(1, 0)})
+        accumulated = tracker._flushed_subset_keys
+
+        tracker.record_subset_keys({(2, 0)})
+
+        assert tracker._flushed_subset_keys is accumulated
+        assert accumulated == {(1, 0), (2, 0)}
+
 
 class TestClassifySubsetBatch:
 

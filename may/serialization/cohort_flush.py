@@ -76,7 +76,7 @@ class CohortFlushTracker:
         than replacing it; an overlapping batch raises."""
         subset_keys = frozenset(subset_keys)
         if self._flushed_subset_keys is None:
-            self._flushed_subset_keys = subset_keys
+            self._flushed_subset_keys = set(subset_keys)
             return
         overlap = subset_keys & self._flushed_subset_keys
         if overlap:
@@ -84,7 +84,10 @@ class CohortFlushTracker:
                 f"{self.label!r} cohort subsets staged twice: "
                 f"{sorted(overlap)} already staged by an earlier batch."
             )
-        self._flushed_subset_keys |= subset_keys
+        # A mutable set grown in place: the accumulated keys are the whole
+        # run's, so rebuilding them per batch would cost O(total staged) per
+        # flush. The incoming batch stays a frozenset — the caller's, not ours.
+        self._flushed_subset_keys.update(subset_keys)
 
     @property
     def subsets_flushed(self):
