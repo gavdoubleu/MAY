@@ -64,3 +64,75 @@ def test_stale_max_allocations_key_warns(monkeypatch, caplog):
         allocation_strategy._execute_venue_step(step, None, None, None)
     assert "max_allocations" in caplog.text
     assert "no longer supported" in caplog.text
+
+
+# patterns_where selectors
+
+from dataclasses import dataclass
+from may.residence.allocation_strategy import _resolve_pattern_selectors
+
+
+@dataclass
+class Cat:
+    name: str
+
+
+CATS = [Cat("Kids"), Cat("Young Adults"), Cat("Adults"), Cat("Old Adults")]
+SEL_VOCAB = {"0 0 2 0", "1 0 2 0", "2 1 0 0", "0 0 0 >=3", ">=6 0 2 0"}
+
+
+def test_selector_resolves_to_matching_patterns():
+    steps = [{"type": "household", "name": "families", "patterns_where": [
+        {"category": "Kids", "operator": ">=", "value": 1},
+        {"category": "Adults", "operator": ">=", "value": 1},
+    ]}]
+    _resolve_pattern_selectors(steps, SEL_VOCAB, CATS)
+    assert steps[0]["patterns"] == ["1 0 2 0", ">=6 0 2 0"]
+    assert "patterns_where" not in steps[0]
+
+
+def test_selector_overlap_fails_loud():
+    steps = [
+        {"type": "household", "name": "a", "patterns_where": [
+            {"category": "Kids", "operator": ">=", "value": 1}]},
+        {"type": "household", "name": "b", "patterns": ["1 0 2 0"]},
+    ]
+    with pytest.raises(HouseholdError, match="claimed by both"):
+        _resolve_pattern_selectors(steps, SEL_VOCAB, CATS)
+
+
+def test_null_takes_remainder():
+    steps = [
+        {"type": "household", "name": "families", "patterns_where": [
+            {"category": "Kids", "operator": ">=", "value": 1}]},
+        {"type": "household", "name": "rest", "patterns": None},
+    ]
+    _resolve_pattern_selectors(steps, SEL_VOCAB, CATS)
+    assert steps[1]["patterns"] == ["0 0 0 >=3", "0 0 2 0"]
+
+
+def test_null_alone_still_means_all():
+    steps = [{"type": "household", "name": "all", "patterns": None}]
+    _resolve_pattern_selectors(steps, SEL_VOCAB, CATS)
+    assert set(steps[0]["patterns"]) == SEL_VOCAB
+
+
+def test_selector_unknown_category_fails_loud():
+    steps = [{"type": "household", "name": "x", "patterns_where": [
+        {"category": "Elders", "operator": ">=", "value": 1}]}]
+    with pytest.raises(HouseholdError, match="Elders"):
+        _resolve_pattern_selectors(steps, SEL_VOCAB, CATS)
+
+
+def test_selector_matching_nothing_fails_loud():
+    steps = [{"type": "household", "name": "x", "patterns_where": [
+        {"category": "Kids", "operator": ">", "value": 90}]}]
+    with pytest.raises(HouseholdError, match="matched no pattern"):
+        _resolve_pattern_selectors(steps, SEL_VOCAB, CATS)
+
+
+def test_selector_plus_patterns_fails_loud():
+    steps = [{"type": "household", "name": "x", "patterns": ["0 0 2 0"],
+              "patterns_where": [{"category": "Kids", "operator": ">=", "value": 0}]}]
+    with pytest.raises(HouseholdError, match="not both"):
+        _resolve_pattern_selectors(steps, SEL_VOCAB, CATS)

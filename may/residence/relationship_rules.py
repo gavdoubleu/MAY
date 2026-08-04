@@ -99,6 +99,12 @@ class RelationshipRulesValidator:
             'best_candidate_selections': 0,
             'same_category_pairs': 0,
             'different_category_pairs': 0,
+            # When a difference_reference is configured, pairs where exactly one
+            # member holds the reference value count as directed; the rest are
+            # undirected. directed == 0 at the end of a run usually means the
+            # reference value matches nobody (e.g. 'Male' vs 'male').
+            'directed_pairs': 0,
+            'undirected_pairs': 0,
             'numerical_attribute_differences': [],
             'violations': {
                 'numerical_attribute_difference': 0,
@@ -139,6 +145,32 @@ class RelationshipRulesValidator:
             self.rules.append(rule)
 
         logger.info(f"Loaded {len(self.rules)} relationship rules")
+
+        # A malformed difference_reference or roles pair should stop the build
+        # here, not surface as a KeyError mid-allocation.
+        for rule in self.rules:
+            for c in rule.constraints:
+                if c.get('type') != 'pair_matching':
+                    continue
+                ref = (c.get('numerical_attribute') or {}).get('difference_reference')
+                if ref is not None and not {'attribute', 'value'} <= set(ref):
+                    raise ValueError(
+                        f"Rule '{rule.name}': difference_reference requires "
+                        f"'attribute' and 'value' keys, got {sorted(ref)}"
+                    )
+                roles = c.get('roles')
+                if roles is not None:
+                    if c.get('role') is not None:
+                        raise ValueError(
+                            f"Rule '{rule.name}': pair_matching takes 'role' or "
+                            f"'roles', not both."
+                        )
+                    if len(roles) != 2 or not set(roles) <= set(rule.roles):
+                        raise ValueError(
+                            f"Rule '{rule.name}': pair_matching 'roles' must name "
+                            f"exactly 2 of the rule's roles {sorted(rule.roles)}, "
+                            f"got {roles}."
+                        )
 
         # Accept either a single source ("same_category_source") or a list of
         # them ("same_category_sources") so simple cases stay terse.
@@ -476,6 +508,29 @@ class RelationshipRulesValidator:
 
         return (True, 0.0)
 
+    def _pair_diff(self,
+                   person1: Person,
+                   person2: Person,
+                   num_attr_config: Dict) -> Tuple[float, bool]:
+        """Numeric difference of a pair, and whether it has a direction.
+
+        A `difference_reference: {attribute, value}` names the minuend: when
+        exactly one member holds the reference value, the difference is
+        value(that member) - value(other) and counts as directed. Otherwise
+        (no reference, or both/neither members hold the value) the difference
+        is the absolute gap — the pre-reference behavior.
+        """
+        getter = self._get_attribute_getter(num_attr_config.get('attribute', 'age'))
+        v1, v2 = getter(person1), getter(person2)
+        ref = num_attr_config.get('difference_reference')
+        if ref:
+            ref_getter = self._get_attribute_getter(ref['attribute'])
+            m1 = ref_getter(person1) == ref['value']
+            m2 = ref_getter(person2) == ref['value']
+            if m1 != m2:
+                return (v1 - v2 if m1 else v2 - v1), True
+        return abs(v1 - v2), False
+
     def validate_pair_numerical_attribute_difference(self,
                                       person1: Person,
                                       person2: Person,
@@ -530,14 +585,12 @@ class RelationshipRulesValidator:
         if not num_attr_config:
             return 0.0
 
-        attribute = num_attr_config.get('attribute', 'age')
         mean = num_attr_config.get('mean_difference', 3.0)
         std = num_attr_config.get('std_difference', 5.0)
 
-        getter = self._get_attribute_getter(attribute)
-        value1 = getter(person1)
-        value2 = getter(person2)
-        diff = abs(value1 - value2)
+        # Directed pairs score their signed difference against a signed mean;
+        # undirected pairs keep scoring the absolute gap against the same mean.
+        diff, _ = self._pair_diff(person1, person2, num_attr_config)
 
         # Z-score: how many standard deviations from mean
         z_score = abs(diff - mean) / max(std, 1.0)
@@ -597,6 +650,18 @@ class RelationshipRulesValidator:
             others = {cat_getter(p) for p in candidates if cat_getter(p) != partner_cat}
             required_cat_value = self.random_generator.choice(sorted(others)) if others else partner_cat
 
+        # With a difference_reference, rank by distance to a gap sampled from
+        # Normal(mean, std) rather than to the mean itself — ranking on the
+        # mean would give every couple the same gap instead of the configured
+        # distribution (same reasoning as select_pair).
+        num_attr_config = pair_constraint.get('numerical_attribute', {})
+        target_diff = None
+        if num_attr_config.get('difference_reference'):
+            target_diff = np.random.normal(
+                num_attr_config.get('mean_difference', 3.0),
+                num_attr_config.get('std_difference', 5.0),
+            )
+
         partner_id = existing_partner.id
         scored: List[Tuple[float, Person]] = []
         for p in candidates:
@@ -607,6 +672,11 @@ class RelationshipRulesValidator:
             )
             if not ok:
                 continue
+            if target_diff is not None:
+                diff, directed = self._pair_diff(existing_partner, p, num_attr_config)
+                if directed:
+                    scored.append((abs(diff - target_diff), p))
+                    continue
             penalty = self.calculate_pair_numerical_attribute_penalty(
                 existing_partner, p, pair_constraint
             )
@@ -1021,7 +1091,17 @@ class RelationshipRulesValidator:
             shuffled_remaining = remaining.copy()
             self.random_generator.shuffle(shuffled_remaining)
 
-            # Try to find valid partner - iterate through shuffled list
+            # Try to find a valid partner. Without a difference_reference the
+            # first valid candidate wins, exactly as before. With one, the hard
+            # gate alone would ignore the configured mean, so we collect valid
+            # directed candidates and keep the one closest to a gap sampled
+            # from Normal(mean, std) — that makes the realised gaps follow the
+            # configured distribution.
+            num_attr_config = constraint.get('numerical_attribute', {})
+            diff_ref = num_attr_config.get('difference_reference')
+            target_diff = None
+            best_directed = None  # (distance to sampled target gap, candidate)
+            chosen = None
             for candidate in islice(shuffled_remaining, max_attempts):
                 candidates_tested += 1
 
@@ -1054,51 +1134,54 @@ class RelationshipRulesValidator:
                             candidates_rejected += 1
                             break
 
-                if partner_valid:
-                    # Found a valid pair!
-                    if show_detailed_logs:
-                        num_attr_config = constraint.get('numerical_attribute', {})
-                        if num_attr_config:
-                            num_attr = num_attr_config.get('attribute', 'age')
-                            getter = self._get_attribute_getter(num_attr)
-                            val1 = getter(first_person)
-                            val2 = getter(candidate)
-                            diff = abs(val1 - val2)
-                            if candidates_rejected > 0:
-                                logger.debug(f"    ✓ Found valid pair (tested {candidates_tested} candidates, rejected {candidates_rejected})")
-                            else:
-                                logger.debug(f"    ✓ Found valid pair on first try")
-                            logger.debug(f"      Partner 1: {first_person} ({num_attr} {val1})")
-                            logger.debug(f"      Partner 2: {candidate} ({num_attr} {val2})")
-                            logger.debug(f"      {num_attr.capitalize()} difference: {diff}")
-                        else:
-                            if candidates_rejected > 0:
-                                logger.debug(f"    ✓ Found valid pair (tested {candidates_tested} candidates, rejected {candidates_rejected})")
-                            else:
-                                logger.debug(f"    ✓ Found valid pair on first try")
-                            logger.debug(f"      Partner 1: {first_person}")
-                            logger.debug(f"      Partner 2: {candidate}")
+                if not partner_valid:
+                    continue
 
-                    if self.track_statistics:
-                        # Track numerical attribute differences
-                        num_attr_config = constraint.get('numerical_attribute', {})
-                        if num_attr_config:
-                            num_attr = num_attr_config.get('attribute')
-                            if num_attr:
-                                getter = self._get_attribute_getter(num_attr)
-                                try:
-                                    diff = abs(getter(first_person) - getter(candidate))
-                                    self.stats['numerical_attribute_differences'].append(diff)
-                                except (AttributeError, TypeError):
-                                    pass
+                if diff_ref is not None:
+                    diff, directed = self._pair_diff(first_person, candidate, num_attr_config)
+                    if directed:
+                        if target_diff is None:
+                            target_diff = np.random.normal(
+                                num_attr_config.get('mean_difference', 3.0),
+                                num_attr_config.get('std_difference', 5.0),
+                            )
+                        dist = abs(diff - target_diff)
+                        if best_directed is None or dist < best_directed[0]:
+                            best_directed = (dist, candidate)
+                        continue
 
-                        # Track categorical attribute statistics
-                        if is_same_category:
-                            self.stats['same_category_pairs'] += 1
-                        else:
-                            self.stats['different_category_pairs'] += 1
+                chosen = candidate
+                break
 
-                    return (first_person, candidate)
+            if chosen is None and best_directed is not None:
+                chosen = best_directed[1]
+
+            if chosen is not None:
+                candidate = chosen
+                # Found a valid pair!
+                if show_detailed_logs:
+                    if candidates_rejected > 0:
+                        logger.debug(f"    ✓ Found valid pair (tested {candidates_tested} candidates, rejected {candidates_rejected})")
+                    else:
+                        logger.debug(f"    ✓ Found valid pair on first try")
+                    if num_attr_config:
+                        num_attr = num_attr_config.get('attribute', 'age')
+                        getter = self._get_attribute_getter(num_attr)
+                        val1 = getter(first_person)
+                        val2 = getter(candidate)
+                        logger.debug(f"      Partner 1: {first_person} ({num_attr} {val1})")
+                        logger.debug(f"      Partner 2: {candidate} ({num_attr} {val2})")
+                        logger.debug(f"      {num_attr.capitalize()} difference: {abs(val1 - val2)}")
+                    else:
+                        logger.debug(f"      Partner 1: {first_person}")
+                        logger.debug(f"      Partner 2: {candidate}")
+
+                if self.track_statistics:
+                    self._track_pair_stats(
+                        first_person, candidate, num_attr_config, is_same_category
+                    )
+
+                return (first_person, candidate)
 
             attempts_made += 1
 
@@ -1125,27 +1208,36 @@ class RelationshipRulesValidator:
                 self.stats['violations']['pair_numerical_attribute_diff'] += 1
 
                 if self.track_statistics:
-                    # Track numerical attribute differences
-                    num_attr_config = constraint.get('numerical_attribute', {})
-                    if num_attr_config:
-                        num_attr = num_attr_config.get('attribute')
-                        if num_attr:
-                            getter = self._get_attribute_getter(num_attr)
-                            try:
-                                diff = abs(getter(first_person) - getter(best_partner))
-                                self.stats['numerical_attribute_differences'].append(diff)
-                            except (AttributeError, TypeError):
-                                pass
-
-                    # Track categorical attribute statistics
-                    if is_same_category:
-                        self.stats['same_category_pairs'] += 1
-                    else:
-                        self.stats['different_category_pairs'] += 1
+                    self._track_pair_stats(
+                        first_person, best_partner,
+                        constraint.get('numerical_attribute', {}), is_same_category
+                    )
 
                 return (first_person, best_partner)
 
         return None
+
+    def _track_pair_stats(self,
+                          person1: Person,
+                          person2: Person,
+                          num_attr_config: Dict,
+                          is_same_category: bool):
+        """Record a formed pair: the numeric difference (signed when the pair
+        is directed under a difference_reference) and the category counters."""
+        if num_attr_config and num_attr_config.get('attribute'):
+            try:
+                diff, directed = self._pair_diff(person1, person2, num_attr_config)
+                self.stats['numerical_attribute_differences'].append(diff)
+                if num_attr_config.get('difference_reference'):
+                    key = 'directed_pairs' if directed else 'undirected_pairs'
+                    self.stats[key] += 1
+            except (AttributeError, TypeError):
+                pass
+
+        if is_same_category:
+            self.stats['same_category_pairs'] += 1
+        else:
+            self.stats['different_category_pairs'] += 1
 
     def print_statistics(self):
         """Print statistics about relationship rule application."""
@@ -1177,6 +1269,22 @@ class RelationshipRulesValidator:
             logger.debug(f"  Median: {stats_module.median(self.stats['numerical_attribute_differences']):.1f}")
             logger.debug(f"  Range: {min(self.stats['numerical_attribute_differences'])}-"
                        f"{max(self.stats['numerical_attribute_differences'])}")
+
+        # Directed vs undirected pairs (only meaningful with a difference_reference)
+        if self.stats['directed_pairs'] or self.stats['undirected_pairs']:
+            logger.debug(f"Directed pairs: {self.stats['directed_pairs']:,}, "
+                         f"undirected: {self.stats['undirected_pairs']:,}")
+        has_reference = any(
+            (c.get('numerical_attribute') or {}).get('difference_reference')
+            for rule in self.rules for c in rule.constraints
+            if c.get('type') == 'pair_matching'
+        )
+        if has_reference and self.stats['undirected_pairs'] and not self.stats['directed_pairs']:
+            logger.warning(
+                "difference_reference is configured but every formed pair was "
+                "undirected — the reference value probably matches nobody "
+                "(check spelling/case, e.g. 'male' vs 'Male')."
+            )
 
         # Violations
         total_violations = sum(self.stats['violations'].values())
