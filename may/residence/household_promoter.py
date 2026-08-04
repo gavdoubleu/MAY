@@ -332,9 +332,6 @@ class HouseholdPromoter:
             'total_people_remaining': len(self.distributor.population.get_all_people()) - len(self.distributor.allocated_people)
         }
 
-        # Get remaining people by category
-        remaining_by_category = self.distributor.get_available_people_by_category()
-
         # Log summary
         logger.info("=" * 60)
         logger.info(f"{round_label} complete!")
@@ -343,10 +340,15 @@ class HouseholdPromoter:
         logger.info(f"  Total people allocated: {len(self.distributor.allocated_people):,}")
         logger.info(f"  People remaining: {stats['total_people_remaining']:,}")
         logger.info("")
-        logger.info("  Remaining by category:")
-        for cat_name in [cat.name for cat in self.distributor.categories]:
-            count = remaining_by_category.get(cat_name, 0)
-            logger.info(f"    {cat_name}: {count:,}")
+        # The breakdown walks the whole scope, so it costs a scan per step per
+        # loop unit. DEBUG only, and guarded: an unguarded logger.debug would
+        # still pay for the scan on every INFO run.
+        if logger.isEnabledFor(logging.DEBUG):
+            remaining_by_category = self.distributor.get_available_people_by_category()
+            logger.debug("  Remaining by category:")
+            for cat_name in [cat.name for cat in self.distributor.categories]:
+                count = remaining_by_category.get(cat_name, 0)
+                logger.debug(f"    {cat_name}: {count:,}")
         logger.info("=" * 60)
 
         return stats
@@ -520,9 +522,6 @@ class HouseholdPromoter:
             'total_people_remaining': len(self.distributor.population.get_all_people()) - len(self.distributor.allocated_people)
         }
 
-        # Get remaining people by category
-        remaining_by_category = self.distributor.get_available_people_by_category()
-
         # Log summary
         logger.info("=" * 60)
         logger.info(f"{round_label} complete!")
@@ -531,10 +530,15 @@ class HouseholdPromoter:
         logger.info(f"  Total people allocated: {len(self.distributor.allocated_people):,}")
         logger.info(f"  People remaining: {stats['total_people_remaining']:,}")
         logger.info("")
-        logger.info("  Remaining by category:")
-        for cat_name in [cat.name for cat in self.distributor.categories]:
-            count = remaining_by_category.get(cat_name, 0)
-            logger.info(f"    {cat_name}: {count:,}")
+        # The breakdown walks the whole scope, so it costs a scan per step per
+        # loop unit. DEBUG only, and guarded: an unguarded logger.debug would
+        # still pay for the scan on every INFO run.
+        if logger.isEnabledFor(logging.DEBUG):
+            remaining_by_category = self.distributor.get_available_people_by_category()
+            logger.debug("  Remaining by category:")
+            for cat_name in [cat.name for cat in self.distributor.categories]:
+                count = remaining_by_category.get(cat_name, 0)
+                logger.debug(f"    {cat_name}: {count:,}")
         logger.info("=" * 60)
 
         return stats
