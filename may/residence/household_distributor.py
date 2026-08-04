@@ -1570,6 +1570,19 @@ class HouseholdDistributor:
         population_size, _, _ = self._scope_baseline()
         return population_size - self.get_available_people_count_in_scope()
 
+    def scope_people_counts(self) -> Dict[str, int]:
+        """The two people counts every allocation step reports, as stats keys.
+
+        Every return path out of a step must carry them, including the ones
+        that do no work: the counts are summed across loop units, so a unit
+        that stays silent drops its whole population out of the step's
+        world-wide total.
+        """
+        return {
+            'total_people_allocated': self.get_allocated_people_count_in_scope(),
+            'total_people_remaining': self.get_available_people_count_in_scope(),
+        }
+
     def people_in_scope(self) -> Iterator['Person']:
         """People the active geo-unit scope covers, whole world if unscoped.
 

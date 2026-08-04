@@ -340,7 +340,6 @@ def _stable_unit_digest(unit_code: str) -> int:
 # Stats keys that are world-level snapshots rather than per-unit counts:
 # merging keeps the latest value instead of summing
 SNAPSHOT_STAT_KEYS = {'round_name', 'round_number', 'total_households',
-                      'total_people_allocated', 'total_people_remaining',
                       'error'}
 
 

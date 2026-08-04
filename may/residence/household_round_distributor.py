@@ -311,8 +311,7 @@ class HouseholdRoundDistributor:
             'households_with_demotion': total_demoted,
             'people_allocated_this_round': len(self.distributor.allocated_people) - round_start_allocated,
             'total_households': total_households,
-            'total_people_allocated': len(self.distributor.allocated_people),
-            'total_people_remaining': len(self.distributor.population.get_all_people()) - len(self.distributor.allocated_people)
+            **self.distributor.scope_people_counts()
         }
 
         # Log summary (with additional round-specific info first)
@@ -324,7 +323,7 @@ class HouseholdRoundDistributor:
             logger.info(f"  Households using demotion: {total_demoted:,}")
         logger.info(f"  People allocated this round: {round_stats['people_allocated_this_round']:,}")
         logger.info(f"  Total households so far: {round_stats['total_households']:,}")
-        logger.info(f"  Total people allocated: {len(self.distributor.allocated_people):,}")
+        logger.info(f"  Total people allocated: {round_stats['total_people_allocated']:,}")
         logger.info(f"  People remaining: {round_stats['total_people_remaining']:,}")
         logger.info("=" * 60)
 

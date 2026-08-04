@@ -328,8 +328,7 @@ class HouseholdPromoter:
             'round_number': self.distributor.current_round,
             'people_added': people_added,
             'households_promoted': households_promoted_count,
-            'total_people_allocated': len(self.distributor.allocated_people),
-            'total_people_remaining': len(self.distributor.population.get_all_people()) - len(self.distributor.allocated_people)
+            **self.distributor.scope_people_counts()
         }
 
         # Log summary
@@ -337,7 +336,7 @@ class HouseholdPromoter:
         logger.info(f"{round_label} complete!")
         logger.info(f"  Households promoted: {households_promoted_count:,}")
         logger.info(f"  People added: {people_added:,}")
-        logger.info(f"  Total people allocated: {len(self.distributor.allocated_people):,}")
+        logger.info(f"  Total people allocated: {stats['total_people_allocated']:,}")
         logger.info(f"  People remaining: {stats['total_people_remaining']:,}")
         logger.info("")
         # The breakdown walks the whole scope, so it costs a scan per step per
@@ -518,8 +517,7 @@ class HouseholdPromoter:
             'round_number': self.distributor.current_round,
             'people_added': people_added,
             'households_promoted': households_promoted_count,
-            'total_people_allocated': len(self.distributor.allocated_people),
-            'total_people_remaining': len(self.distributor.population.get_all_people()) - len(self.distributor.allocated_people)
+            **self.distributor.scope_people_counts()
         }
 
         # Log summary
@@ -527,7 +525,7 @@ class HouseholdPromoter:
         logger.info(f"{round_label} complete!")
         logger.info(f"  Households promoted: {households_promoted_count:,}")
         logger.info(f"  People added: {people_added:,}")
-        logger.info(f"  Total people allocated: {len(self.distributor.allocated_people):,}")
+        logger.info(f"  Total people allocated: {stats['total_people_allocated']:,}")
         logger.info(f"  People remaining: {stats['total_people_remaining']:,}")
         logger.info("")
         # The breakdown walks the whole scope, so it costs a scan per step per

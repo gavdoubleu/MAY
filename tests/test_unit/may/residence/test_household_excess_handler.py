@@ -228,6 +228,22 @@ class TestExcessBasicBehaviour:
         assert stats["people_added"] == 0
         assert stats["households_modified"] == 0
 
+    def test_a_round_that_does_nothing_still_reports_its_people(self, hd):
+        """The people counts sum across loop units, so a unit that finds no
+        work must still declare its scope. Omitting the keys drops that unit's
+        population out of the world-wide total for the step.
+        """
+        np.random.seed(0)
+        run_family_round(hd)
+
+        stats = hd.allocate_excess_to_households(
+            target_patterns=["0 0 0 1"],  # matches nothing
+            add_category="Kids",
+        )
+
+        assert (stats["total_people_allocated"] + stats["total_people_remaining"]
+                == len(hd.population.get_all_people()))
+
 
 # allocate_excess_to_households — constraint enforcement
 

@@ -79,7 +79,8 @@ class HouseholdExcessHandler:
                     'round_name': round_label,
                     'people_added': 0,
                     'households_modified': 0,
-                    'error': f"Unknown relationship rule '{rule_name}'"
+                    'error': f"Unknown relationship rule '{rule_name}'",
+                    **self.distributor.scope_people_counts()
                 }
 
         # Prepare pools (refresh when requested; otherwise builds only if the
@@ -93,7 +94,8 @@ class HouseholdExcessHandler:
                 'round_name': round_label,
                 'people_added': 0,
                 'households_modified': 0,
-                'error': f"Unknown category '{add_category}'"
+                'error': f"Unknown category '{add_category}'",
+                **self.distributor.scope_people_counts()
             }
 
         # Filter households by target patterns, restricted to the active
@@ -111,7 +113,8 @@ class HouseholdExcessHandler:
             return {
                 'round_name': round_label,
                 'people_added': 0,
-                'households_modified': 0
+                'households_modified': 0,
+                **self.distributor.scope_people_counts()
             }
 
         # Shuffle households for fairness
@@ -237,8 +240,7 @@ class HouseholdExcessHandler:
             'people_added': people_added,
             'households_modified': households_modified,
             'target_households_count': len(target_households),
-            'total_people_allocated': len(self.distributor.allocated_people),
-            'total_people_remaining': len(self.distributor.population.get_all_people()) - len(self.distributor.allocated_people)
+            **self.distributor.scope_people_counts()
         }
 
         # Log summary
@@ -247,7 +249,7 @@ class HouseholdExcessHandler:
         logger.info(f"  Target households: {len(target_households):,}")
         logger.info(f"  Households modified: {households_modified:,}")
         logger.info(f"  People added: {people_added:,}")
-        logger.info(f"  Total people allocated: {len(self.distributor.allocated_people):,}")
+        logger.info(f"  Total people allocated: {stats['total_people_allocated']:,}")
         logger.info(f"  People remaining: {stats['total_people_remaining']:,}")
         logger.info("")
 
@@ -309,7 +311,8 @@ class HouseholdExcessHandler:
                 'round_name': round_label,
                 'people_added': 0,
                 'households_modified': 0,
-                'error': f"Unknown category '{add_category}'"
+                'error': f"Unknown category '{add_category}'",
+                **self.distributor.scope_people_counts()
             }
 
         # Group households by geo_unit and pattern (restricted to the active
@@ -465,8 +468,7 @@ class HouseholdExcessHandler:
             'round_number': self.distributor.current_round,
             'people_added': people_added,
             'households_modified': households_modified,
-            'total_people_allocated': len(self.distributor.allocated_people),
-            'total_people_remaining': len(self.distributor.population.get_all_people()) - len(self.distributor.allocated_people)
+            **self.distributor.scope_people_counts()
         }
 
         # Log summary
@@ -474,7 +476,7 @@ class HouseholdExcessHandler:
         logger.info(f"{round_label} complete!")
         logger.info(f"  Households modified: {households_modified:,}")
         logger.info(f"  People added (overflow): {people_added:,}")
-        logger.info(f"  Total people allocated: {len(self.distributor.allocated_people):,}")
+        logger.info(f"  Total people allocated: {stats['total_people_allocated']:,}")
         logger.info(f"  People remaining: {stats['total_people_remaining']:,}")
         logger.info("")
         # The breakdown walks the whole scope, so it costs a scan per step per
