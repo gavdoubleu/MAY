@@ -20,8 +20,14 @@ _FORK_CONTEXT = mp.get_context('fork')
 def resolve_worker_count(workers: int = None) -> int:
     """Resolve the pool size. An explicit `workers` wins; otherwise fall back to
     the SLURM CPU allocation (`SLURM_CPUS_PER_TASK`), then the machine's CPU
-    count. Never returns below 1. The measured-footprint sizing formula is
-    deferred to Phase 6.
+    count. Never returns below 1.
+
+    CPUs and nothing else. Phase 6 had planned to divide a memory budget by a
+    measured per-Slice footprint, and dropped it: a Slice's footprint cannot be
+    anticipated, so the divisor would have been a guess of the kind
+    `pending_flush_member_bound` was retired for. Memory is defended where it
+    is spent instead — by flushing against a measured budget (ADR-0008 as
+    amended), and by bounding how far dispatch runs ahead of the apply.
     """
     if workers is not None:
         return max(1, workers)
