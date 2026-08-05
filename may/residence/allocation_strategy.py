@@ -19,6 +19,7 @@ from .venue_allocator import _allocate_to_venue_type
 from .household_distributor import HouseholdError
 from .composition_pattern import CompositionPattern
 from .pending_flush_buffer import PendingFlushBuffer
+from .unit_mutation_plan import UnitMutationCollector
 from may.utils import path_resolver as pr
 
 logger = logging.getLogger("allocation_strategy")
@@ -72,7 +73,8 @@ def execute_allocation_strategy(population,
                                 strategy_file: str = "data/households/allocation_strategy.yaml",
                                 export_debug_csv: bool = False,
                                 random_seed: Optional[int] = None,
-                                subset_flusher: Optional[Callable] = None):
+                                subset_flusher: Optional[Callable] = None,
+                                plan_sink: Optional[Callable] = None):
     """
     Execute a unified allocation strategy from YAML configuration.
 
@@ -96,6 +98,11 @@ def execute_allocation_strategy(population,
             `pending_flush_member_bound`; called with whole units' household
             subsets whenever they total that many members, and once more at
             end of allocation for the residue.
+        plan_sink: Callable handed each loop unit's `UnitMutationPlan` as the
+            unit finishes. The seam the parallel dispatcher takes over: from
+            Phase 5 cycle 4 the body runs in a forked worker and the plan is
+            the only thing that comes back, so the parent applies it here
+            instead of the body having already mutated the world.
 
     Returns:
         dict: Complete statistics for all steps, aggregated across units
@@ -232,6 +239,11 @@ def execute_allocation_strategy(population,
         household_distributor.set_geo_unit_scope(scope_sgu_codes)
 
         household_count_before_unit = _household_venue_count(venues)
+        # Collected on every run, not just when a sink wants it: the diff's
+        # allowlist is what turns an unknown mutation site into a loud
+        # single-process failure instead of a parallel-only divergence.
+        collector = UnitMutationCollector(venues, household_distributor,
+                                          unit_code, scope_geo_unit_names)
 
         logger.info("=" * 60)
         logger.info(f"Geo unit {unit_index}/{total_units}: {unit_code} "
@@ -266,6 +278,10 @@ def execute_allocation_strategy(population,
                 step_name, {'type': step_type, 'step_number': step_number})
             _merge_step_stats(accumulated, stats)
             logger.info("")
+
+        unit_plan = collector.collect()
+        if plan_sink is not None:
+            plan_sink(unit_plan)
 
         if member_bound is not None:
             subset_keys, member_count = _new_household_subset_keys(
