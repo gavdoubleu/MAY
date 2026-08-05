@@ -3,6 +3,8 @@ import os
 import h5py
 from unittest.mock import patch, MagicMock
 
+from tests.test_integration.h5_equivalence import assert_h5_equivalent
+
 # We focus on the isolated block of logic found in run_world (Lines 335-350)
 def execute_serialization_block(world_mock, config, args, logger_mock):
     """
@@ -222,43 +224,6 @@ class TestWorldHDF5PayloadIntegrity:
             assert "SGU" in geo_levels_binary
 
 
-def _assert_h5_equivalent(path_a, path_b):
-    """Recursively compare two HDF5 files: same tree, datasets and attrs."""
-    import numpy as np
-
-    # Deliberate divergences from a baseline export: timestamps, and the
-    # inspection attr stamped on datasets written by flush_properties steps.
-    ignored_attrs = {'creation_timestamp', 'flushed_by_step'}
-
-    def compare_attrs(obj_a, obj_b, location):
-        keys_a = set(obj_a.attrs.keys()) - ignored_attrs
-        keys_b = set(obj_b.attrs.keys()) - ignored_attrs
-        assert keys_a == keys_b, f"attr keys differ at {location}: {keys_a ^ keys_b}"
-        for key in keys_a:
-            value_a, value_b = obj_a.attrs[key], obj_b.attrs[key]
-            assert np.array_equal(value_a, value_b), f"attr {key} differs at {location}"
-
-    def compare_group(group_a, group_b, location):
-        compare_attrs(group_a, group_b, location)
-        keys_a = set(group_a.keys())
-        keys_b = set(group_b.keys())
-        assert keys_a == keys_b, f"children differ at {location}: {keys_a ^ keys_b}"
-        for key in keys_a:
-            child_a, child_b = group_a[key], group_b[key]
-            child_location = f"{location}/{key}"
-            assert type(child_a) is type(child_b), f"node type differs at {child_location}"
-            if isinstance(child_a, h5py.Group):
-                compare_group(child_a, child_b, child_location)
-            else:
-                compare_attrs(child_a, child_b, child_location)
-                data_a, data_b = child_a[()], child_b[()]
-                assert np.array_equal(data_a, data_b, equal_nan=(data_a.dtype.kind == 'f')), \
-                    f"dataset differs at {child_location}"
-
-    with h5py.File(path_a, 'r') as file_a, h5py.File(path_b, 'r') as file_b:
-        compare_group(file_a, file_b, '')
-
-
 class TestEarlyCanonicalFileEquivalence:
     """Two-stage export (export_core early + export in 'r+') must produce a
     file equivalent to the single-shot export path. See docs/adr/0003."""
@@ -280,7 +245,7 @@ class TestEarlyCanonicalFileEquivalence:
         stats_two_stage = minimal_world.export_to_hdf5(two_stage_path, config_file=config_file)
 
         assert stats_single == stats_two_stage
-        _assert_h5_equivalent(single_shot_path, two_stage_path)
+        assert_h5_equivalent(single_shot_path, two_stage_path)
 
     def test_export_to_different_path_than_canonical_fails_loud(self, minimal_world, tmp_path):
         config_file = "configs/2021/serialization_config.yaml"
@@ -390,7 +355,7 @@ class TestFlushPropertiesPopulation:
         stats_flushed = minimal_world.export_to_hdf5(flushed_path, config_file=self.CONFIG_FILE)
 
         assert stats_baseline == stats_flushed
-        _assert_h5_equivalent(baseline_path, flushed_path)
+        assert_h5_equivalent(baseline_path, flushed_path)
 
     def test_unknown_target_fails_loud(self, world_with_ethnicity):
         world, _ = world_with_ethnicity
@@ -613,7 +578,7 @@ class TestFlushPropertiesGeoUnits:
         stats_flushed = minimal_world.export_to_hdf5(flushed_path, config_file=geo_config_file)
 
         assert stats_baseline == stats_flushed
-        _assert_h5_equivalent(baseline_path, flushed_path)
+        assert_h5_equivalent(baseline_path, flushed_path)
 
     def test_unknown_geo_property_fails_loud(self, world_with_geo_property):
         """Property not in serialization config would never reach the export."""
@@ -790,7 +755,7 @@ class TestFlushPropertiesVenues:
         stats_flushed = minimal_world.export_to_hdf5(flushed_path, config_file=venue_config_file)
 
         assert stats_baseline == stats_flushed
-        _assert_h5_equivalent(baseline_path, flushed_path)
+        assert_h5_equivalent(baseline_path, flushed_path)
 
     def test_cohort_drift_after_flush_fails_loud_at_export(self, world_with_venue_properties, tmp_path):
         """The cohort must be closed at flush: adding a venue of the type
@@ -955,7 +920,7 @@ class TestFlushPropertiesVenueSubsets:
         stats_flushed = world.export_to_hdf5(flushed_path, config_file="configs/2021/serialization_config.yaml")
 
         assert stats_baseline == stats_flushed
-        _assert_h5_equivalent(baseline_path, flushed_path)
+        assert_h5_equivalent(baseline_path, flushed_path)
 
     def test_flush_gutted_subset_members_raise_on_access(self, world_with_households, tmp_path):
         from may.flushing import FlushedPropertyError
@@ -992,7 +957,7 @@ class TestFlushPropertiesVenueSubsets:
         stats_flushed = world.export_to_hdf5(flushed_path, config_file="configs/2021/serialization_config.yaml")
 
         assert stats_baseline == stats_flushed
-        _assert_h5_equivalent(baseline_path, flushed_path)
+        assert_h5_equivalent(baseline_path, flushed_path)
 
     def test_live_subset_added_after_subsets_flush_fails_loud_at_export(
         self, world_with_households, tmp_path
@@ -1219,7 +1184,7 @@ class TestFlushPropertiesVenueSubsets:
         stats_flushed = world.export_to_hdf5(flushed_path, config_file="configs/2021/serialization_config.yaml")
 
         assert stats_baseline == stats_flushed
-        _assert_h5_equivalent(baseline_path, flushed_path)
+        assert_h5_equivalent(baseline_path, flushed_path)
 
 
 class TestFlushPropertiesCombinedRetrySafety:
