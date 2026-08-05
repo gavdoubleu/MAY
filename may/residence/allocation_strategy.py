@@ -209,7 +209,7 @@ def execute_allocation_strategy(population,
                                 random_seed: Optional[int] = None,
                                 subset_flusher: Optional[Callable] = None,
                                 plan_sink: Optional[Callable] = None,
-                                workers: Optional[int] = None):
+                                workers: Optional[int] = 1):
     """
     Execute a unified allocation strategy from YAML configuration.
 
@@ -242,6 +242,12 @@ def execute_allocation_strategy(population,
             copy of the world, so running them in the parent would apply each
             unit twice. That makes a one-worker run a true control for a
             many-worker one rather than a different code path.
+
+            Defaults to one, not to the machine — widening the pool is opt-in
+            until the footprint work sizes it. Each worker's copy of the world
+            starts shared with the parent, but copy-on-write is undone by
+            refcounting alone, so a pool costs roughly a world per worker at a
+            scale where one world is already the constraint.
 
     Returns:
         dict: Complete statistics for all steps, aggregated across units
