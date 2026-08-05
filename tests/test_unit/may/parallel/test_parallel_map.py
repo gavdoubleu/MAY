@@ -24,6 +24,14 @@ def _count_codes(unit_slice, rng):
     return len(unit_slice.unit_codes)
 
 
+def _sleep_if_slow(unit_slice, rng):
+    """Worker that stalls only on the Slice named 'SLOW'."""
+    import time
+    if unit_slice.unit_codes[0] == 'SLOW':
+        time.sleep(2.0)
+    return unit_slice.unit_codes[0]
+
+
 def _draw(unit_slice, rng):
     """Worker whose output depends entirely on its injected RNG stream."""
     return rng.integers(0, 1_000_000, size=5).tolist()
@@ -135,3 +143,58 @@ def test_worker_count_capped_at_slice_count():
     import os
     pids = parallel_map(_return_pid, [GeoUnitSlice(['E1'])], workers=8)
     assert pids == [os.getpid()]
+
+
+def test_as_completed_yields_every_slice_tagged_with_its_index():
+    # `parallel_map` returns only once every Slice is done, holding every
+    # result live (ADR-0003 wants a streamed per-Slice apply). The as-completed
+    # sibling hands each result to the caller as it arrives, tagged with the
+    # Slice's input index so the caller can still apply in canonical order.
+    from may.parallel import parallel_map_as_completed
+
+    slices = [GeoUnitSlice(['E1']),
+              GeoUnitSlice(['E2', 'E3']),
+              GeoUnitSlice(['E4', 'E5', 'E6']),
+              GeoUnitSlice(['E7', 'E8', 'E9', 'E10'])]
+
+    yielded = list(parallel_map_as_completed(_count_codes, slices, workers=2))
+
+    assert sorted(yielded) == [(0, 1), (1, 2), (2, 3), (3, 4)]
+
+
+def test_as_completed_seeds_each_slice_exactly_as_parallel_map():
+    # Streaming is a dispatch change, not a seeding one: reordered by index, the
+    # as-completed stream must reproduce `parallel_map`'s list exactly, at any
+    # worker count. Without this the restructure would move the world.
+    from may.parallel import parallel_map_as_completed
+
+    slices = [GeoUnitSlice(['E1', 'E2']),
+              GeoUnitSlice(['E3']),
+              GeoUnitSlice(['E4', 'E5', 'E6']),
+              GeoUnitSlice(['E7'])]
+
+    ordered = parallel_map(_draw, slices, workers=1)
+    for worker_count in (1, 4):
+        streamed = dict(parallel_map_as_completed(_draw, slices,
+                                                  workers=worker_count))
+        assert [streamed[index] for index in range(len(slices))] == ordered
+
+
+def test_as_completed_hands_over_fast_slices_before_the_slow_one_finishes():
+    # The point of the entry point: a caller must be able to apply a finished
+    # Slice while a long-running sibling is still in flight. The slow Slice is
+    # dispatched first, so under `parallel_map`'s all-or-nothing return nothing
+    # at all would be available until it completed.
+    import time
+    from may.parallel import parallel_map_as_completed
+
+    slices = [GeoUnitSlice(['SLOW']), GeoUnitSlice(['E2']), GeoUnitSlice(['E3'])]
+
+    started = time.monotonic()
+    stream = parallel_map_as_completed(_sleep_if_slow, slices, workers=3)
+    first_index, first_result = next(stream)
+    elapsed = time.monotonic() - started
+
+    assert first_result != 'SLOW'
+    assert elapsed < 2.0
+    list(stream)  # drain so the pool shuts down cleanly
