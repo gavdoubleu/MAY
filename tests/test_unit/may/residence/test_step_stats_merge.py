@@ -58,7 +58,7 @@ class TestPerUnitCountsAreCheckedAgainstTheWorld:
     def test_silence_when_the_arithmetic_matches(self, caplog):
         all_stats = {'last step': {'step_number': 2, 'total_people_remaining': 3}}
 
-        with caplog.at_level(logging.WARNING, logger='household'):
+        with caplog.at_level(logging.WARNING, logger='allocation_strategy'):
             _check_per_unit_counts_against_the_world(all_stats, 3)
 
         assert caplog.records == []
@@ -66,7 +66,7 @@ class TestPerUnitCountsAreCheckedAgainstTheWorld:
     def test_warns_when_the_arithmetic_disagrees(self, caplog):
         all_stats = {'last step': {'step_number': 2, 'total_people_remaining': 3}}
 
-        with caplog.at_level(logging.WARNING, logger='household'):
+        with caplog.at_level(logging.WARNING, logger='allocation_strategy'):
             _check_per_unit_counts_against_the_world(all_stats, 5)
 
         assert len(caplog.records) == 1
@@ -81,7 +81,7 @@ class TestPerUnitCountsAreCheckedAgainstTheWorld:
             'venue step': {'step_number': 2},
         }
 
-        with caplog.at_level(logging.WARNING, logger='household'):
+        with caplog.at_level(logging.WARNING, logger='allocation_strategy'):
             _check_per_unit_counts_against_the_world(all_stats, 5)
 
         assert caplog.records == []

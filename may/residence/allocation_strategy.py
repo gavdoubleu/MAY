@@ -130,6 +130,8 @@ def execute_allocation_strategy(population,
             f"configured geography levels: {geography.levels}"
         )
 
+    _validate_step_names_are_unique(steps, strategy_file)
+
     flush_per_unit = strategy.get('flush_per_unit', False)
     if flush_per_unit and subset_flusher is None:
         raise HouseholdError(
@@ -630,6 +632,26 @@ def _setup_structure_mixture(mixture_cfg: Optional[Dict], steps: List[Dict],
         f"Structure mixture loaded: {len(interps_by_pattern)} patterns x "
         f"{len({g for g, _ in shares})} geo units at {geo_level}"
     )
+
+
+def _validate_step_names_are_unique(steps: List[Dict], strategy_file: str) -> None:
+    """Fail loud on two steps sharing a name.
+
+    The name keys the accumulated per-step stats, so a repeat merges two
+    steps into one entry: their people counts sum on top of the per-unit
+    sum, the reported step number is the first occurrence's, and the
+    end-of-run check against the world then warns about arithmetic the
+    config broke rather than out-of-scope allocation.
+    """
+    seen = set()
+    for step_number, step_config in enumerate(steps, 1):
+        step_name = step_config.get('name', f'Step {step_number}')
+        if step_name in seen:
+            raise HouseholdError(
+                f"Duplicate step name '{step_name}' in {strategy_file}; "
+                f"step names key the per-step statistics, so each must be unique"
+            )
+        seen.add(step_name)
 
 
 def _validate_step_patterns(steps: List[Dict], vocabulary: set) -> None:

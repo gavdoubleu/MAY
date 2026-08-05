@@ -66,6 +66,32 @@ def test_stale_max_allocations_key_warns(monkeypatch, caplog):
     assert "no longer supported" in caplog.text
 
 
+# step names key the accumulated per-step stats
+
+from may.residence.allocation_strategy import _validate_step_names_are_unique
+
+
+def test_distinct_step_names_pass():
+    steps = [{"type": "household", "name": "build"},
+             {"type": "venue", "name": "venue"}]
+    _validate_step_names_are_unique(steps, "strategy.yaml")  # must not raise
+
+
+def test_duplicate_step_names_fail_loud():
+    # Two steps sharing a name collapse into one accumulated stats entry, so
+    # their people counts sum on top of the per-unit sum and the run reports
+    # a total it never allocated.
+    steps = [{"type": "household", "name": "build"},
+             {"type": "household", "name": "build"}]
+    with pytest.raises(HouseholdError, match="Duplicate step name 'build'"):
+        _validate_step_names_are_unique(steps, "strategy.yaml")
+
+
+def test_unnamed_steps_are_numbered_apart():
+    steps = [{"type": "household"}, {"type": "household"}]
+    _validate_step_names_are_unique(steps, "strategy.yaml")  # must not raise
+
+
 # patterns_where selectors
 
 from dataclasses import dataclass
