@@ -4,6 +4,7 @@ domain identity (ADR-0001 processes-not-threads; ADR-0002 identity seeding).
 """
 import multiprocessing as mp
 import os
+from collections import deque
 from typing import Any, Callable, Iterator, List, Sequence, Tuple
 
 import numpy as np
@@ -68,21 +69,29 @@ def parallel_map(worker_fn: Callable, slices: Sequence[Slice], *,
         return pool.map(_seed_and_invoke, payloads)
 
 
-def parallel_map_as_completed(worker_fn: Callable, slices: Sequence[Slice], *,
-                              global_seed: int = 0, workers: int = None,
-                              force_fork: bool = False) -> Iterator[Tuple[int, Any]]:
-    """As `parallel_map`, but yields `(slice_index, result)` pairs as they
-    complete rather than returning every result at once.
+def parallel_map_in_order(worker_fn: Callable, slices: Sequence[Slice], *,
+                          global_seed: int = 0, workers: int = None,
+                          force_fork: bool = False,
+                          look_ahead: int = None) -> Iterator[Tuple[int, Any]]:
+    """As `parallel_map`, but yields `(slice_index, result)` one at a time, in
+    input order, with only a bounded number of Slices ever in flight.
 
     `parallel_map` returns only once the slowest Slice is done, so the caller
     holds every result live before it can apply any of them. Phase 5's payloads
     are whole loop units of household mutations, where that is the wrong shape:
     ADR-0003 wants the parent applying each Slice's mutations as it arrives.
 
-    Results arrive in completion order, not input order — the `slice_index` is
-    what lets a caller that needs a canonical apply order reorder them itself.
-    A separate entry point rather than a flag on `parallel_map` so Phase 3's
-    callers keep their ordered-list contract untouched.
+    Input order, not completion order. A caller that must apply in a canonical
+    order (ADR-0010) gains nothing from an early result it is not allowed to
+    apply yet — it can only hold it, and holding it is what an unbounded
+    reorder buffer is. Yielding in order puts that buffer here instead, where
+    `look_ahead` bounds it: at most that many Slices are dispatched but not yet
+    handed over, so at most that many results exist anywhere at once. It costs
+    no parallelism, because Slices behind the one being yielded keep running.
+
+    `look_ahead` defaults to twice the worker count, so the pool stays fed
+    while the caller works on what it was just handed. Below the worker count
+    it idles workers; a caller whose results are large may still want that.
 
     `force_fork` suppresses the in-process shortcut below. A worker that
     *mutates* a world and returns a description of what it did needs that world
@@ -97,12 +106,23 @@ def parallel_map_as_completed(worker_fn: Callable, slices: Sequence[Slice], *,
         return
     worker_count = min(resolve_worker_count(workers), len(payloads))
     # Single worker runs in-process, lazily — same seeding, no fork, and the
-    # caller still sees results one at a time (here, in input order).
+    # caller still sees results one at a time, in the same order.
     if worker_count <= 1 and not force_fork:
         for payload in payloads:
             yield _seed_and_invoke_indexed(payload)
         return
+    window = look_ahead if look_ahead is not None else worker_count * 2
     with _FORK_CONTEXT.Pool(processes=worker_count) as pool:
-        for indexed_result in pool.imap_unordered(_seed_and_invoke_indexed,
-                                                  payloads):
-            yield indexed_result
+        # Dispatched and not yet handed over. Held as `AsyncResult`s in
+        # dispatch order, which is input order, so the head is always the next
+        # Slice to yield — `get()` on it waits for that Slice and no other,
+        # while everything behind it carries on running.
+        in_flight = deque()
+        next_to_dispatch = 0
+        while next_to_dispatch < len(payloads) or in_flight:
+            while (next_to_dispatch < len(payloads)
+                   and len(in_flight) < window):
+                in_flight.append(pool.apply_async(_seed_and_invoke_indexed,
+                                                  (payloads[next_to_dispatch],)))
+                next_to_dispatch += 1
+            yield in_flight.popleft().get()

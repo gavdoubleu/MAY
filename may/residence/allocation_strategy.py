@@ -20,7 +20,7 @@ from .composition_pattern import CompositionPattern
 from .pending_flush_buffer import PendingFlushBuffer
 from .unit_mutation_plan import (UnitMutationCollector, apply_unit_plan,
                                  index_venues_by_id)
-from may.parallel import GeoUnitSlice, parallel_map_as_completed
+from may.parallel import GeoUnitSlice, parallel_map_in_order
 from may.utils import path_resolver as pr
 
 logger = logging.getLogger("allocation_strategy")
@@ -326,50 +326,47 @@ def execute_allocation_strategy(population,
         numbered_steps=numbered_steps, loop_units=loop_units,
         smallest_level=smallest_level, global_seed=global_seed)
     try:
-        completed_units: Dict[int, Tuple] = {}
-        next_unit_index = 0
-        for slice_index, outcome in parallel_map_as_completed(
+        # Units finish in whatever order they finish in, but arrive here in the
+        # loop's own order and never any other: household ids come from the
+        # parent's counter as it applies, so the apply order *is* the world's id
+        # layout (ADR-0010). The pool holds the ones that finished early, which
+        # is why it can bound how far ahead of the apply they are allowed to run.
+        applied_units = 0
+        for _, outcome in parallel_map_in_order(
                 _run_one_geo_unit, unit_slices, global_seed=global_seed,
                 workers=workers, force_fork=True):
-            completed_units[slice_index] = outcome
-            # Units finish in whatever order they finish in, but are applied in
-            # the loop's own order and never any other: household ids come from
-            # the parent's counter as it applies, so the apply order *is* the
-            # world's id layout (ADR-0010). Anything not yet reachable waits
-            # here until its predecessor arrives.
-            while next_unit_index in completed_units:
-                unit_plan, stats_by_step, tallies = completed_units.pop(next_unit_index)
-                next_unit_index += 1
+            unit_plan, stats_by_step, tallies = outcome
+            applied_units += 1
 
-                created_subset_keys = apply_unit_plan(
-                    unit_plan, venues, household_distributor,
-                    people_by_id, venues_by_id)
-                household_distributor.merge_target_pattern_tallies(tallies)
-                for step_number, step_name, step_type, _ in numbered_steps:
-                    accumulated = all_stats.setdefault(
-                        step_name, {'type': step_type, 'step_number': step_number})
-                    _merge_step_stats(accumulated, stats_by_step[step_name])
+            created_subset_keys = apply_unit_plan(
+                unit_plan, venues, household_distributor,
+                people_by_id, venues_by_id)
+            household_distributor.merge_target_pattern_tallies(tallies)
+            for step_number, step_name, step_type, _ in numbered_steps:
+                accumulated = all_stats.setdefault(
+                    step_name, {'type': step_type, 'step_number': step_number})
+                _merge_step_stats(accumulated, stats_by_step[step_name])
 
-                if plan_sink is not None:
-                    plan_sink(unit_plan)
+            if plan_sink is not None:
+                plan_sink(unit_plan)
 
-                if memory_budget_mb is not None and created_subset_keys:
-                    # Offered, not flushed: whether this unit's membership is
-                    # written now or held for a later batch is the buffer's call
-                    member_count = unit_plan.created_household_member_count
-                    pending_flush.offer(HOUSEHOLD_VENUE_TYPE,
-                                        created_subset_keys, member_count)
-                    logger.info(f"[{unit_plan.unit_code}] Offered "
-                                f"{len(created_subset_keys)} household subsets "
-                                f"({member_count:,} members) to the "
-                                f"pending-flush buffer")
+            if memory_budget_mb is not None and created_subset_keys:
+                # Offered, not flushed: whether this unit's membership is
+                # written now or held for a later batch is the buffer's call
+                member_count = unit_plan.created_household_member_count
+                pending_flush.offer(HOUSEHOLD_VENUE_TYPE,
+                                    created_subset_keys, member_count)
+                logger.info(f"[{unit_plan.unit_code}] Offered "
+                            f"{len(created_subset_keys)} household subsets "
+                            f"({member_count:,} members) to the "
+                            f"pending-flush buffer")
 
-                if (next_unit_index % progress_interval == 0
-                        or next_unit_index == total_units):
-                    percent_complete = (next_unit_index / total_units) * 100
-                    logger.info(f"Geo-unit progress: {next_unit_index}/{total_units} "
-                                f"({percent_complete:.1f}%) - "
-                                f"{len(household_distributor.allocated_people):,} people allocated")
+            if (applied_units % progress_interval == 0
+                    or applied_units == total_units):
+                percent_complete = (applied_units / total_units) * 100
+                logger.info(f"Geo-unit progress: {applied_units}/{total_units} "
+                            f"({percent_complete:.1f}%) - "
+                            f"{len(household_distributor.allocated_people):,} people allocated")
     finally:
         _ACTIVE_LOOP_CONTEXT = None
 

@@ -5,13 +5,16 @@ internals, so they survive re-implementation.
 """
 import numpy as np
 
-from may.parallel import parallel_map, GeoUnitSlice
+from may.parallel import parallel_map, parallel_map_in_order, GeoUnitSlice
 
 
 # Read-only shared state a worker reads without it being passed per Slice; set
 # by the parent at runtime, so a worker seeing its value proves fork-COW
 # inheritance (a spawn/re-import would see the module-definition None instead).
 _SHARED_TABLE = None
+
+# Set by the look-ahead test to a manager list workers can append to.
+_COMPLETED = None
 
 
 def _lookup_shared(unit_slice, rng):
@@ -145,29 +148,25 @@ def test_worker_count_capped_at_slice_count():
     assert pids == [os.getpid()]
 
 
-def test_as_completed_yields_every_slice_tagged_with_its_index():
+def test_in_order_yields_every_slice_tagged_with_its_index():
     # `parallel_map` returns only once every Slice is done, holding every
-    # result live (ADR-0003 wants a streamed per-Slice apply). The as-completed
-    # sibling hands each result to the caller as it arrives, tagged with the
-    # Slice's input index so the caller can still apply in canonical order.
-    from may.parallel import parallel_map_as_completed
-
+    # result live (ADR-0003 wants a streamed per-Slice apply). The streaming
+    # sibling hands each result over one at a time, tagged with the Slice's
+    # input index so a caller applying in canonical order knows what it has.
     slices = [GeoUnitSlice(['E1']),
               GeoUnitSlice(['E2', 'E3']),
               GeoUnitSlice(['E4', 'E5', 'E6']),
               GeoUnitSlice(['E7', 'E8', 'E9', 'E10'])]
 
-    yielded = list(parallel_map_as_completed(_count_codes, slices, workers=2))
+    yielded = list(parallel_map_in_order(_count_codes, slices, workers=2))
 
-    assert sorted(yielded) == [(0, 1), (1, 2), (2, 3), (3, 4)]
+    assert yielded == [(0, 1), (1, 2), (2, 3), (3, 4)]
 
 
-def test_as_completed_seeds_each_slice_exactly_as_parallel_map():
-    # Streaming is a dispatch change, not a seeding one: reordered by index, the
-    # as-completed stream must reproduce `parallel_map`'s list exactly, at any
-    # worker count. Without this the restructure would move the world.
-    from may.parallel import parallel_map_as_completed
-
+def test_in_order_seeds_each_slice_exactly_as_parallel_map():
+    # Streaming is a dispatch change, not a seeding one: the streamed results
+    # must reproduce `parallel_map`'s list exactly, at any worker count.
+    # Without this the restructure would move the world.
     slices = [GeoUnitSlice(['E1', 'E2']),
               GeoUnitSlice(['E3']),
               GeoUnitSlice(['E4', 'E5', 'E6']),
@@ -175,43 +174,94 @@ def test_as_completed_seeds_each_slice_exactly_as_parallel_map():
 
     ordered = parallel_map(_draw, slices, workers=1)
     for worker_count in (1, 4):
-        streamed = dict(parallel_map_as_completed(_draw, slices,
-                                                  workers=worker_count))
+        streamed = dict(parallel_map_in_order(_draw, slices,
+                                              workers=worker_count))
         assert [streamed[index] for index in range(len(slices))] == ordered
 
 
-def test_as_completed_can_be_forced_to_fork_at_one_worker():
+def test_in_order_can_be_forced_to_fork_at_one_worker():
     # Phase 5's geo loop mutates a world inside the worker and hands the parent
     # a plan to replay. In-process that double-applies — the parent's own world
     # would be mutated *and* replayed on top — so the caller must be able to
     # demand real isolation whatever the worker count. It is also what makes
     # the W=1-vs-W=N comparison a comparison of two forked runs.
     import os
-    from may.parallel import parallel_map_as_completed
 
     slices = [GeoUnitSlice(['E1']), GeoUnitSlice(['E2'])]
 
-    pids = dict(parallel_map_as_completed(_return_pid, slices, workers=1,
-                                          force_fork=True))
+    pids = dict(parallel_map_in_order(_return_pid, slices, workers=1,
+                                      force_fork=True))
 
     assert os.getpid() not in pids.values()
 
 
-def test_as_completed_hands_over_fast_slices_before_the_slow_one_finishes():
+def test_in_order_hands_over_a_finished_slice_while_later_ones_run():
     # The point of the entry point: a caller must be able to apply a finished
-    # Slice while a long-running sibling is still in flight. The slow Slice is
-    # dispatched first, so under `parallel_map`'s all-or-nothing return nothing
-    # at all would be available until it completed.
+    # Slice while a long-running sibling is still in flight. Under
+    # `parallel_map`'s all-or-nothing return nothing at all would be available
+    # until the slow one completed. Ordering does not cost this — only Slices
+    # *behind* the one being handed over are waited on, never ones ahead.
     import time
-    from may.parallel import parallel_map_as_completed
 
-    slices = [GeoUnitSlice(['SLOW']), GeoUnitSlice(['E2']), GeoUnitSlice(['E3'])]
+    slices = [GeoUnitSlice(['E1']), GeoUnitSlice(['E2']), GeoUnitSlice(['SLOW'])]
 
     started = time.monotonic()
-    stream = parallel_map_as_completed(_sleep_if_slow, slices, workers=3)
+    stream = parallel_map_in_order(_sleep_if_slow, slices, workers=3)
     first_index, first_result = next(stream)
     elapsed = time.monotonic() - started
 
-    assert first_result != 'SLOW'
+    assert (first_index, first_result) == (0, 'E1')
     assert elapsed < 2.0
     list(stream)  # drain so the pool shuts down cleanly
+
+
+def test_in_order_yields_slices_in_input_order_however_they_finish():
+    # Phase 6. The as-completed stream left the caller to reorder, and a caller
+    # that must apply in input order has nowhere to hold an early result but an
+    # unbounded buffer of its own. Yielding in input order moves that buffer
+    # inside the pool, where dispatch can bound it. The slow Slice is first, so
+    # a stream that yielded on completion would put it last.
+    from may.parallel import parallel_map_in_order
+
+    slices = [GeoUnitSlice(['SLOW']), GeoUnitSlice(['E2']), GeoUnitSlice(['E3'])]
+
+    yielded = list(parallel_map_in_order(_sleep_if_slow, slices, workers=3))
+
+    assert yielded == [(0, 'SLOW'), (1, 'E2'), (2, 'E3')]
+
+
+def _record_completion(unit_slice, rng):
+    """Worker that reports when it *finished*. A finished Slice whose turn to
+    be applied has not come is exactly a result the parent is holding, so
+    counting completions counts the buffer."""
+    import time
+    if unit_slice.unit_codes[0] == 'SLOW':
+        time.sleep(2.0)
+    _COMPLETED.append(unit_slice.unit_codes[0])
+    return unit_slice.unit_codes[0]
+
+
+def test_in_order_dispatches_no_further_ahead_than_the_look_ahead():
+    # Phase 6. `imap_unordered` drained its input eagerly in a feeder thread,
+    # so "at most pool-size Slices in flight" was never true: behind one slow
+    # Slice every later Slice ran to completion and its result waited in
+    # memory to be applied (ADR-0010's accepted gap). Throttling dispatch is
+    # what makes the bound real, and completions are how it shows — a Slice
+    # that has finished but cannot be applied yet *is* the buffer.
+    import multiprocessing as mp
+
+    global _COMPLETED
+    manager = mp.get_context('fork').Manager()
+    _COMPLETED = manager.list()
+
+    slices = [GeoUnitSlice(['SLOW'])] + [GeoUnitSlice([f'E{index}'])
+                                         for index in range(40)]
+    stream = parallel_map_in_order(_record_completion, slices, workers=4,
+                                   look_ahead=3)
+    try:
+        assert next(stream) == (0, 'SLOW')
+        # The head plus at most the two the look-ahead allowed past it.
+        assert len(_COMPLETED) <= 3, list(_COMPLETED)
+    finally:
+        stream.close()
+        manager.shutdown()
