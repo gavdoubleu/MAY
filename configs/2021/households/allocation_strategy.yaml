@@ -5,6 +5,15 @@
 
 enabled: true
 
+# Geographical level the outer allocation loop iterates over. Unset defaults to
+# the largest configured level (XLGU, 9 England units), which caps the loop at 9
+# independent units. LGU gives 309 — enough per-unit work to amortise dispatch
+# against a pool of 8-32 workers, without MGU's 6,856 units of overhead.
+# Changing this changes the world by design: the per-unit random stream is
+# seeded from the unit code, so LGU codes give a different (equally valid)
+# world than XLGU codes. Gated on Tier-2 statistical equivalence, not bit-for-bit.
+loop_level: "LGU"
+
 # ALLOCATION STEPS
 # Steps are executed in order. Each step can be either:
 #   - type: "household" - Allocate people to households
