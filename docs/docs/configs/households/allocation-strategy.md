@@ -13,7 +13,7 @@ Defines the complete ordered sequence of allocation steps executed during world 
 |---|---|
 | `enabled` | Activates household allocation; set `false` to skip entirely |
 | `loop_level` | Geography level the outer allocation loop runs over |
-| `flush_per_unit` | Stage each unit's household membership to disk as it completes |
+| `pending_flush_member_bound` | How much household membership to hold live before staging a batch to disk |
 | `steps` | Ordered list of allocation steps; five step types are available |
 
 ---
@@ -49,25 +49,78 @@ venue spans several loop units and cannot be filled by any one of them.
 
 ---
 
-## `flush_per_unit`
+## `pending_flush_member_bound`
 
 ```yaml
-flush_per_unit: true
+pending_flush_member_bound: 250000
 ```
 
-Once a unit's steps finish, write the household membership it created to
-staging and free it from memory. Peak memory then holds roughly one unit's
-households instead of the whole world's. The final export reads the staged
-batches back, so the exported file is unchanged.
+How many members of household membership the run may hold live before it
+writes. Once a unit's steps finish, the membership it created becomes
+eligible to stage; eligible membership accumulates until it reaches this
+many members, at which point the lot is written to staging in one batch and
+freed from memory. Whatever is left over is staged at the end of allocation.
+
+Counted in **members**, not units, subsets or bytes — the count is what the
+deferral actually holds in memory, and it is comparable between a dense
+urban unit and a rural one, so a swept value carries between regions.
+
+Omit the key to hold every household's membership live until the final
+export: no staging happens during allocation and peak memory holds the whole
+world's households. That is the default, and the fastest shape when memory
+allows it. `1` stages a batch at every unit that created a household — the
+lowest peak, and the most write calls. Values between trade one against the
+other.
 
 Requires serialization to be enabled — staging is written beside the
 canonical `.h5` file, and a run without one raises rather than silently
-skipping the flush. Defaults to `false`.
+skipping the flush. Values that are not positive integers are rejected at
+load, `true` included.
 
-Flushed membership is gone from memory: a subset's `.members` raises
+Two consequences make the bound easy to misuse:
+
+- **The bound is a floor, not a target.** A unit's households can only be
+  staged once *every* step of that unit has run: `household_excess`,
+  `household_overflow` and `household_promotion` all add people to
+  households created by earlier steps of the same unit. A loop unit is
+  therefore atomic — a batch never splits one — and the bound can only make
+  flushes rarer than one per unit, never more frequent. Allocation-stage
+  peak is roughly `bound + the largest single unit's membership`, and no
+  bound drives it lower.
+- **The bound only bites where `loop_level` is fine.** With `loop_level`
+  unset it defaults to the largest configured level (XLGU), which is 9 units
+  for England — at that level any bound below about 10⁶ members never binds
+  at all, and the run behaves as if the key were omitted. Set `loop_level`
+  to a level whose units are small relative to the bound.
+
+Values are interchangeable for output: the bound changes which subsets are
+grouped into which batch and nothing else, so exports are bit-identical
+across bounds and a value can be swept on a target machine without
+re-validating the world. This does **not** extend to `loop_level`, which
+changes the RNG partition and so changes the world.
+
+Staged membership is gone from memory: a subset's `.members` raises
 `FlushedPropertyError` afterwards. Anything needing it must ask the
 serializer (`get_staged_member_ids`, `get_staged_members`). Attribute
-assignment reads the population directly and is unaffected.
+assignment reads the population directly and is unaffected. The final export
+reads the staged batches back, so the exported file is unchanged.
+
+### Measuring it
+
+Every run with serialization enabled ends allocation with one summary line
+at INFO:
+
+```
+[FLUSH] calls=6856 members=56287913 seconds=214.106 max_batch_members=31142
+```
+
+`calls` is the number of staging calls, `members` the total membership
+written (constant across bounds), `seconds` their wall clock, and
+`max_batch_members` the largest single batch. Sweeping the bound holds
+`members` fixed while `calls` moves by orders of magnitude, which separates
+per-call cost from per-member cost. A run with the key omitted reports its
+zeroes, and is the control the sweep is compared against. At DEBUG the same
+four counters are emitted per call (`[FLUSH] call=…`).
 
 ---
 
