@@ -7,7 +7,7 @@ This module also contains setup functions for orchestrating world creation.
 
 import logging
 from typing import Optional, Set
-from may.residence.household_distributor import HouseholdDistributor
+from may.residence.household_distributor import HouseholdDistributor, HouseholdError
 from may.residence.allocation_strategy import execute_allocation_strategy
 from may.utils import path_resolver as pr
 from random import sample
@@ -172,7 +172,8 @@ class World:
 
         return stats
 
-    def assign_attributes(self, config_path: str, geo_units: Optional[Set[str]] = None):
+    def assign_attributes(self, config_path: str, geo_units: Optional[Set[str]] = None,
+                          workers: Optional[int] = None):
         """
         Assign attributes to all people in the world.
 
@@ -182,6 +183,9 @@ class World:
         Args:
             config_path: Path to attribute assignment YAML config file
             geo_units: Optional set of geo unit codes to preload data for
+            workers: Process-pool size, from the world config's
+                `parallel.workers`. None keeps this stage's own default, which
+                is the SLURM allocation and then the machine's CPU count.
 
         Returns:
             Dictionary with assignment statistics
@@ -211,7 +215,8 @@ class World:
             venue_manager=self.venues,
             config_path=config_path,
             geo_units=geo_units,
-            population=self.population
+            population=self.population,
+            workers=workers
         )
 
         return stats
@@ -408,8 +413,34 @@ def _household_membership_is_staged(households):
     return False
 
 
+def resolve_configured_workers(config):
+    """Pool size from the world config's `parallel:` block, or None.
+
+    One dial for both parallelised stages — residence allocation and attribute
+    assignment — because both fork from the same process on the same node, and
+    an operator sizing a job from its SLURM allocation is answering one
+    question, not two.
+
+    None means "leave each stage on its own default", which is deliberately not
+    the same for both: attribute assignment takes the SLURM allocation or the
+    machine, residence allocation takes one worker until its per-worker
+    footprint has been measured at scale. A run that has asked for nothing
+    should not have either moved under it.
+    """
+    workers = (config or {}).get("parallel", {}).get("workers")
+    if workers is None:
+        return None
+    if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
+        raise HouseholdError(
+            f"parallel.workers must be a positive whole number of worker "
+            f"processes, not {workers!r}; omit the key to leave each stage on "
+            f"its own default"
+        )
+    return workers
+
+
 def setup_households(geo, population, venues, config, strategy_file=None,
-                     world=None):
+                     world=None, workers=None):
     """
     Setup and distribute households based on configuration.
 
@@ -432,6 +463,10 @@ def setup_households(geo, population, venues, config, strategy_file=None,
         world: The World being built, when one exists. Supplies the subset
             flusher a `memory_budget_mb` strategy needs; without it
             such a strategy is a config error.
+        workers: Process-pool size for the geo-unit loop, from the world
+            config's `parallel.workers`. None keeps this stage's own default
+            of one worker — it forks a whole world per worker, and its
+            per-worker footprint has not been measured at scale.
 
     Returns:
         HouseholdDistributor object with allocated households
@@ -477,6 +512,7 @@ def setup_households(geo, population, venues, config, strategy_file=None,
             strategy_file,
             export_debug_csv=debug_outputs_enabled,
             subset_flusher=subset_flusher,
+            workers=workers if workers is not None else 1,
         )
 
     # Show where households are located and examples

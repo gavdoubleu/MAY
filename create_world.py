@@ -10,7 +10,7 @@ import yaml
 from may.config_loader import setup_geography
 from may.geography import VenueManager, VenueError
 from may.population import PopulationManager, PopulationError
-from may.world import World, setup_households
+from may.world import World, setup_households, resolve_configured_workers
 from may.residence.household_distributor import HouseholdError
 from may.attribute_assignment import AttributeAssignmentError
 from may.venue_distributor import VenueDistributor
@@ -238,6 +238,11 @@ def main():
     # This replaces the separate "attributes" and "venue_pipeline" sections if "timeline" is present.
     
     timeline_config = config.get("timeline", {})
+    # Read once, before any step runs: a bad pool size should stop the run
+    # before it has spent an hour building a population.
+    configured_workers = resolve_configured_workers(config)
+    if configured_workers is not None:
+        logger.info(f"Parallel stages will run across {configured_workers} worker(s)")
 
     if timeline_config.get("enabled", False) and timeline_config.get("steps"):
         logger.info("")
@@ -280,7 +285,8 @@ def main():
                 try:
                     world.household_distributor = setup_households(
                         geo, population, venues, config,
-                        strategy_file=step_config, world=world
+                        strategy_file=step_config, world=world,
+                        workers=configured_workers
                     )
                 except HouseholdError as e:
                     logger.error(f"Household allocation failed: {e}")
@@ -290,7 +296,8 @@ def main():
                 logger.info("")
                 logger.info(f"[ATTRIBUTE] {step_config}")
                 try:
-                    world.assign_attributes(step_config)
+                    world.assign_attributes(step_config,
+                                            workers=configured_workers)
                 except AttributeAssignmentError as e:
                     logger.error(f"Attribute assignment failed: {e}")
                     sys.exit(1)

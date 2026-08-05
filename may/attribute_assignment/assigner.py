@@ -27,7 +27,7 @@ class AttributeAssignmentError(Exception):
 
 
 def assign_attributes(venue_manager, config_path: str, geo_units: Optional[set] = None,
-                      population=None) -> Dict[str, Any]:
+                      population=None, workers: Optional[int] = None) -> Dict[str, Any]:
     """
     Convenience function to assign attributes to a population.
 
@@ -37,6 +37,8 @@ def assign_attributes(venue_manager, config_path: str, geo_units: Optional[set] 
         geo_units: Optional set of geo unit codes to preload data for
         population: Population manager; required for person-level assignment,
             which collects people from it rather than from venue membership
+        workers: Process-pool size. None resolves to the SLURM allocation,
+            then the machine's CPU count.
 
     Returns:
         Assignment statistics dictionary
@@ -63,7 +65,8 @@ def assign_attributes(venue_manager, config_path: str, geo_units: Optional[set] 
 
     # Create assigner and run
     assigner = AttributeAssigner(config, data_manager)
-    stats = assigner.assign_all(venue_manager, population=population)
+    stats = assigner.assign_all(venue_manager, population=population,
+                               workers=workers)
 
     return stats
 class AttributeAssigner:

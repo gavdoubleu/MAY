@@ -19,6 +19,7 @@ The master configuration file. Entry point for every simulation section — each
 | `population` | Population data source and mode |
 | `venues` | Venue data directory and type catalogue |
 | `households` | Household allocation configuration |
+| `parallel` | Worker-pool size for the parallelised stages |
 | `debug_outputs` | Optional auxiliary CSV exports |
 | `timeline` | Ordered pipeline of attribute, distributor, and child-creator steps |
 | `relationship_pipeline` | Social network construction |
@@ -131,6 +132,43 @@ Three allocation modes are selected by which optional files are set:
 | Single-pass (simple) | Set both `strategy_file` and `rounds_file` to `null` |
 
 `export_file` is optional; when set, household allocation results are written there.
+
+---
+
+## `parallel`
+
+```yaml
+parallel:
+  workers: 16
+```
+
+How many worker processes the parallelised stages fork. One dial for both of
+them — residence allocation and attribute assignment — because both fork from
+the same process on the same node, and an operator sizing a job from its SLURM
+allocation is answering one question, not two. Set it to the CPU allocation the
+job was granted.
+
+Omit the key to leave each stage on its own default, which is deliberately not
+the same for both:
+
+| Stage | Default when `parallel.workers` is unset |
+|---|---|
+| Attribute assignment | `SLURM_CPUS_PER_TASK`, then the machine's CPU count |
+| Residence allocation | 1 |
+
+Residence allocation is conservative because each worker forks a copy of the
+whole world, and copy-on-write is undone by CPython's refcounting as the worker
+touches objects — so a pool costs roughly a world per worker at a scale where
+one world is already the binding constraint. That figure has not been measured
+at England scale; until it has, widening this pool is a deliberate act. Memory
+during that stage is defended by
+[`memory_budget_mb`](households/allocation-strategy.md), which flushes
+household membership to disk as the run approaches its budget, rather than by
+refusing to parallelise.
+
+Values that are not positive whole numbers are rejected before the run starts,
+`true` and `0` included — a pool size nobody can name is a config error, not a
+default to fall back to silently.
 
 ---
 
