@@ -18,6 +18,7 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 from .venue_allocator import _allocate_to_venue_type
 from .household_distributor import HouseholdError
 from .composition_pattern import CompositionPattern
+from .pending_flush_buffer import PendingFlushBuffer
 from may.utils import path_resolver as pr
 
 logger = logging.getLogger("allocation_strategy")
@@ -32,9 +33,9 @@ def _household_venue_count(venues) -> int:
 
 
 def _new_household_subset_keys(venues, count_before_unit, scope_sgu_codes,
-                               unit_code) -> List[Tuple[int, int]]:
-    """Subset keys of the households created during the geo unit that just
-    finished.
+                               unit_code) -> Tuple[List[Tuple[int, int]], int]:
+    """Subset keys, and their total membership, of the households created
+    during the geo unit that just finished.
 
     Households are appended to the venue manager's per-type dict in creation
     order, so the unit's own are its tail — walked backwards so the cost is
@@ -42,10 +43,14 @@ def _new_household_subset_keys(venues, count_before_unit, scope_sgu_codes,
     checked against the unit's scope: if anything ever removes a household
     mid-run the tail arithmetic would silently pick the wrong venues, and
     staging the wrong membership is not a failure worth discovering later.
+
+    The member count is free here — each `Subset` is already in hand — and
+    it is the quantity a flush costs and a deferral holds in memory.
     """
     households = venues.venues_by_type_and_id.get(HOUSEHOLD_VENUE_TYPE, {})
     new_household_count = len(households) - count_before_unit
     subset_keys = []
+    member_count = 0
     for venue in islice(reversed(households.values()), new_household_count):
         if venue.geographical_unit.name not in scope_sgu_codes:
             raise HouseholdError(
@@ -55,9 +60,10 @@ def _new_household_subset_keys(venues, count_before_unit, scope_sgu_codes,
                 f"households it created — the venue manager's household "
                 f"ordering cannot be trusted to stage per-unit batches."
             )
-        subset_keys.extend((venue.id, subset.subset_index)
-                           for subset in venue.subsets.values())
-    return subset_keys
+        for subset in venue.subsets.values():
+            subset_keys.append((venue.id, subset.subset_index))
+            member_count += len(subset.members)
+    return subset_keys, member_count
 
 
 def execute_allocation_strategy(population,
@@ -87,8 +93,9 @@ def execute_allocation_strategy(population,
             When None, seed 0 is used — matching the historical default.
         subset_flusher: Callable (venue_type, subset_keys) staging a batch of
             subsets and gutting them. Required when the strategy sets
-            `flush_per_unit: true`; called once per geo unit with the
-            household subsets that unit created.
+            `pending_flush_member_bound`; called with whole units' household
+            subsets whenever they total that many members, and once more at
+            end of allocation for the residue.
 
     Returns:
         dict: Complete statistics for all steps, aggregated across units
@@ -132,13 +139,31 @@ def execute_allocation_strategy(population,
 
     _validate_step_names_are_unique(steps, strategy_file)
 
-    flush_per_unit = strategy.get('flush_per_unit', False)
-    if flush_per_unit and subset_flusher is None:
+    # Members of household membership held live rather than staged. Unset
+    # means no buffering is wired at all and membership stays live to the
+    # terminal whole-world flush; see docs/adr/parallelising_adrs/0008.
+    member_bound = strategy.get('pending_flush_member_bound')
+    if member_bound is not None and (isinstance(member_bound, bool)
+                                     or not isinstance(member_bound, int)
+                                     or member_bound < 1):
         raise HouseholdError(
-            f"flush_per_unit: true in {strategy_file} requires serialization "
-            f"to be enabled: staged subsets are written beside the canonical "
-            f"HDF5 file, which does not exist for this run"
+            f"pending_flush_member_bound in {strategy_file} must be a "
+            f"positive count of members, not {member_bound!r}; omit the key "
+            f"to hold every household's membership live until export"
         )
+    if member_bound is not None and subset_flusher is None:
+        raise HouseholdError(
+            f"pending_flush_member_bound in {strategy_file} requires "
+            f"serialization to be enabled: staged subsets are written beside "
+            f"the canonical HDF5 file, which does not exist for this run"
+        )
+
+    # Present whenever staging is possible, so a run that deliberately never
+    # flushes reports its zero — that run is the control a sweep is compared
+    # against, and a missing row is not the same as a zero one
+    pending_flush = (PendingFlushBuffer(subset_flusher, logger,
+                                        bound=member_bound or 1)
+                     if subset_flusher is not None else None)
 
     # Cheap config checks above run first; the three below parse the pattern
     # vocabulary, read the mixture CSV off disk and scan venues respectively,
@@ -232,19 +257,27 @@ def execute_allocation_strategy(population,
             _merge_step_stats(accumulated, stats)
             logger.info("")
 
-        if flush_per_unit:
-            subset_keys = _new_household_subset_keys(
+        if member_bound is not None:
+            subset_keys, member_count = _new_household_subset_keys(
                 venues, household_count_before_unit, scope_sgu_codes, unit_code)
             if subset_keys:
-                subset_flusher(HOUSEHOLD_VENUE_TYPE, subset_keys)
-                logger.info(f"[{unit_code}] Flushed {len(subset_keys)} household "
-                            f"subsets to staging")
+                # Offered, not flushed: whether this unit's membership is
+                # written now or held for a later batch is the buffer's call
+                pending_flush.offer(HOUSEHOLD_VENUE_TYPE, subset_keys,
+                                    member_count)
+                logger.info(f"[{unit_code}] Offered {len(subset_keys)} household "
+                            f"subsets ({member_count:,} members) to the "
+                            f"pending-flush buffer")
 
         if unit_index % progress_interval == 0 or unit_index == total_units:
             percent_complete = (unit_index / total_units) * 100
             logger.info(f"Geo-unit progress: {unit_index}/{total_units} "
                         f"({percent_complete:.1f}%) - "
                         f"{len(household_distributor.allocated_people):,} people allocated")
+
+    if pending_flush is not None:
+        pending_flush.drain()
+        pending_flush.log_summary()
 
     # Clear the scope so any later use of the distributor sees the whole world
     household_distributor.set_geo_unit_scope(None)

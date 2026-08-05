@@ -430,8 +430,8 @@ def setup_households(geo, population, venues, config, strategy_file=None,
             the timeline. When ``None`` (e.g. a direct programmatic caller),
             falls back to ``config["households"]["strategy_file"]``.
         world: The World being built, when one exists. Supplies the subset
-            flusher a `flush_per_unit: true` strategy needs; without it such
-            a strategy is a config error.
+            flusher a `pending_flush_member_bound` strategy needs; without it
+            such a strategy is a config error.
 
     Returns:
         HouseholdDistributor object with allocated households
@@ -461,8 +461,8 @@ def setup_households(geo, population, venues, config, strategy_file=None,
 
     debug_outputs_enabled = config.get("debug_outputs", {}).get("enabled", False)
 
-    # Only offered when serialization is live; the strategy raises if it
-    # asked for flush_per_unit and there is nothing to stage into.
+    # Only offered when serialization is live; the strategy raises if it set
+    # a pending-flush bound and there is nothing to stage into.
     subset_flusher = (world.flush_subsets_batch
                       if world is not None and world._serializer is not None
                       else None)
@@ -495,9 +495,9 @@ def setup_households(geo, population, venues, config, strategy_file=None,
     logger.info("  2. venues.get_venue_by_type_and_id('household', id)  -> Specific household by ID")
     logger.info("")
 
-    # The illustrative logging below walks household members, which a
-    # flush_per_unit run has already staged and freed. Skip it rather than
-    # read membership back off disk purely to print five examples.
+    # The illustrative logging below walks household members, which a run
+    # with a pending-flush bound has already staged and freed. Skip it rather
+    # than read membership back off disk purely to print five examples.
     membership_staged = _household_membership_is_staged(all_households)
     if membership_staged:
         logger.info("Household membership was flushed to staging during "
