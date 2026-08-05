@@ -329,6 +329,30 @@ class TestInvalidBounds:
             )
 
 
+    def test_the_deleted_flush_per_unit_key_raises(
+        self, hd, population_manager, venue_manager,  # noqa: F811
+        geography, tmp_path
+    ):
+        """`flush_per_unit` is gone, not renamed.
+
+        Honouring a stale config by ignoring it is the worst outcome: the
+        run holds the whole world's membership live to export — the OOM the
+        bound exists to prevent — and reports `calls=0` while doing it.
+        """
+        world = build_world(population_manager, venue_manager, geography, tmp_path)
+        strategy_file = write_strategy(tmp_path, loop_level="SGU",
+                                       flush_per_unit=True)
+
+        with pytest.raises(HouseholdError, match="flush_per_unit"):
+            execute_allocation_strategy(
+                population=population_manager,
+                venues=venue_manager,
+                household_distributor=hd,
+                strategy_file=strategy_file,
+                subset_flusher=world.flush_subsets_batch,
+            )
+
+
 class TestExportCoversTheStagedCohort:
 
     def test_export_writes_every_staged_household(self, tmp_path):

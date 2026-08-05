@@ -139,6 +139,16 @@ def execute_allocation_strategy(population,
 
     _validate_step_names_are_unique(steps, strategy_file)
 
+    # A stale key is not ignorable here: the run would hold the whole
+    # world's membership live to export — the blow-up the bound exists to
+    # prevent — and report `calls=0` while doing it
+    if 'flush_per_unit' in strategy:
+        raise HouseholdError(
+            f"flush_per_unit in {strategy_file} was removed; use "
+            f"pending_flush_member_bound: 1 for the same per-unit cadence, "
+            f"or omit the key to hold membership live until export"
+        )
+
     # Members of household membership held live rather than staged. Unset
     # means no buffering is wired at all and membership stays live to the
     # terminal whole-world flush; see docs/adr/parallelising_adrs/0008.

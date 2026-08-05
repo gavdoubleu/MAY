@@ -87,11 +87,14 @@ Two consequences make the bound easy to misuse:
   flushes rarer than one per unit, never more frequent. Allocation-stage
   peak is roughly `bound + the largest single unit's membership`, and no
   bound drives it lower.
-- **The bound only bites where `loop_level` is fine.** With `loop_level`
-  unset it defaults to the largest configured level (XLGU), which is 9 units
-  for England — at that level any bound below about 10⁶ members never binds
-  at all, and the run behaves as if the key were omitted. Set `loop_level`
-  to a level whose units are small relative to the bound.
+- **Below one unit's membership every bound behaves alike.** With
+  `loop_level` unset it defaults to the largest configured level (XLGU),
+  which is 9 units for England — at that level any bound below about 10⁶
+  members is crossed by every single offer, so all of them flush once per
+  unit and no value between them is distinguishable. That is the lowest
+  peak the level allows (one unit live rather than nine), not a no-op; to
+  tune any finer, set `loop_level` to a level whose units are small
+  relative to the bound.
 
 Values are interchangeable for output: the bound changes which subsets are
 grouped into which batch and nothing else, so exports are bit-identical
@@ -114,7 +117,8 @@ at INFO:
 [FLUSH] calls=6856 members=56287913 seconds=214.106 max_batch_members=31142
 ```
 
-`calls` is the number of staging calls, `members` the total membership
+`calls` is the number of batches staged — one per cut, however many venue
+types that cut spanned — `members` the total membership
 written (constant across bounds), `seconds` their wall clock, and
 `max_batch_members` the largest single batch. Sweeping the bound holds
 `members` fixed while `calls` moves by orders of magnitude, which separates
