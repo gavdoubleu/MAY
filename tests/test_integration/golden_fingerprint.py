@@ -22,6 +22,7 @@ import json
 import os
 
 from may.geography import Geography
+from may.geography.venue import Venue
 from may.geography.venue_manager import VenueManager
 from may.population.population import PopulationManager
 from may.residence.allocation_strategy import execute_allocation_strategy
@@ -63,6 +64,37 @@ def _build_world():
     household_distributor.load_household_data("households.csv")
 
     return population_manager, venue_manager, household_distributor
+
+
+def build_world_with_stable_venue_ids():
+    """A stress world whose pre-existing venue ids do not depend on the session.
+
+    `Venue._next_venue_id` is a process-global that no fixture resets, so two
+    worlds built in one session number their care homes differently. Any gate
+    that compares two separately built worlds by venue id — a mutation plan
+    names pre-existing venues that way — needs them to agree.
+    """
+    Venue.reset_id_counter()
+    return _build_world()
+
+
+def resident_slots(venue_manager):
+    """Every venue's `residents` / `residents_<column>` lists, as person ids.
+
+    `fingerprint_venues` digests subsets only, so these lists — which
+    `venue_allocator` keeps in parallel with them, holding live people — would
+    otherwise be outside every gate.
+    """
+    return {venue.id: {key: [person.id for person in value]
+                       for key, value in venue.properties.items()
+                       if key == 'residents' or key.startswith('residents_')}
+            for venues_by_id in venue_manager.venues_by_type_and_id.values()
+            for venue in venues_by_id.values()}
+
+
+def person_properties(population_manager):
+    return {person.id: person.properties
+            for person in population_manager.get_all_people()}
 
 
 def _strategy_file_at_loop_level(loop_level, tmp_dir):

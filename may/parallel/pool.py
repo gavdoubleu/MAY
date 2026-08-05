@@ -69,8 +69,8 @@ def parallel_map(worker_fn: Callable, slices: Sequence[Slice], *,
 
 
 def parallel_map_as_completed(worker_fn: Callable, slices: Sequence[Slice], *,
-                              global_seed: int = 0,
-                              workers: int = None) -> Iterator[Tuple[int, Any]]:
+                              global_seed: int = 0, workers: int = None,
+                              force_fork: bool = False) -> Iterator[Tuple[int, Any]]:
     """As `parallel_map`, but yields `(slice_index, result)` pairs as they
     complete rather than returning every result at once.
 
@@ -83,13 +83,22 @@ def parallel_map_as_completed(worker_fn: Callable, slices: Sequence[Slice], *,
     what lets a caller that needs a canonical apply order reorder them itself.
     A separate entry point rather than a flag on `parallel_map` so Phase 3's
     callers keep their ordered-list contract untouched.
+
+    `force_fork` suppresses the in-process shortcut below. A worker that
+    *mutates* a world and returns a description of what it did needs that world
+    to be a throwaway copy: run in-process it would change the caller's world
+    as well as report the change, and the caller would apply it twice. Such a
+    caller must fork at every worker count, which also makes its one-worker run
+    a genuine control for its many-worker run rather than a different code path.
     """
     payloads = [(slice_index, (worker_fn, unit_slice, global_seed))
                 for slice_index, unit_slice in enumerate(slices)]
-    worker_count = min(resolve_worker_count(workers), len(payloads)) if payloads else 0
+    if not payloads:
+        return
+    worker_count = min(resolve_worker_count(workers), len(payloads))
     # Single worker runs in-process, lazily — same seeding, no fork, and the
     # caller still sees results one at a time (here, in input order).
-    if worker_count <= 1:
+    if worker_count <= 1 and not force_fork:
         for payload in payloads:
             yield _seed_and_invoke_indexed(payload)
         return

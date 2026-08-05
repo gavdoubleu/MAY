@@ -180,6 +180,23 @@ def test_as_completed_seeds_each_slice_exactly_as_parallel_map():
         assert [streamed[index] for index in range(len(slices))] == ordered
 
 
+def test_as_completed_can_be_forced_to_fork_at_one_worker():
+    # Phase 5's geo loop mutates a world inside the worker and hands the parent
+    # a plan to replay. In-process that double-applies — the parent's own world
+    # would be mutated *and* replayed on top — so the caller must be able to
+    # demand real isolation whatever the worker count. It is also what makes
+    # the W=1-vs-W=N comparison a comparison of two forked runs.
+    import os
+    from may.parallel import parallel_map_as_completed
+
+    slices = [GeoUnitSlice(['E1']), GeoUnitSlice(['E2'])]
+
+    pids = dict(parallel_map_as_completed(_return_pid, slices, workers=1,
+                                          force_fork=True))
+
+    assert os.getpid() not in pids.values()
+
+
 def test_as_completed_hands_over_fast_slices_before_the_slow_one_finishes():
     # The point of the entry point: a caller must be able to apply a finished
     # Slice while a long-running sibling is still in flight. The slow Slice is

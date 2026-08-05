@@ -1722,6 +1722,35 @@ class HouseholdDistributor:
 
         return filtered
 
+    def drain_target_pattern_tallies(self) -> Dict[str, Dict[str, List[str]]]:
+        """Take the target-pattern tallies accumulated so far, leaving none.
+
+        The loop unit that accumulates these runs in a forked worker whose
+        distributor dies with it, so they have to be handed back and merged
+        into the parent's before `report_unmatched_target_patterns` can say
+        anything about the world. Sets become sorted lists: the result crosses
+        a pickle boundary and nothing downstream needs the order to vary.
+        """
+        tallies = {
+            'requested': {pattern_property: sorted(patterns) for pattern_property,
+                          patterns in self._target_patterns_requested.items()},
+            'matched': {pattern_property: sorted(patterns) for pattern_property,
+                        patterns in self._target_patterns_matched.items()},
+        }
+        self._target_patterns_requested.clear()
+        self._target_patterns_matched.clear()
+        return tallies
+
+    def merge_target_pattern_tallies(
+            self, tallies: Dict[str, Dict[str, List[str]]]) -> None:
+        """Fold one loop unit's drained tallies into this distributor's."""
+        for pattern_property, patterns in tallies['requested'].items():
+            self._target_patterns_requested.setdefault(
+                pattern_property, set()).update(patterns)
+        for pattern_property, patterns in tallies['matched'].items():
+            self._target_patterns_matched.setdefault(
+                pattern_property, set()).update(patterns)
+
     def report_unmatched_target_patterns(self) -> None:
         """Warn once about target patterns that matched no household anywhere.
 

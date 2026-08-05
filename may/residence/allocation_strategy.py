@@ -19,7 +19,9 @@ from .venue_allocator import _allocate_to_venue_type
 from .household_distributor import HouseholdError
 from .composition_pattern import CompositionPattern
 from .pending_flush_buffer import PendingFlushBuffer
-from .unit_mutation_plan import UnitMutationCollector
+from .unit_mutation_plan import (UnitMutationCollector, apply_unit_plan,
+                                 index_venues_by_id)
+from may.parallel import GeoUnitSlice, parallel_map_as_completed
 from may.utils import path_resolver as pr
 
 logger = logging.getLogger("allocation_strategy")
@@ -27,6 +29,110 @@ logger = logging.getLogger("allocation_strategy")
 # The venue type per-unit flushing stages: households are what allocation
 # creates, and what dominates peak memory
 HOUSEHOLD_VENUE_TYPE = 'household'
+
+# The world workers read over fork copy-on-write. Published by the parent for
+# the duration of the loop and cleared after; never pickled, never written by
+# a worker in any way the parent is expected to see.
+_ACTIVE_LOOP_CONTEXT = None
+
+
+class _LoopUnitContext:
+    """Everything a loop unit's steps need, held for workers to read on fork.
+
+    A worker is handed only its unit code; the world itself arrives through
+    copy-on-write, which is the whole reason the fork start method is used
+    (ADR-0003). Pickling any of this per unit would cost more than the
+    allocation it enables.
+    """
+
+    __slots__ = ('population', 'venues', 'household_distributor',
+                 'numbered_steps', 'loop_units', 'smallest_level',
+                 'global_seed')
+
+    def __init__(self, population, venues, household_distributor,
+                 numbered_steps, loop_units, smallest_level, global_seed):
+        self.population = population
+        self.venues = venues
+        self.household_distributor = household_distributor
+        self.numbered_steps = numbered_steps
+        self.loop_units = loop_units
+        self.smallest_level = smallest_level
+        self.global_seed = global_seed
+
+
+def _run_one_geo_unit(unit_slice, rng):
+    """Worker: run every allocation step for one loop unit.
+
+    Returns `(plan, stats_by_step, target_pattern_tallies)` — everything the
+    parent needs and nothing that holds a live object. The world this mutates
+    is the worker's private copy and is discarded when it exits; the plan is
+    the only thing that survives.
+
+    The `rng` the pool passes is deliberately unused. This loop's per-unit
+    stream has always been seeded from the unit code (`_stable_unit_digest`),
+    not from the Slice, and it must keep being seeded that way or the
+    restructure would move the world it is supposed to leave alone.
+    """
+    context = _ACTIVE_LOOP_CONTEXT
+    unit_code = unit_slice.unit_codes[0]
+    unit = context.loop_units[unit_code]
+    household_distributor = context.household_distributor
+
+    household_distributor.set_random_generator(np.random.default_rng(
+        np.random.SeedSequence((context.global_seed,
+                                _stable_unit_digest(unit_code)))))
+
+    if unit.level == context.smallest_level:
+        scope_sgu_codes = {unit_code}
+    else:
+        scope_sgu_codes = {descendant.name for descendant
+                           in unit.get_descendants(level=context.smallest_level)}
+    # The unit's whole subtree (any level) — venues may sit between the loop
+    # level and the smallest level
+    scope_geo_unit_names = {unit_code} | {descendant.name for descendant
+                                          in unit.get_descendants()}
+    household_distributor.set_geo_unit_scope(scope_sgu_codes)
+
+    # Collected on every run, not just parallel ones: the diff's allowlist is
+    # what turns an unknown mutation site into a loud single-process failure
+    # instead of a parallel-only divergence.
+    collector = UnitMutationCollector(context.venues, household_distributor,
+                                      unit_code, scope_geo_unit_names)
+
+    logger.info("=" * 60)
+    logger.info(f"Geo unit {unit_code} "
+                f"({len(scope_sgu_codes)} {context.smallest_level} unit(s))")
+    logger.info("=" * 60)
+
+    stats_by_step = {}
+    for step_number, step_name, step_type, step_config in context.numbered_steps:
+        logger.info("-" * 60)
+        logger.info(f"[{unit_code}] Step {step_number}: {step_name} ({step_type})")
+        logger.info("-" * 60)
+
+        description = step_config.get('description')
+        if description:
+            logger.info(f"Description: {description}")
+            logger.info("")
+
+        if step_type == 'household':
+            stats = _execute_household_step(step_config, household_distributor)
+        elif step_type == 'venue':
+            stats = _execute_venue_step(step_config, context.population,
+                                        context.venues, household_distributor,
+                                        scope_geo_unit_names, scope_sgu_codes)
+        elif step_type == 'household_excess':
+            stats = _execute_household_excess_step(step_config, household_distributor)
+        elif step_type == 'household_overflow':
+            stats = _execute_household_overflow_step(step_config, household_distributor)
+        elif step_type == 'household_promotion':
+            stats = _execute_household_promotion_step(step_config, household_distributor)
+
+        stats_by_step[step_name] = stats
+        logger.info("")
+
+    return (collector.collect(), stats_by_step,
+            household_distributor.drain_target_pattern_tallies())
 
 
 def _household_venue_count(venues) -> int:
@@ -67,6 +173,34 @@ def _new_household_subset_keys(venues, count_before_unit, scope_sgu_codes,
     return subset_keys, member_count
 
 
+def _offer_unit_to_pending_flush(pending_flush, venues, household_count_before_unit,
+                                 unit_code, loop_units, smallest_level) -> None:
+    """Offer the households the parent has just created to the flush buffer.
+
+    The scope is recomputed here rather than shipped back from the worker: it
+    is needed only for `_new_household_subset_keys`' safety check, and an LGU's
+    smallest-level codes are a far larger payload than the plan itself. Both
+    the walk and the tail-slicing go away in cycle 5, where the plan's own
+    record of what it created replaces them.
+    """
+    unit = loop_units[unit_code]
+    if unit.level == smallest_level:
+        scope_sgu_codes = {unit_code}
+    else:
+        scope_sgu_codes = {descendant.name for descendant
+                           in unit.get_descendants(level=smallest_level)}
+    subset_keys, member_count = _new_household_subset_keys(
+        venues, household_count_before_unit, scope_sgu_codes, unit_code)
+    if not subset_keys:
+        return
+    # Offered, not flushed: whether this unit's membership is written now or
+    # held for a later batch is the buffer's call
+    pending_flush.offer(HOUSEHOLD_VENUE_TYPE, subset_keys, member_count)
+    logger.info(f"[{unit_code}] Offered {len(subset_keys)} household "
+                f"subsets ({member_count:,} members) to the "
+                f"pending-flush buffer")
+
+
 def execute_allocation_strategy(population,
                                 venues,
                                 household_distributor,
@@ -74,7 +208,8 @@ def execute_allocation_strategy(population,
                                 export_debug_csv: bool = False,
                                 random_seed: Optional[int] = None,
                                 subset_flusher: Optional[Callable] = None,
-                                plan_sink: Optional[Callable] = None):
+                                plan_sink: Optional[Callable] = None,
+                                workers: Optional[int] = None):
     """
     Execute a unified allocation strategy from YAML configuration.
 
@@ -99,10 +234,14 @@ def execute_allocation_strategy(population,
             subsets whenever they total that many members, and once more at
             end of allocation for the residue.
         plan_sink: Callable handed each loop unit's `UnitMutationPlan` as the
-            unit finishes. The seam the parallel dispatcher takes over: from
-            Phase 5 cycle 4 the body runs in a forked worker and the plan is
-            the only thing that comes back, so the parent applies it here
-            instead of the body having already mutated the world.
+            parent applies it, in the loop's own unit order. Diagnostic only —
+            the world is already built by the time it is called.
+        workers: Size of the process pool the loop units run across. None takes
+            the SLURM allocation, then the machine's CPU count. Every worker
+            count forks, one included: a unit's steps run against a throwaway
+            copy of the world, so running them in the parent would apply each
+            unit twice. That makes a one-worker run a true control for a
+            many-worker one rather than a different code path.
 
     Returns:
         dict: Complete statistics for all steps, aggregated across units
@@ -221,85 +360,63 @@ def execute_allocation_strategy(population,
     total_units = len(loop_units)
     progress_interval = max(1, total_units // 10)  # Update every 10%
 
-    for unit_index, (unit_code, unit) in enumerate(loop_units.items(), 1):
-        # Per-unit random stream: derived from the global seed and a stable
-        # digest of the unit code, so results are independent of unit order
-        household_distributor.set_random_generator(np.random.default_rng(
-            np.random.SeedSequence((global_seed, _stable_unit_digest(unit_code)))))
+    # The parent is the sole creator of Venues and the sole minter of their ids
+    # (ADR-0003/0004), so it needs the two indices a plan is resolved through.
+    # The population's own id index is reused rather than copied — at England
+    # scale a second dict over every person is gigabytes for nothing. The venue
+    # index is built once and never goes stale: a plan names only venues that
+    # pre-date the loop, describing its own households rather than naming them.
+    people_by_id = population.people_by_id
+    venues_by_id = index_venues_by_id(venues)
+    unit_slices = [GeoUnitSlice([unit_code]) for unit_code in loop_units]
 
-        if unit.level == smallest_level:
-            scope_sgu_codes = {unit_code}
-        else:
-            scope_sgu_codes = {descendant.name for descendant
-                               in unit.get_descendants(level=smallest_level)}
-        # The unit's whole subtree (any level) — venues may sit between the
-        # loop level and the smallest level
-        scope_geo_unit_names = {unit_code} | {descendant.name for descendant
-                                              in unit.get_descendants()}
-        household_distributor.set_geo_unit_scope(scope_sgu_codes)
+    global _ACTIVE_LOOP_CONTEXT
+    _ACTIVE_LOOP_CONTEXT = _LoopUnitContext(
+        population=population, venues=venues,
+        household_distributor=household_distributor,
+        numbered_steps=numbered_steps, loop_units=loop_units,
+        smallest_level=smallest_level, global_seed=global_seed)
+    try:
+        completed_units: Dict[int, Tuple] = {}
+        next_unit_index = 0
+        for slice_index, outcome in parallel_map_as_completed(
+                _run_one_geo_unit, unit_slices, global_seed=global_seed,
+                workers=workers, force_fork=True):
+            completed_units[slice_index] = outcome
+            # Units finish in whatever order they finish in, but are applied in
+            # the loop's own order and never any other: household ids come from
+            # the parent's counter as it applies, so the apply order *is* the
+            # world's id layout (ADR-0010). Anything not yet reachable waits
+            # here until its predecessor arrives.
+            while next_unit_index in completed_units:
+                unit_plan, stats_by_step, tallies = completed_units.pop(next_unit_index)
+                next_unit_index += 1
 
-        household_count_before_unit = _household_venue_count(venues)
-        # Collected on every run, not just when a sink wants it: the diff's
-        # allowlist is what turns an unknown mutation site into a loud
-        # single-process failure instead of a parallel-only divergence.
-        collector = UnitMutationCollector(venues, household_distributor,
-                                          unit_code, scope_geo_unit_names)
+                household_count_before_unit = _household_venue_count(venues)
+                apply_unit_plan(unit_plan, venues, household_distributor,
+                                people_by_id, venues_by_id)
+                household_distributor.merge_target_pattern_tallies(tallies)
+                for step_number, step_name, step_type, _ in numbered_steps:
+                    accumulated = all_stats.setdefault(
+                        step_name, {'type': step_type, 'step_number': step_number})
+                    _merge_step_stats(accumulated, stats_by_step[step_name])
 
-        logger.info("=" * 60)
-        logger.info(f"Geo unit {unit_index}/{total_units}: {unit_code} "
-                    f"({len(scope_sgu_codes)} {smallest_level} unit(s))")
-        logger.info("=" * 60)
+                if plan_sink is not None:
+                    plan_sink(unit_plan)
 
-        for step_number, step_name, step_type, step_config in numbered_steps:
-            logger.info("-" * 60)
-            logger.info(f"[{unit_code}] Step {step_number}: {step_name} ({step_type})")
-            logger.info("-" * 60)
+                if member_bound is not None:
+                    _offer_unit_to_pending_flush(
+                        pending_flush, venues, household_count_before_unit,
+                        unit_plan.unit_code, loop_units, smallest_level)
 
-            description = step_config.get('description')
-            if description:
-                logger.info(f"Description: {description}")
-                logger.info("")
-
-            # Execute based on type
-            if step_type == 'household':
-                stats = _execute_household_step(step_config, household_distributor)
-            elif step_type == 'venue':
-                stats = _execute_venue_step(step_config, population, venues,
-                                            household_distributor,
-                                            scope_geo_unit_names, scope_sgu_codes)
-            elif step_type == 'household_excess':
-                stats = _execute_household_excess_step(step_config, household_distributor)
-            elif step_type == 'household_overflow':
-                stats = _execute_household_overflow_step(step_config, household_distributor)
-            elif step_type == 'household_promotion':
-                stats = _execute_household_promotion_step(step_config, household_distributor)
-
-            accumulated = all_stats.setdefault(
-                step_name, {'type': step_type, 'step_number': step_number})
-            _merge_step_stats(accumulated, stats)
-            logger.info("")
-
-        unit_plan = collector.collect()
-        if plan_sink is not None:
-            plan_sink(unit_plan)
-
-        if member_bound is not None:
-            subset_keys, member_count = _new_household_subset_keys(
-                venues, household_count_before_unit, scope_sgu_codes, unit_code)
-            if subset_keys:
-                # Offered, not flushed: whether this unit's membership is
-                # written now or held for a later batch is the buffer's call
-                pending_flush.offer(HOUSEHOLD_VENUE_TYPE, subset_keys,
-                                    member_count)
-                logger.info(f"[{unit_code}] Offered {len(subset_keys)} household "
-                            f"subsets ({member_count:,} members) to the "
-                            f"pending-flush buffer")
-
-        if unit_index % progress_interval == 0 or unit_index == total_units:
-            percent_complete = (unit_index / total_units) * 100
-            logger.info(f"Geo-unit progress: {unit_index}/{total_units} "
-                        f"({percent_complete:.1f}%) - "
-                        f"{len(household_distributor.allocated_people):,} people allocated")
+                if (next_unit_index % progress_interval == 0
+                        or next_unit_index == total_units):
+                    percent_complete = (next_unit_index / total_units) * 100
+                    logger.info(f"Geo-unit progress: {next_unit_index}/{total_units} "
+                                f"({percent_complete:.1f}%) - "
+                                f"{len(household_distributor.allocated_people):,} people allocated")
+    finally:
+        _ACTIVE_LOOP_CONTEXT = None
 
     if pending_flush is not None:
         pending_flush.drain()

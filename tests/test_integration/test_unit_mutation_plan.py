@@ -13,30 +13,17 @@ applier bug and nothing else.
 """
 import pytest
 
-from may.geography.venue import Venue
 from may.residence.allocation_strategy import execute_allocation_strategy
 from may.residence.household_distributor import HouseholdError
 from may.residence.unit_mutation_plan import (
     UnitMutationCollector, apply_unit_plan, index_venues_by_id)
 from tests.test_integration.golden_fingerprint import (
-    RANDOM_SEED, _build_world, _strategy_file_at_loop_level, fingerprint_venues)
-
-
-def _build_world_with_stable_venue_ids():
-    """A stress world whose pre-existing venue ids do not depend on the session.
-
-    A plan names pre-existing venues by id, and in production the collector and
-    the applier share one world so that is exact. Here they are three separate
-    worlds, and `Venue._next_venue_id` is a process-global that no fixture
-    resets — so without this every build would number its care homes
-    differently and the replay would not find them.
-    """
-    Venue.reset_id_counter()
-    return _build_world()
+    RANDOM_SEED, _strategy_file_at_loop_level, build_world_with_stable_venue_ids,
+    fingerprint_venues, person_properties, resident_slots)
 
 
 def _run(strategy_file, plan_sink=None):
-    population, venues, household_distributor = _build_world_with_stable_venue_ids()
+    population, venues, household_distributor = build_world_with_stable_venue_ids()
     execute_allocation_strategy(
         population=population,
         venues=venues,
@@ -46,25 +33,6 @@ def _run(strategy_file, plan_sink=None):
         plan_sink=plan_sink,
     )
     return population, venues, household_distributor
-
-
-def _resident_slots(venues):
-    """Every venue's `residents` / `residents_<column>` lists, as person ids.
-
-    `fingerprint_venues` digests subsets only, so these lists — which
-    `venue_allocator` keeps in parallel with them, holding live people — would
-    otherwise be outside the gate entirely.
-    """
-    return {venue.id: {key: [person.id for person in value]
-                       for key, value in venue.properties.items()
-                       if key == 'residents' or key.startswith('residents_')}
-            for venues_by_id in venues.venues_by_type_and_id.values()
-            for venue in venues_by_id.values()}
-
-
-def _person_properties(population):
-    return {person.id: person.properties
-            for person in population.get_all_people()}
 
 
 def test_applying_collected_plans_rebuilds_the_directly_mutated_world(tmp_path):
@@ -83,7 +51,7 @@ def test_applying_collected_plans_rebuilds_the_directly_mutated_world(tmp_path):
     assert any(plan.person_property_updates for plan in plans)
 
     replay_population, replay_venues, replay_distributor = \
-        _build_world_with_stable_venue_ids()
+        build_world_with_stable_venue_ids()
     people_by_id = {person.id: person
                     for person in replay_population.get_all_people()}
     venues_by_id = index_venues_by_id(replay_venues)
@@ -92,15 +60,15 @@ def test_applying_collected_plans_rebuilds_the_directly_mutated_world(tmp_path):
                         people_by_id, venues_by_id)
 
     assert fingerprint_venues(replay_venues) == fingerprint_venues(direct_venues)
-    assert _resident_slots(replay_venues) == _resident_slots(direct_venues)
-    assert _person_properties(replay_population) == _person_properties(direct_population)
+    assert resident_slots(replay_venues) == resident_slots(direct_venues)
+    assert person_properties(replay_population) == person_properties(direct_population)
     assert (replay_distributor.allocated_people
             == direct_distributor.allocated_people)
 
 
 def _collector_over_one_geo_unit():
     """A collector snapshotted over a single SGU of an unallocated world."""
-    population, venues, household_distributor = _build_world_with_stable_venue_ids()
+    population, venues, household_distributor = build_world_with_stable_venue_ids()
     geo_unit_name = next(iter(
         household_distributor.geography.get_units_by_level("SGU")))
     household_distributor.set_geo_unit_scope({geo_unit_name})
