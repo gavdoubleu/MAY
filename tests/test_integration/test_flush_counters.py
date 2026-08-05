@@ -54,7 +54,7 @@ class TestFlushSummary:
         cost from the summary alone."""
         world = build_world(population_manager, venue_manager, geography, tmp_path)
         strategy_file = write_strategy(tmp_path, loop_level="SGU",
-                                       pending_flush_member_bound=1)
+                                       memory_budget_mb=0)
 
         with caplog.at_level(logging.DEBUG, logger="allocation_strategy"):
             execute_allocation_strategy(
@@ -85,7 +85,7 @@ class TestFlushSummary:
         run that flushes every unit stages each of them exactly once."""
         world = build_world(population_manager, venue_manager, geography, tmp_path)
         strategy_file = write_strategy(tmp_path, loop_level="SGU",
-                                       pending_flush_member_bound=1)
+                                       memory_budget_mb=0)
 
         with caplog.at_level(logging.INFO, logger="allocation_strategy"):
             execute_allocation_strategy(
@@ -107,7 +107,7 @@ class TestFlushSummary:
         staging calls rather than of loop units."""
         world = build_world(population_manager, venue_manager, geography, tmp_path)
         strategy_file = write_strategy(tmp_path, loop_level="SGU",
-                                       pending_flush_member_bound=1)
+                                       memory_budget_mb=0)
 
         with caplog.at_level(logging.INFO, logger="allocation_strategy"):
             execute_allocation_strategy(
@@ -131,7 +131,7 @@ class TestFlushSummary:
         already debugging, and would be one line per unit on England."""
         world = build_world(population_manager, venue_manager, geography, tmp_path)
         strategy_file = write_strategy(tmp_path, loop_level="SGU",
-                                       pending_flush_member_bound=1)
+                                       memory_budget_mb=0)
 
         with caplog.at_level(logging.INFO, logger="allocation_strategy"):
             execute_allocation_strategy(

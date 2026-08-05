@@ -13,7 +13,7 @@ Defines the complete ordered sequence of allocation steps executed during world 
 |---|---|
 | `enabled` | Activates household allocation; set `false` to skip entirely |
 | `loop_level` | Geography level the outer allocation loop runs over |
-| `pending_flush_member_bound` | How much household membership to hold live before staging a batch to disk |
+| `memory_budget_mb` | How much memory the run may occupy before staging household membership to disk |
 | `steps` | Ordered list of allocation steps; five step types are available |
 
 ---
@@ -49,56 +49,67 @@ venue spans several loop units and cannot be filled by any one of them.
 
 ---
 
-## `pending_flush_member_bound`
+## `memory_budget_mb`
 
 ```yaml
-pending_flush_member_bound: 250000
+memory_budget_mb: 64000
 ```
 
-How many members of household membership the run may hold live before it
-writes. Once a unit's steps finish, the membership it created becomes
-eligible to stage; eligible membership accumulates until it reaches this
-many members, at which point the lot is written to staging in one batch and
-freed from memory. Whatever is left over is staged at the end of allocation.
+How much memory, in megabytes, the run may occupy before it writes. Once a
+unit's steps finish, the membership it created becomes eligible to stage;
+eligible membership is held while the process still fits the budget, and the
+moment it does not, the lot is written to staging in one batch and freed.
+Whatever is left over is staged at the end of allocation.
 
-Counted in **members**, not units, subsets or bytes — the count is what the
-deferral actually holds in memory, and it is comparable between a dense
-urban unit and a rural one, so a swept value carries between regions.
+Measured in **megabytes of the process's resident set**, read from
+`/proc/self/statm` at every offer. The reading is the parent's own, because
+the parent is what creates households as it applies each unit's plan, and its
+own resident set is the only thing staging a batch can give back. Set it from
+what the machine grants the job — the sbatch `--mem` flag, less whatever
+headroom the run needs for export.
 
 Omit the key to hold every household's membership live until the final
 export: no staging happens during allocation and peak memory holds the whole
 world's households. That is the default, and the fastest shape when memory
-allows it. `1` stages a batch at every unit that created a household — the
-lowest peak, and the most write calls. Values between trade one against the
-other.
+allows it. `0` stages a batch at every unit that created a household — the
+lowest peak, and the most write calls — because no process fits in zero
+megabytes. Values between trade one against the other.
 
 Requires serialization to be enabled — staging is written beside the
 canonical `.h5` file, and a run without one raises rather than silently
-skipping the flush. Values that are not positive integers are rejected at
+skipping the flush. Values that are not non-negative numbers are rejected at
 load, `true` included.
 
-Two consequences make the bound easy to misuse:
+### Why it is measured and not counted
 
-- **The bound is a floor, not a target.** A unit's households can only be
-  staged once *every* step of that unit has run: `household_excess`,
-  `household_overflow` and `household_promotion` all add people to
-  households created by earlier steps of the same unit. A loop unit is
-  therefore atomic — a batch never splits one — and the bound can only make
-  flushes rarer than one per unit, never more frequent. Allocation-stage
-  peak is roughly `bound + the largest single unit's membership`, and no
-  bound drives it lower.
-- **Below one unit's membership every bound behaves alike.** With
-  `loop_level` unset it defaults to the largest configured level (XLGU),
-  which is 9 units for England — at that level any bound below about 10⁶
-  members is crossed by every single offer, so all of them flush once per
-  unit and no value between them is distinguishable. That is the lowest
-  peak the level allows (one unit live rather than nine), not a no-op; to
-  tune any finer, set `loop_level` to a level whose units are small
-  relative to the bound.
+This key replaces `pending_flush_member_bound`, which asked for a count of
+members. A member count is a stand-in for memory, and the conversion between
+them is a constant nobody can state: it depends on the world, the machine and
+what else the run holds. So the number had to be found by sweeping, and a
+swept value did not transfer to a machine with different memory — the one
+place it most needed to. Reading the resident set removes the conversion.
+The operator now states the quantity they actually know, which is how much
+memory the job was given. The old key is rejected at load rather than
+translated, because there is no honest translation.
 
-Values are interchangeable for output: the bound changes which subsets are
+Two consequences make the budget easy to misuse:
+
+- **The budget is a ceiling on held membership, not on the run.** A unit's
+  households can only be staged once *every* step of that unit has run:
+  `household_excess`, `household_overflow` and `household_promotion` all add
+  people to households created by earlier steps of the same unit. A loop unit
+  is therefore atomic — a batch never splits one — so the budget can only make
+  flushes rarer than one per unit, never more frequent. A budget below what
+  one unit's work costs behaves exactly like `0`, and nothing drives the peak
+  lower than one unit live.
+- **Cadence is no longer reproducible, and that is fine.** Two runs of the
+  same config on machines with different memory, or with different worker
+  counts, will cut different batches. Neither is wrong: how membership is
+  grouped into batches is not part of the world.
+
+Budgets are interchangeable for output: the budget changes which subsets are
 grouped into which batch and nothing else, so exports are bit-identical
-across bounds and a value can be swept on a target machine without
+across budgets and a value can be set on a target machine without
 re-validating the world. This does **not** extend to `loop_level`, which
 changes the RNG partition and so changes the world.
 
@@ -114,17 +125,19 @@ Every run with serialization enabled ends allocation with one summary line
 at INFO:
 
 ```
-[FLUSH] calls=6856 members=56287913 seconds=214.106 max_batch_members=31142
+[FLUSH] calls=6856 members=56287913 seconds=214.106 max_batch_members=31142 budget_mb=64000 max_resident_set_size_mb=61180.4
 ```
 
 `calls` is the number of batches staged — one per cut, however many venue
-types that cut spanned — `members` the total membership
-written (constant across bounds), `seconds` their wall clock, and
-`max_batch_members` the largest single batch. Sweeping the bound holds
-`members` fixed while `calls` moves by orders of magnitude, which separates
-per-call cost from per-member cost. A run with the key omitted reports its
-zeroes, and is the control the sweep is compared against. At DEBUG the same
-four counters are emitted per call (`[FLUSH] call=…`).
+types that cut spanned — `members` the total membership written (constant
+across budgets), `seconds` their wall clock, `max_batch_members` the largest
+single batch, and `max_resident_set_size_mb` the largest reading taken during
+the run. That last one against `budget_mb` says whether the budget was ever
+approached: a peak far below it means the run was never under pressure and
+the key bought nothing, a peak sitting just above it means the budget was
+ridden the whole way. A run with the key omitted reports its zeroes, and is
+the control a comparison is made against. At DEBUG the same counters are
+emitted per call (`[FLUSH] call=…`).
 
 ---
 

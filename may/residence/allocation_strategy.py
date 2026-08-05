@@ -163,9 +163,9 @@ def execute_allocation_strategy(population,
             When None, seed 0 is used — matching the historical default.
         subset_flusher: Callable (venue_type, subset_keys) staging a batch of
             subsets and gutting them. Required when the strategy sets
-            `pending_flush_member_bound`; called with whole units' household
-            subsets whenever they total that many members, and once more at
-            end of allocation for the residue.
+            `memory_budget_mb`; called with whole units' household subsets
+            whenever the run's resident set exceeds that budget, and once
+            more at end of allocation for the residue.
         plan_sink: Callable handed each loop unit's `UnitMutationPlan` as the
             parent applies it, in the loop's own unit order. Diagnostic only —
             the world is already built by the time it is called.
@@ -230,25 +230,35 @@ def execute_allocation_strategy(population,
     if 'flush_per_unit' in strategy:
         raise HouseholdError(
             f"flush_per_unit in {strategy_file} was removed; use "
-            f"pending_flush_member_bound: 1 for the same per-unit cadence, "
+            f"memory_budget_mb: 0 for the same per-unit cadence, "
             f"or omit the key to hold membership live until export"
         )
 
-    # Members of household membership held live rather than staged. Unset
-    # means no buffering is wired at all and membership stays live to the
-    # terminal whole-world flush; see docs/adr/parallelising_adrs/0008.
-    member_bound = strategy.get('pending_flush_member_bound')
-    if member_bound is not None and (isinstance(member_bound, bool)
-                                     or not isinstance(member_bound, int)
-                                     or member_bound < 1):
+    # Superseded rather than renamed: a member count cannot be carried to a
+    # machine with different memory, which is the whole reason it is gone
+    if 'pending_flush_member_bound' in strategy:
         raise HouseholdError(
-            f"pending_flush_member_bound in {strategy_file} must be a "
-            f"positive count of members, not {member_bound!r}; omit the key "
+            f"pending_flush_member_bound in {strategy_file} was removed; "
+            f"cadence is now driven by measured memory. Set memory_budget_mb "
+            f"to the megabytes this run may hold, or 0 to stage at every "
+            f"opportunity as a bound of 1 did"
+        )
+
+    # Megabytes of resident set the run may occupy before staging a batch.
+    # Unset means no buffering is wired at all and membership stays live to
+    # the terminal whole-world flush; see docs/adr/parallelising_adrs/0008.
+    memory_budget_mb = strategy.get('memory_budget_mb')
+    if memory_budget_mb is not None and (isinstance(memory_budget_mb, bool)
+                                         or not isinstance(memory_budget_mb, (int, float))
+                                         or memory_budget_mb < 0):
+        raise HouseholdError(
+            f"memory_budget_mb in {strategy_file} must be a non-negative "
+            f"number of megabytes, not {memory_budget_mb!r}; omit the key "
             f"to hold every household's membership live until export"
         )
-    if member_bound is not None and subset_flusher is None:
+    if memory_budget_mb is not None and subset_flusher is None:
         raise HouseholdError(
-            f"pending_flush_member_bound in {strategy_file} requires "
+            f"memory_budget_mb in {strategy_file} requires "
             f"serialization to be enabled: staged subsets are written beside "
             f"the canonical HDF5 file, which does not exist for this run"
         )
@@ -257,7 +267,7 @@ def execute_allocation_strategy(population,
     # flushes reports its zero — that run is the control a sweep is compared
     # against, and a missing row is not the same as a zero one
     pending_flush = (PendingFlushBuffer(subset_flusher, logger,
-                                        bound=member_bound or 1)
+                                        budget_mb=memory_budget_mb or 0)
                      if subset_flusher is not None else None)
 
     # Cheap config checks above run first; the three below parse the pattern
@@ -343,7 +353,7 @@ def execute_allocation_strategy(population,
                 if plan_sink is not None:
                     plan_sink(unit_plan)
 
-                if member_bound is not None and created_subset_keys:
+                if memory_budget_mb is not None and created_subset_keys:
                     # Offered, not flushed: whether this unit's membership is
                     # written now or held for a later batch is the buffer's call
                     member_count = unit_plan.created_household_member_count

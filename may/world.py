@@ -430,7 +430,7 @@ def setup_households(geo, population, venues, config, strategy_file=None,
             the timeline. When ``None`` (e.g. a direct programmatic caller),
             falls back to ``config["households"]["strategy_file"]``.
         world: The World being built, when one exists. Supplies the subset
-            flusher a `pending_flush_member_bound` strategy needs; without it
+            flusher a `memory_budget_mb` strategy needs; without it
             such a strategy is a config error.
 
     Returns:

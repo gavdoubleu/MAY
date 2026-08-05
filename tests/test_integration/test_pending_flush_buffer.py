@@ -1,12 +1,17 @@
 """Bounding the pending-flush buffer during residence allocation.
 
-`pending_flush_member_bound` is how much membership a run chooses to hold
-live rather than write. A bound of 1 cuts a batch at every opportunity; an
-unset bound never cuts one; values between buy exactly as much memory relief
-as a machine needs. The bound is one-sided — the excess, overflow and
-promotion steps all add people to households earlier steps of the same unit
-created, so no unit can be cut into — and it never changes the world it
-builds, only when membership leaves memory.
+`memory_budget_mb` is how much memory a run may occupy before it starts
+writing membership out instead of holding it. A budget of 0 cuts a batch at
+every opportunity, since no process fits in zero; an unset budget never cuts
+one; a budget the run never reaches never binds and only drains at the end.
+It never changes the world it builds, only when membership leaves memory.
+
+Only the ends of the dial are exercised here. The middle is where the budget
+is compared against a real resident set, and a real resident set is not a
+quantity a test can state — so the grouping behaviour lives in
+`tests/test_unit/may/residence/test_pending_flush_budget.py`, where the
+reading is injected. What is left here is what needs a real run: that the
+world survives the dial, and that both ends behave end-to-end.
 """
 
 import pytest
@@ -87,14 +92,15 @@ def build_fixtures():
     return geo, population, venues, distributor
 
 
-def batch_member_counts(bound, tmp_path):
-    """Members carried by each staging call of a run at the given bound.
+def batch_member_counts(tmp_path):
+    """Members carried by each staging call of a run that stages at every
+    opportunity.
 
     Counted at the flusher, before the subsets are gutted, so it measures
     what was actually handed to staging rather than what the buffer says.
     """
     strategy_file = write_strategy(tmp_path, loop_level="SGU",
-                                   pending_flush_member_bound=bound)
+                                   memory_budget_mb=0)
     geo, population, venues, distributor = build_fixtures()
     world = build_world(population, venues, geo, tmp_path)
     counts = []
@@ -124,7 +130,7 @@ class TestBoundRequiresSerialization:
                                       venue_manager, tmp_path):
         """Staging needs the canonical file; asking for a bounded buffer
         without serialization is a config error, not a silent no-op."""
-        strategy_file = write_strategy(tmp_path, pending_flush_member_bound=1)
+        strategy_file = write_strategy(tmp_path, memory_budget_mb=0)
 
         with pytest.raises(HouseholdError, match="serialization"):
             execute_allocation_strategy(
@@ -135,19 +141,19 @@ class TestBoundRequiresSerialization:
             )
 
 
-class TestBoundOfOne:
+class TestBudgetOfZero:
 
     def test_every_household_subset_is_a_husk_with_staged_members(
         self, hd, population_manager, venue_manager, geography, tmp_path
     ):
-        """A bound of one member cuts a batch at every opportunity, so after
+        """A budget of zero cuts a batch at every opportunity, so after
         the run nothing holds live household membership — but all of it is
         readable back out of staging."""
         from may.flushing import GuttedMembers
 
         world = build_world(population_manager, venue_manager, geography, tmp_path)
         strategy_file = write_strategy(tmp_path, loop_level="SGU",
-                                       pending_flush_member_bound=1)
+                                       memory_budget_mb=0)
 
         execute_allocation_strategy(
             population=population_manager,
@@ -168,7 +174,7 @@ class TestBoundOfOne:
         assert staged_ids == set(hd.allocated_people)
 
 
-class TestUnsetBound:
+class TestUnsetBudget:
 
     def test_membership_stays_live(
         self, hd, population_manager, venue_manager, geography, tmp_path
@@ -199,7 +205,7 @@ class TestResidualDrain:
     def test_a_bound_too_large_to_bind_still_stages_everything(
         self, hd, population_manager, venue_manager, geography, tmp_path
     ):
-        """A set bound drains at end of allocation whether or not it ever
+        """A budget drains at end of allocation whether or not it ever
         bound, so the end state is the same for every value: every household
         a husk, and the terminal whole-world flush finds the cohort staged
         rather than building one large transient out of live membership."""
@@ -207,7 +213,7 @@ class TestResidualDrain:
 
         world = build_world(population_manager, venue_manager, geography, tmp_path)
         strategy_file = write_strategy(tmp_path, loop_level="SGU",
-                                       pending_flush_member_bound=10 ** 9)
+                                       memory_budget_mb=10 ** 9)
 
         calls = []
 
@@ -223,39 +229,29 @@ class TestResidualDrain:
             subset_flusher=recording_flusher,
         )
 
-        assert len(calls) == 1, "nothing crossed the bound, so only the drain"
+        assert len(calls) == 1, "nothing crossed the budget, so only the drain"
         assert all(isinstance(subset.members, GuttedMembers)
                    for _, subset in household_subsets(venue_manager))
 
 
-def cumulative(counts):
-    running, totals = 0, []
-    for count in counts:
-        running += count
-        totals.append(running)
-    return totals
+class TestUnitsAreOfferedWhole:
 
-
-class TestIntermediateBound:
-
-    def test_units_are_grouped_into_batches_never_split(self, tmp_path):
-        """The bound is one-sided: it can only make flushes rarer than one
-        per unit. Every batch it cuts is a whole number of units, because no
-        household's membership is final until its unit's last step has run.
+    def test_staging_at_every_opportunity_cuts_one_batch_per_unit(self, tmp_path):
+        """What the budget is one-sided *about*: the loop offers a whole loop
+        unit at a time, so the finest cadence available is one batch per unit
+        and no budget can cut into one. The excess, overflow and promotion
+        steps all add people to households earlier steps of the same unit
+        created, so no household's membership is final until its unit's last
+        step has run.
         """
-        per_unit = batch_member_counts(1, tmp_path / "per_unit")
+        per_unit = batch_member_counts(tmp_path / "per_unit")
+
         assert len(per_unit) > 2, "the stress world should span several units"
-
-        bound = per_unit[0] + 1
-        grouped = batch_member_counts(bound, tmp_path / "grouped")
-
-        assert len(grouped) < len(per_unit)
-        assert sum(grouped) == sum(per_unit)
-        assert set(cumulative(grouped)) <= set(cumulative(per_unit))
+        assert all(count > 0 for count in per_unit)
 
 
-def export_at_bound(bound, tmp_path):
-    """Export the stress world built at a given bound, ids reset first.
+def export_at_budget(budget_mb, tmp_path):
+    """Export the stress world built at a given budget, ids reset first.
 
     Person and Venue ids come from process-global counters, so without the
     reset two runs in one process are offset and nothing downstream of the
@@ -267,7 +263,7 @@ def export_at_bound(bound, tmp_path):
     Person.reset_counter()
     Venue.reset_id_counter()
 
-    overrides = {} if bound is None else {"pending_flush_member_bound": bound}
+    overrides = {} if budget_mb is None else {"memory_budget_mb": budget_mb}
     strategy_file = write_strategy(tmp_path, loop_level="SGU", **overrides)
     geo, population, venues, distributor = build_fixtures()
     world = build_world(population, venues, geo, tmp_path)
@@ -283,43 +279,69 @@ def export_at_bound(bound, tmp_path):
     return export_path
 
 
-class TestBoundsAreInterchangeableForOutput:
+class TestBudgetsAreInterchangeableForOutput:
 
-    def test_every_bound_exports_the_same_world(self, tmp_path):
-        """What licenses sweeping the bound on a target machine without
-        re-validating the output: the bound changes which complete subsets
-        are grouped into which batch, and the export re-indexes by key, so
-        it cannot change the world. Tested rather than argued.
+    def test_every_budget_exports_the_same_world(self, tmp_path):
+        """What licenses setting the budget from the machine rather than from
+        the output: the budget changes which complete subsets are grouped
+        into which batch, and the export re-indexes by key, so it cannot
+        change the world. Tested rather than argued.
+
+        This is what makes a non-reproducible cadence acceptable. Two runs of
+        the same config on machines with different memory stage differently
+        and neither is wrong, because staging is not part of the world.
         """
-        first_unit_members = batch_member_counts(1, tmp_path / "probe")[0]
+        staged_every_time = export_at_budget(0, tmp_path / "per_unit")
+        never_bound = export_at_budget(10 ** 9, tmp_path / "never_bound")
+        never_wired = export_at_budget(None, tmp_path / "never_wired")
 
-        per_unit = export_at_bound(1, tmp_path / "per_unit")
-        intermediate = export_at_bound(first_unit_members + 1,
-                                       tmp_path / "intermediate")
-        never = export_at_bound(None, tmp_path / "never")
-
-        assert_h5_equivalent(per_unit, intermediate)
-        assert_h5_equivalent(per_unit, never)
+        assert_h5_equivalent(staged_every_time, never_bound)
+        assert_h5_equivalent(staged_every_time, never_wired)
 
 
-class TestInvalidBounds:
+class TestInvalidBudgets:
 
-    @pytest.mark.parametrize("bound", [0, -1, 1.5, "many", True])
-    def test_a_bound_that_is_not_a_positive_count_of_members_raises(
-        self, bound, hd, population_manager, venue_manager,  # noqa: F811
+    @pytest.mark.parametrize("budget_mb", [-1, "many", True])
+    def test_a_budget_that_is_not_a_size_in_megabytes_raises(
+        self, budget_mb, hd, population_manager, venue_manager,  # noqa: F811
         geography, tmp_path
     ):
-        """The value is a member count, and nothing else means anything.
+        """The value is a quantity of memory, and nothing else means anything.
 
-        `true` is rejected rather than read as 1: it is what the deleted
-        `flush_per_unit` took, and silently honouring it would hide a stale
-        config instead of pointing at it.
+        `true` is rejected rather than read as a number: it is what the
+        deleted `flush_per_unit` took, and silently honouring it would hide a
+        stale config instead of pointing at it. Zero is absent from this list
+        because zero is now meaningful — it is the budget nothing fits in.
         """
         world = build_world(population_manager, venue_manager, geography, tmp_path)
         strategy_file = write_strategy(tmp_path, loop_level="SGU",
-                                       pending_flush_member_bound=bound)
+                                       memory_budget_mb=budget_mb)
 
-        with pytest.raises(HouseholdError, match="pending_flush_member_bound"):
+        with pytest.raises(HouseholdError, match="memory_budget_mb"):
+            execute_allocation_strategy(
+                population=population_manager,
+                venues=venue_manager,
+                household_distributor=hd,
+                strategy_file=strategy_file,
+                subset_flusher=world.flush_subsets_batch,
+            )
+
+    def test_the_deleted_member_bound_key_raises(
+        self, hd, population_manager, venue_manager,  # noqa: F811
+        geography, tmp_path
+    ):
+        """`pending_flush_member_bound` is gone, not renamed.
+
+        A member count cannot be carried to a machine with different memory,
+        which is the whole reason it went. Honouring a stale one by ignoring
+        it would hold the world's membership live to export — the blow-up the
+        dial exists to prevent — while reporting `calls=0`.
+        """
+        world = build_world(population_manager, venue_manager, geography, tmp_path)
+        strategy_file = write_strategy(tmp_path, loop_level="SGU",
+                                       pending_flush_member_bound=250000)
+
+        with pytest.raises(HouseholdError, match="memory_budget_mb"):
             execute_allocation_strategy(
                 population=population_manager,
                 venues=venue_manager,
@@ -361,7 +383,7 @@ class TestExportCoversTheStagedCohort:
         import h5py
 
         strategy_file = write_strategy(tmp_path, loop_level="SGU",
-                                       pending_flush_member_bound=1)
+                                       memory_budget_mb=0)
         geo, population, venues, distributor = build_fixtures()
         world = build_world(population, venues, geo, tmp_path)
         execute_allocation_strategy(
@@ -409,7 +431,7 @@ class TestBatchedFlushCostIsInTheBatch:
             return original_get_venues_by_type(self, venue_type)
 
         strategy_file = write_strategy(tmp_path, loop_level="SGU",
-                                       pending_flush_member_bound=1)
+                                       memory_budget_mb=0)
         geo, population, venues, distributor = build_fixtures()
         world = build_world(population, venues, geo, tmp_path)
 
@@ -447,7 +469,7 @@ class TestBatchedFlushCostIsInTheBatch:
         import h5py
 
         strategy_file = write_strategy(tmp_path, loop_level="SGU",
-                                       pending_flush_member_bound=1)
+                                       memory_budget_mb=0)
         geo, population, venues, distributor = build_fixtures()
         world = build_world(population, venues, geo, tmp_path)
         execute_allocation_strategy(
@@ -477,7 +499,7 @@ class TestSetupHouseholdsPlumbing:
         from may.world import setup_households
 
         strategy_file = write_strategy(tmp_path, loop_level="SGU",
-                                       pending_flush_member_bound=1)
+                                       memory_budget_mb=0)
         geo, population, venues, _ = build_fixtures()
         world = build_world(population, venues, geo, tmp_path)
         config = {"households": {
