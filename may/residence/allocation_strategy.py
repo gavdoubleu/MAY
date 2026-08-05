@@ -12,7 +12,6 @@ import operator
 import yaml
 
 import numpy as np
-from itertools import islice
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from .venue_allocator import _allocate_to_venue_type
@@ -133,72 +132,6 @@ def _run_one_geo_unit(unit_slice, rng):
 
     return (collector.collect(), stats_by_step,
             household_distributor.drain_target_pattern_tallies())
-
-
-def _household_venue_count(venues) -> int:
-    return len(venues.venues_by_type_and_id.get(HOUSEHOLD_VENUE_TYPE, {}))
-
-
-def _new_household_subset_keys(venues, count_before_unit, scope_sgu_codes,
-                               unit_code) -> Tuple[List[Tuple[int, int]], int]:
-    """Subset keys, and their total membership, of the households created
-    during the geo unit that just finished.
-
-    Households are appended to the venue manager's per-type dict in creation
-    order, so the unit's own are its tail — walked backwards so the cost is
-    in the new households, not the whole world's. Each one's geo unit is
-    checked against the unit's scope: if anything ever removes a household
-    mid-run the tail arithmetic would silently pick the wrong venues, and
-    staging the wrong membership is not a failure worth discovering later.
-
-    The member count is free here — each `Subset` is already in hand — and
-    it is the quantity a flush costs and a deferral holds in memory.
-    """
-    households = venues.venues_by_type_and_id.get(HOUSEHOLD_VENUE_TYPE, {})
-    new_household_count = len(households) - count_before_unit
-    subset_keys = []
-    member_count = 0
-    for venue in islice(reversed(households.values()), new_household_count):
-        if venue.geographical_unit.name not in scope_sgu_codes:
-            raise HouseholdError(
-                f"Household venue {venue.id} sits in "
-                f"'{venue.geographical_unit.name}', outside geo unit "
-                f"'{unit_code}', but was counted among the {new_household_count} "
-                f"households it created — the venue manager's household "
-                f"ordering cannot be trusted to stage per-unit batches."
-            )
-        for subset in venue.subsets.values():
-            subset_keys.append((venue.id, subset.subset_index))
-            member_count += len(subset.members)
-    return subset_keys, member_count
-
-
-def _offer_unit_to_pending_flush(pending_flush, venues, household_count_before_unit,
-                                 unit_code, loop_units, smallest_level) -> None:
-    """Offer the households the parent has just created to the flush buffer.
-
-    The scope is recomputed here rather than shipped back from the worker: it
-    is needed only for `_new_household_subset_keys`' safety check, and an LGU's
-    smallest-level codes are a far larger payload than the plan itself. Both
-    the walk and the tail-slicing go away in cycle 5, where the plan's own
-    record of what it created replaces them.
-    """
-    unit = loop_units[unit_code]
-    if unit.level == smallest_level:
-        scope_sgu_codes = {unit_code}
-    else:
-        scope_sgu_codes = {descendant.name for descendant
-                           in unit.get_descendants(level=smallest_level)}
-    subset_keys, member_count = _new_household_subset_keys(
-        venues, household_count_before_unit, scope_sgu_codes, unit_code)
-    if not subset_keys:
-        return
-    # Offered, not flushed: whether this unit's membership is written now or
-    # held for a later batch is the buffer's call
-    pending_flush.offer(HOUSEHOLD_VENUE_TYPE, subset_keys, member_count)
-    logger.info(f"[{unit_code}] Offered {len(subset_keys)} household "
-                f"subsets ({member_count:,} members) to the "
-                f"pending-flush buffer")
 
 
 def execute_allocation_strategy(population,
@@ -398,9 +331,9 @@ def execute_allocation_strategy(population,
                 unit_plan, stats_by_step, tallies = completed_units.pop(next_unit_index)
                 next_unit_index += 1
 
-                household_count_before_unit = _household_venue_count(venues)
-                apply_unit_plan(unit_plan, venues, household_distributor,
-                                people_by_id, venues_by_id)
+                created_subset_keys = apply_unit_plan(
+                    unit_plan, venues, household_distributor,
+                    people_by_id, venues_by_id)
                 household_distributor.merge_target_pattern_tallies(tallies)
                 for step_number, step_name, step_type, _ in numbered_steps:
                     accumulated = all_stats.setdefault(
@@ -410,10 +343,16 @@ def execute_allocation_strategy(population,
                 if plan_sink is not None:
                     plan_sink(unit_plan)
 
-                if member_bound is not None:
-                    _offer_unit_to_pending_flush(
-                        pending_flush, venues, household_count_before_unit,
-                        unit_plan.unit_code, loop_units, smallest_level)
+                if member_bound is not None and created_subset_keys:
+                    # Offered, not flushed: whether this unit's membership is
+                    # written now or held for a later batch is the buffer's call
+                    member_count = unit_plan.created_household_member_count
+                    pending_flush.offer(HOUSEHOLD_VENUE_TYPE,
+                                        created_subset_keys, member_count)
+                    logger.info(f"[{unit_plan.unit_code}] Offered "
+                                f"{len(created_subset_keys)} household subsets "
+                                f"({member_count:,} members) to the "
+                                f"pending-flush buffer")
 
                 if (next_unit_index % progress_interval == 0
                         or next_unit_index == total_units):

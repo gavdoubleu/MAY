@@ -437,11 +437,12 @@ class TestBatchedFlushCostIsInTheBatch:
     def test_batches_are_staged_in_venue_creation_order(self, tmp_path):
         """Characterisation guard on the order the removed scan imposed.
 
-        `_new_household_subset_keys` walks the venue manager's households
-        backwards, so the buffer's keys arrive in reverse creation order; the
-        scan silently re-sorted them. Loop units run in creation order too, so
-        staged venue ids are non-decreasing across the whole run — a batch
-        staged in offer order would descend within each unit.
+        The scan silently re-sorted the keys it staged. Nothing has re-sorted
+        them since: the parent applies units in loop order and offers each
+        household as it creates it, so venue ids are non-decreasing across the
+        whole run by construction. This pins that, because the ordering is what
+        the removed scan used to guarantee and an offer built the wrong way
+        round would still export a correct world — just not this one.
         """
         import h5py
 

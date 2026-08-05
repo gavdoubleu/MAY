@@ -324,14 +324,20 @@ def index_venues_by_id(venues) -> Dict[int, object]:
 
 def apply_unit_plan(plan: UnitMutationPlan, venues, household_distributor,
                     people_by_id: Dict[int, object],
-                    venues_by_id: Dict[int, object]) -> None:
+                    venues_by_id: Dict[int, object]) -> List[Tuple[int, int]]:
     """Replay one unit's plan into the parent's world.
 
     The parent is the sole Venue creator, so household ids come from its own
     counter here and nowhere else. Applying plans in the loop's unit order
     therefore reproduces the sequential world's id layout exactly.
+
+    Returns the `(venue_id, subset_index)` key of every household subset it
+    created, in creation order. Nothing else knows those keys: the ids are
+    minted here, and the caller's only other route to them would be to guess
+    at which of the venue manager's households are the new ones.
     """
     geography = household_distributor.geography
+    created_subset_keys = []
     for geo_unit_name, properties, subsets in plan.created_households:
         household = venues.create_venue(
             venue_type=HOUSEHOLD_VENUE_TYPE,
@@ -342,6 +348,8 @@ def apply_unit_plan(plan: UnitMutationPlan, venues, household_distributor,
             for person_id in member_ids:
                 household.add_to_subset(people_by_id[person_id],
                                         subset_key=subset_key)
+        created_subset_keys.extend((household.id, subset.subset_index)
+                                   for subset in household.subsets.values())
 
     for venue_id, subset_key, person_ids in plan.existing_venue_members:
         venue = venues_by_id[venue_id]
@@ -357,3 +365,4 @@ def apply_unit_plan(plan: UnitMutationPlan, venues, household_distributor,
         people_by_id[person_id].properties.update(properties)
 
     household_distributor.allocated_people.update(plan.newly_allocated_person_ids)
+    return created_subset_keys
