@@ -77,6 +77,17 @@ data_sources:
     # Required whenever the 'outside' outcome can occur. The explicit sentinel
     # value written to workplace_location for out-of-area workers.
     outside_value: "OUTSIDE"
+    # Required whenever the 'outside' outcome can occur. Which metadata an
+    # out-of-boundary row keeps when it collapses onto the sentinel. It is the
+    # grouping key, so it also bounds the sentinel count: one row per distinct
+    # combination named here, per origin. work_mode must be here because the
+    # rule below conditions on it and outputs it — drop it and a draw restricted
+    # to travelling modes would find no sentinel and quietly renormalise the
+    # out-of-area mass onto in-world LGUs. It is also the only metadata this
+    # source declares, so the collapse is maximal: at most one sentinel row per
+    # work mode per origin. Columns not named are omitted from the sentinel's
+    # metadata, never filled with a placeholder.
+    sentinel_preserves: ["work_mode"]
 
     files:
       - path: "${data_root}/activities/work/EW-work-destination-likelihood-modelled-prepandemic.csv"
@@ -96,10 +107,13 @@ data_sources:
         # Column definitions for O-D matrix
         destination_column: "LGU_destination_name"  # Use NAME for easy matching with work data
         likelihood_column: "Likelihood"
+        # Only what is read. work_mode is conditioned on by the rule below and
+        # emitted as an attribute. LGU_destination_code and Count were declared
+        # here once and never read: they cost a dense array each over ~150k rows
+        # and, being unique per row, they defeated the sentinel collapse. A
+        # column that nothing consumes does not belong in metadata.
         metadata_columns:
           work_mode: "Place of work indicator"
-          destination_code: "LGU_destination_code"  # Keep code as metadata if needed
-          count: "Count"
 
         # No exclude_destinations. The census tables list non-LAD destinations
         # alongside real ones, including whole-country catch-alls ("England", "Wales",
@@ -131,21 +145,21 @@ data_sources:
         likelihood_column: "Likelihood"
         metadata_columns:
           work_mode: "Place of work indicator"
-          destination_code: "LGU_destination_code"
-          count: "Count"
 
-      # Northern Ireland is DELIBERATELY ABSENT. NISRA publishes its table by
-      # area NAME only, with no LGU code column, so it cannot declare the
-      # destination_code metadata the other two files carry. Every file of one
-      # source must declare the same metadata keys — storage is one dense array
-      # per key covering all rows, which cannot be ragged — so a file short of
-      # a column now fails the load rather than quietly leaving holes.
+      # Northern Ireland is DELIBERATELY ABSENT, but no longer for a schema
+      # reason. It was excluded because NISRA publishes by area NAME only, with
+      # no LGU code column, and every file of one source must declare the same
+      # metadata keys (storage is one dense array per key covering all rows,
+      # which cannot be ragged). Now that destination_code is gone, the NI table
+      # can declare the one metadata key that remains: it carries 'Place of work
+      # indicator', and its origin/destination columns are named differently
+      # ('Origin area name' / 'Destination area name'), which is per-file config.
       #
-      # No production run needs NI: runs filter to GB units at XLGU level in
-      # configs/2021/config.yaml. Readmit the file by adding an LGU destination
-      # code column to the prepared NI table, then re-adding an entry here with
-      # the same three metadata_columns as above (origins stay disjoint: 331 EW
-      # + 32 SCT + 11 NI = 374 LGUs).
+      # No production run needs it: runs filter to GB units at XLGU level in
+      # configs/2021/config.yaml. Readmit by adding an entry pointing at
+      # NI-work-destination-likelihood-modelled-prepandemic.csv with its own
+      # column names and the same single metadata key (origins stay disjoint:
+      # 331 EW + 32 SCT + 11 NI = 374 LGUs).
 
 # NOTE: there is deliberately NO fallback here. A person whose origin LGU is
 # missing from the matrix fails the build loudly.

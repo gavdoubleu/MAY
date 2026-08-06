@@ -837,6 +837,41 @@ class OriginDestinationMatrixSource(DataSource):
                 "'outside' outcome can occur."
             )
 
+        # Which metadata columns survive the boundary. Out-of-boundary rows
+        # collapse onto sentinel rows grouped by exactly these columns, so the
+        # list also bounds the sentinel count: one row per distinct combination
+        # of preserved values, not one per out-of-boundary row. Required (no
+        # default) whenever the sentinel can occur — preserving everything is
+        # what makes the collapse degenerate, so it must not be what you get by
+        # not thinking. An empty list is legal and means one sentinel per origin.
+        self._sentinel_preserves = config.get('sentinel_preserves')
+        if outside_can_occur:
+            if self._sentinel_preserves is None:
+                raise ValueError(
+                    f"O-D source '{self.name}': 'sentinel_preserves' is required "
+                    "when the 'outside' outcome can occur. It names the metadata "
+                    "columns an out-of-boundary row keeps; [] means keep none."
+                )
+            if not isinstance(self._sentinel_preserves, list):
+                raise ValueError(
+                    f"O-D source '{self.name}': 'sentinel_preserves' must be a "
+                    f"list, got {type(self._sentinel_preserves).__name__}."
+                )
+            declared = set()
+            for file_config in self._file_configs:
+                declared.update(file_config.get('metadata_columns', {}))
+            unknown = [k for k in self._sentinel_preserves if k not in declared]
+            if unknown:
+                raise ValueError(
+                    f"O-D source '{self.name}': sentinel_preserves names "
+                    f"{unknown}, which is not a declared metadata column "
+                    f"({sorted(declared)})."
+                )
+        self._sentinel_preserves = list(self._sentinel_preserves or [])
+        # Destination code of the sentinel, allocated on demand while applying
+        # the boundary policy. Identifies sentinel rows on read.
+        self._outside_dest_code: Optional[int] = None
+
         # Optional marker for redistributed assignments. Names the person
         # property set true when an assignment was bounced back in-boundary, so
         # the venue layer can deprioritise it. Config-named, so the engine carries
@@ -1206,6 +1241,7 @@ class OriginDestinationMatrixSource(DataSource):
             if outside_code is None:
                 outside_code = int(self._dest_code_table.encode_series(
                     pd.Series([self._outside_value]))[0])
+                self._outside_dest_code = outside_code
             return outside_code
 
         error_offenders: Dict[str, List[str]] = {}
@@ -1285,23 +1321,35 @@ class OriginDestinationMatrixSource(DataSource):
             else:  # 'outside'
                 outside_origins += 1
                 # Each out-of-boundary row takes the sentinel as its destination
-                # but keeps its own metadata; rows with identical metadata merge.
-                # Collapsing them all onto one row stamped with the sentinel
+                # but keeps the metadata named by sentinel_preserves; rows
+                # agreeing on those merge. Collapsing them all onto one row
                 # would erase the distinctions a downstream draw may condition
                 # on, and a draw restricted to travelling work modes would then
                 # find no sentinel row at all and silently renormalise the
-                # out-of-area mass onto in-world destinations.
+                # out-of-area mass onto in-world destinations. Grouping on
+                # EVERY column is the opposite failure: destination-unique
+                # columns make the collapse a no-op and the sentinel count
+                # tracks the out-of-boundary row count.
                 group_metadata, group_masses = _group_by_metadata(
-                    {k: v[start:stop][~in_b] for k, v in metadata_arrays.items()},
+                    {k: metadata_arrays[k][start:stop][~in_b]
+                     for k in self._sentinel_preserves},
                     likelihoods[start:stop][~in_b],
                 )
                 code_ = get_outside_code()
+                # Non-preserved columns keep their (dense) slot but carry no
+                # meaning on a sentinel row; lookup() omits them rather than
+                # reporting a placeholder as if it were data.
+                sentinel_metadata = {
+                    k: (group_metadata[k] if k in group_metadata
+                        else np.zeros(len(group_masses), dtype=v.dtype))
+                    for k, v in metadata_arrays.items()
+                }
                 append_rows(
                     code,
                     np.concatenate([dest_codes[start:stop][in_b],
                                     np.full(len(group_masses), code_, dtype=dest_codes.dtype)]),
                     np.concatenate([likelihoods[start:stop][in_b], group_masses]),
-                    {k: np.concatenate([v[start:stop][in_b], group_metadata[k]])
+                    {k: np.concatenate([v[start:stop][in_b], sentinel_metadata[k]])
                      for k, v in metadata_arrays.items()},
                 )
 
@@ -1383,8 +1431,15 @@ class OriginDestinationMatrixSource(DataSource):
                 # keep that flow's metadata, so a conditioned draw still sees them.
                 metadata = {k: self._outside_value for k in self._metadata_arrays}
             else:
+                # On a sentinel row only the preserved columns carry meaning;
+                # the rest are omitted, not filled, so nothing downstream can
+                # mistake a placeholder for a value.
+                is_sentinel = (self._outside_dest_code is not None
+                               and int(self._dest_codes[i]) == self._outside_dest_code)
                 metadata = {}
                 for meta_key, arr in self._metadata_arrays.items():
+                    if is_sentinel and meta_key not in self._sentinel_preserves:
+                        continue
                     value = arr[i]
                     if meta_key in self._metadata_code_tables:
                         value = self._metadata_code_tables[meta_key][int(value)]

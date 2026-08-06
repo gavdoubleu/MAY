@@ -413,7 +413,8 @@ def write_od_csv(path, origin, destination, likelihood, extra_columns=None):
 
 def make_od_config(csv_path, out_of_boundary="error", metadata_columns=None,
                     exclude_destinations=None, on_empty=None, outside_value=None,
-                    redistributed_flag=None, chunk_size=None, destination_level=None):
+                    redistributed_flag=None, chunk_size=None, destination_level=None,
+                    sentinel_preserves=None):
     """csv_path: one path, or a list of paths for a multi-file source.
     metadata_columns: one mapping applied to every file, or a list of mappings
     aligned with csv_path."""
@@ -440,6 +441,8 @@ def make_od_config(csv_path, out_of_boundary="error", metadata_columns=None,
         config["on_empty"] = on_empty
     if outside_value is not None:
         config["outside_value"] = outside_value
+    if sentinel_preserves is not None:
+        config["sentinel_preserves"] = sentinel_preserves
     if redistributed_flag is not None:
         config["redistributed_flag"] = redistributed_flag
     if chunk_size is not None:
@@ -681,7 +684,7 @@ class TestOriginDestinationMatrixBoundaryPolicy:
         source = OriginDestinationMatrixSource(
             "test_od",
             make_od_config(csv_path, out_of_boundary="redistribute", on_empty="outside",
-                            outside_value="OUTSIDE"),
+                            outside_value="OUTSIDE", sentinel_preserves=[]),
         )
         source.load_data(geo_units={"A"})
         result = source.lookup("A")
@@ -699,7 +702,8 @@ class TestOriginDestinationMatrixBoundaryPolicy:
         source = OriginDestinationMatrixSource(
             "test_od",
             make_od_config(csv_path, out_of_boundary="outside", outside_value="OUTSIDE",
-                            metadata_columns={"mode": "mode"}),
+                            metadata_columns={"mode": "mode"},
+                            sentinel_preserves=["mode"]),
         )
         source.load_data(geo_units={"A", "IN"})
         result = source.lookup("A")
@@ -716,6 +720,79 @@ class TestOriginDestinationMatrixBoundaryPolicy:
         )
         source.load_data(geo_units=None)
         assert source.lookup("A") == [("OUT", {}, 1.0)]
+
+
+class TestOriginDestinationSentinelPreserves:
+    """`sentinel_preserves` names the metadata that survives the boundary.
+
+    It is the grouping key for out-of-boundary rows, so it also bounds how many
+    sentinel rows an origin can have: one per distinct combination of the named
+    columns, not one per out-of-boundary row. Columns not named are dropped
+    from the sentinel, never filled with a placeholder."""
+
+    def _write(self, tmp_path):
+        return write_od_csv(
+            tmp_path / "od.csv", ["A"] * 4, ["IN", "OUT1", "OUT2", "OUT3"],
+            [0.4, 0.2, 0.2, 0.2],
+            extra_columns={"mode": ["car", "bus", "bus", "car"],
+                            "dest_code": ["C0", "C1", "C2", "C3"]},
+        )
+
+    def _source(self, csv_path, sentinel_preserves, **kwargs):
+        return OriginDestinationMatrixSource(
+            "test_od",
+            make_od_config(csv_path, out_of_boundary="outside", outside_value="OUTSIDE",
+                            metadata_columns={"mode": "mode", "dest_code": "dest_code"},
+                            sentinel_preserves=sentinel_preserves, **kwargs),
+        )
+
+    def test_required_when_outside_can_occur(self, tmp_path):
+        with pytest.raises(ValueError, match="sentinel_preserves"):
+            OriginDestinationMatrixSource(
+                "test_od", make_od_config(tmp_path / "od.csv", out_of_boundary="outside",
+                                           outside_value="OUTSIDE")
+            )
+
+    def test_required_under_redistribute_on_empty_outside(self, tmp_path):
+        with pytest.raises(ValueError, match="sentinel_preserves"):
+            OriginDestinationMatrixSource(
+                "test_od",
+                make_od_config(tmp_path / "od.csv", out_of_boundary="redistribute",
+                                on_empty="outside", outside_value="OUTSIDE"),
+            )
+
+    def test_not_required_when_outside_cannot_occur(self, tmp_path):
+        csv_path = write_od_csv(tmp_path / "od.csv", ["A"], ["IN"], [1.0])
+        source = OriginDestinationMatrixSource("test_od", make_od_config(csv_path))
+        source.load_data(geo_units={"A", "IN"})
+        assert source.lookup("A") == [("IN", {}, 1.0)]
+
+    def test_unknown_column_fails_loud(self, tmp_path):
+        with pytest.raises(ValueError, match="not a declared metadata column"):
+            self._source(tmp_path / "od.csv", ["mode", "not_a_column"])
+
+    def test_sentinel_groups_only_on_preserved_columns(self, tmp_path):
+        # dest_code is unique per destination, so grouping on it too would give
+        # three sentinel rows instead of two.
+        source = self._source(self._write(tmp_path), ["mode"])
+        source.load_data(geo_units={"A", "IN"})
+        outside = [(m["mode"], lik) for d, m, lik in source.lookup("A") if d == "OUTSIDE"]
+        assert dict(outside) == {"bus": pytest.approx(0.4), "car": pytest.approx(0.2)}
+
+    def test_non_preserved_metadata_is_omitted_not_filled(self, tmp_path):
+        source = self._source(self._write(tmp_path), ["mode"])
+        source.load_data(geo_units={"A", "IN"})
+        rows = {d: m for d, m, _ in source.lookup("A")}
+        assert set(rows["OUTSIDE"]) == {"mode"}          # dest_code dropped
+        assert rows["IN"] == {"mode": "car", "dest_code": "C0"}
+
+    def test_empty_list_gives_one_sentinel_row_per_origin(self, tmp_path):
+        source = self._source(self._write(tmp_path), [])
+        source.load_data(geo_units={"A", "IN"})
+        outside = [r for r in source.lookup("A") if r[0] == "OUTSIDE"]
+        assert len(outside) == 1
+        assert outside[0][1] == {}
+        assert outside[0][2] == pytest.approx(0.6)
 
 
 class TestOriginDestinationBoundaryLevel:
@@ -742,7 +819,8 @@ class TestOriginDestinationBoundaryLevel:
             "test_od",
             make_od_config(csv_path, out_of_boundary="outside", outside_value="OUTSIDE",
                             destination_level=destination_level,
-                            metadata_columns={"work_mode": "work_mode"} if modes else None),
+                            metadata_columns={"work_mode": "work_mode"} if modes else None,
+                            sentinel_preserves=["work_mode"] if modes else []),
         )
         source.geo_units_by_level = geo_units_by_level
         source.load_data(geo_units=self.GEO_FLAT if geo_units is None else geo_units)
@@ -821,7 +899,7 @@ class TestOriginDestinationBoundaryLevel:
         first = write_od_csv(tmp_path / "a.csv", ["Glasgow City"], ["Cardiff"], [1.0])
         second = write_od_csv(tmp_path / "b.csv", ["Cardiff"], ["Cardiff"], [1.0])
         config = make_od_config(first, out_of_boundary="outside", outside_value="OUTSIDE",
-                                destination_level="LGU")
+                                destination_level="LGU", sentinel_preserves=[])
         config["files"].append(
             dict(config["files"][0], path=str(second), destination_level="MGU")
         )
