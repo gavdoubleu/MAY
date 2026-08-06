@@ -103,8 +103,8 @@ data_sources:
 
         # No exclude_destinations. The census tables list non-LAD destinations
         # alongside real ones, including whole-country catch-alls ("England", "Wales",
-        # "Northern Ireland"), "Offshore Installation", "Outside UK", "Other",
-        # and a handful of MSOA-level names in the NI table. Excluding them
+        # "Northern Ireland"), "Offshore Installation", "Outside UK" and
+        # "Other". Excluding them
         # would DROP their likelihood and renormalise the rest, quietly moving
         # those commuters into in-country LADs. Instead they are left in and the
         # out_of_boundary policy above catches them: none is a unit at
@@ -112,9 +112,9 @@ data_sources:
         # worker is modelled as working beyond the simulated area.
 
       # Scotland. Same harmonised schema as England+Wales, so the same column
-      # mapping repeats verbatim. Origins are disjoint across the three files
-      # (331 EW + 32 SCT + 11 NI = 374 LGUs, no name appears twice), which is
-      # what the loader needs to merge them into one origin lookup.
+      # mapping repeats verbatim. Origins are disjoint across the files
+      # (331 EW + 32 SCT, no name appears twice), which is what the loader
+      # needs to merge them into one origin lookup.
       - path: "${data_root}/activities/work/SCT-work-destination-likelihood-modelled-prepandemic.csv"
 
         origin_level: "LGU"
@@ -134,28 +134,18 @@ data_sources:
           destination_code: "LGU_destination_code"
           count: "Count"
 
-      # Northern Ireland. NISRA publishes this table by area NAME only, with no
-      # LGU code columns at all, so this entry names its own columns
-      # rather than stacking onto the two above, and omits the destination_code
-      # metadata that does not exist here. Destinations are still UK-wide (373
-      # of them), so an NI resident can be drawn to a GB workplace.
-      - path: "${data_root}/activities/work/NI-work-destination-likelihood-modelled-prepandemic.csv"
-
-        origin_level: "LGU"
-        destination_level: "LGU"
-
-        key_columns:
-          Origin area name:
-            attribute: "geographical_unit"
-            type: "ancestor_lookup"
-            level: "LGU"
-            property: "name"
-
-        destination_column: "Destination area name"
-        likelihood_column: "Likelihood"
-        metadata_columns:
-          work_mode: "Place of work indicator"
-          count: "Count"
+      # Northern Ireland is DELIBERATELY ABSENT. NISRA publishes its table by
+      # area NAME only, with no LGU code column, so it cannot declare the
+      # destination_code metadata the other two files carry. Every file of one
+      # source must declare the same metadata keys — storage is one dense array
+      # per key covering all rows, which cannot be ragged — so a file short of
+      # a column now fails the load rather than quietly leaving holes.
+      #
+      # No production run needs NI: runs filter to GB units at XLGU level in
+      # configs/2021/config.yaml. Readmit the file by adding an LGU destination
+      # code column to the prepared NI table, then re-adding an entry here with
+      # the same three metadata_columns as above (origins stay disjoint: 331 EW
+      # + 32 SCT + 11 NI = 374 LGUs).
 
 # NOTE: there is deliberately NO fallback here. A person whose origin LGU is
 # missing from the matrix fails the build loudly.

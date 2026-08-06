@@ -786,6 +786,10 @@ class OriginDestinationMatrixSource(DataSource):
         self._origin_code_table = CodeTable()
         self._dest_code_table = CodeTable()
         self._metadata_code_tables: Dict[str, CodeTable] = {}
+        # Per metadata key: stored raw (numeric) or as CodeTable codes. Decided
+        # by the first chunk that carries the column and held for the whole
+        # source, so files cannot disagree silently.
+        self._metadata_is_numeric: Dict[str, bool] = {}
         self._dest_codes = np.empty(0, dtype=np.int32)
         self._likelihoods = np.empty(0, dtype=np.float64)
         self._metadata_arrays: Dict[str, np.ndarray] = {}
@@ -855,11 +859,28 @@ class OriginDestinationMatrixSource(DataSource):
         (may/venue_distributor/route_legs_index.py) for the precedent this
         follows.
 
-        Note: as with the pre-existing behaviour, multiple file_configs are
-        NOT merged — each fully replaces the previous one's loaded data. In
-        practice exactly one file_config is used in production.
+        Every file of one source contributes to ONE lookup: the census
+        publishes commuting flow as separate national tables, and a run
+        spanning them must see a single origin space. Files must cover
+        disjoint origins (an origin in two files has no single answer) and
+        must declare the same metadata keys (the columnar store holds one
+        dense array per key, which cannot be ragged).
         """
         logger.info(f"Loading data for source '{self.name}'...")
+
+        self._require_uniform_metadata_columns()
+
+        # Code tables are shared across the files of a source, so a value
+        # first seen in the second file gets one code, not a per-file one.
+        self._origin_code_table = CodeTable()
+        self._dest_code_table = CodeTable()
+        self._metadata_code_tables = {}
+        self._metadata_is_numeric: Dict[str, bool] = {}
+
+        origin_code_chunks: List[np.ndarray] = []
+        dest_code_chunks: List[np.ndarray] = []
+        likelihood_chunks: List[np.ndarray] = []
+        metadata_chunks: Dict[str, List[np.ndarray]] = {}
 
         for file_config in self._file_configs:
             file_path = Path(pr.resolve(file_config['path']))
@@ -867,13 +888,29 @@ class OriginDestinationMatrixSource(DataSource):
             if not file_path.exists():
                 raise FileNotFoundError(f"data source file not found: {file_path}")
 
+            origins_before = len(self._origin_code_table)
             try:
-                self._load_file(file_path, file_config, geo_units)
+                origin_codes, dest_codes, likelihoods, metadata_arrays = self._load_file(
+                    file_path, file_config, geo_units
+                )
             except Exception as e:
                 # Fail loud on a load/parse error.
                 raise RuntimeError(
                     f"failed to load data source file {file_path}: {e}"
                 ) from e
+
+            self._require_disjoint_origins(origin_codes, origins_before, file_path)
+
+            if not len(origin_codes):
+                continue
+            origin_code_chunks.append(origin_codes)
+            dest_code_chunks.append(dest_codes)
+            likelihood_chunks.append(likelihoods)
+            for meta_key, array in metadata_arrays.items():
+                metadata_chunks.setdefault(meta_key, []).append(array)
+
+        self._build_groups(origin_code_chunks, dest_code_chunks,
+                           likelihood_chunks, metadata_chunks)
 
         # Apply the out-of-boundary policy AFTER parsing and OUTSIDE the
         # per-file try/except above, since policy violations must fail loud.
@@ -881,8 +918,52 @@ class OriginDestinationMatrixSource(DataSource):
 
         self._data_loaded = True
 
+    def _require_uniform_metadata_columns(self) -> None:
+        """Every file of a source must declare the same metadata keys.
+
+        Storage is one dense array per key covering all rows of the source, so
+        a key present in one file and absent from another has no representable
+        value on the rows it is missing from. Declaring fewer keys on one file
+        is therefore a config error, not a licence to leave holes.
+        """
+        key_sets = [frozenset(fc.get('metadata_columns', {})) for fc in self._file_configs]
+        if len(set(key_sets)) <= 1:
+            return
+        union = sorted(set().union(*key_sets))
+        per_file = {
+            str(fc.get('path')): sorted(keys)
+            for fc, keys in zip(self._file_configs, key_sets)
+        }
+        raise ValueError(
+            f"O-D source '{self.name}': files declare different "
+            f"'metadata_columns' keys {per_file}. Every file must declare all "
+            f"of {union}, or the source must stop declaring the missing ones."
+        )
+
+    def _require_disjoint_origins(self, origin_codes: np.ndarray,
+                                   origins_before: int, file_path: Path) -> None:
+        """An origin appearing in two files of one source is a data error.
+
+        Codes are assigned in first-appearance order, so any code this file
+        produced that is below the table size before the file was read came
+        from an earlier file. Merging would have to pick a winner silently.
+        """
+        if not len(origin_codes):
+            return
+        seen = np.unique(origin_codes)
+        overlap = seen[seen < origins_before]
+        if not len(overlap):
+            return
+        examples = [self._origin_code_table[int(c)] for c in overlap[:5]]
+        raise ValueError(
+            f"O-D source '{self.name}': {len(overlap)} origin(s) in {file_path} "
+            f"were already loaded from an earlier file, e.g. {sorted(examples)}. "
+            "Files within one source must cover disjoint origins."
+        )
+
     def _load_file(self, file_path: Path, file_config: Dict[str, Any],
-                    geo_units: Optional[set]) -> None:
+                    geo_units: Optional[set]) -> Tuple[np.ndarray, np.ndarray,
+                                                       np.ndarray, Dict[str, np.ndarray]]:
         origin_column = _ordered_key_columns(file_config, self.name, expected=1)[0]
         destination_column = file_config.get('destination_column')
         likelihood_column = file_config.get('likelihood_column')
@@ -904,10 +985,10 @@ class OriginDestinationMatrixSource(DataSource):
             if should_filter:
                 logger.info(f"  Filtering O-D matrix based on {len(overlap)} matching origins")
 
-        origin_code_table = CodeTable()
-        dest_code_table = CodeTable()
-        metadata_code_tables: Dict[str, CodeTable] = {}
-        metadata_is_numeric: Dict[str, bool] = {}
+        origin_code_table = self._origin_code_table
+        dest_code_table = self._dest_code_table
+        metadata_code_tables = self._metadata_code_tables
+        metadata_is_numeric = self._metadata_is_numeric
 
         origin_code_chunks: List[np.ndarray] = []
         dest_code_chunks: List[np.ndarray] = []
@@ -943,22 +1024,27 @@ class OriginDestinationMatrixSource(DataSource):
 
             for meta_key, meta_column in metadata_columns.items():
                 if meta_column not in chunk.columns:
-                    continue  # silently skipped, matching prior behaviour
+                    raise ValueError(
+                        f"metadata column '{meta_column}' (declared as "
+                        f"'{meta_key}') is not in the file. Declared metadata "
+                        "must exist: storage is one dense array per key, so a "
+                        "missing column has no representable value."
+                    )
                 series = chunk[meta_column]
                 is_numeric = pd.api.types.is_numeric_dtype(series)
                 if meta_key not in metadata_is_numeric:
                     metadata_is_numeric[meta_key] = is_numeric
                     if not is_numeric:
                         metadata_code_tables[meta_key] = CodeTable()
-                    metadata_chunks[meta_key] = []
                 elif metadata_is_numeric[meta_key] != is_numeric:
                     # pandas infers dtype per chunk, so a column that's numeric
                     # in one chunk and stringy in another must fail loud rather
                     # than have the wrong-typed chunk silently skip encoding.
                     raise ValueError(
                         f"metadata column '{meta_column}' has inconsistent dtype "
-                        f"across chunks (numeric vs non-numeric)"
+                        f"across chunks or files (numeric vs non-numeric)"
                     )
+                metadata_chunks.setdefault(meta_key, [])
                 if metadata_is_numeric[meta_key]:
                     metadata_chunks[meta_key].append(series.to_numpy())
                 else:
@@ -979,6 +1065,29 @@ class OriginDestinationMatrixSource(DataSource):
             for meta_key, chunks in metadata_chunks.items()
         }
 
+        logger.info(f"  ✓ Loaded {n_rows} row(s) from {file_path.name}")
+        return origin_codes, dest_codes, likelihoods, metadata_arrays
+
+    def _build_groups(self, origin_code_chunks: List[np.ndarray],
+                       dest_code_chunks: List[np.ndarray],
+                       likelihood_chunks: List[np.ndarray],
+                       metadata_chunks: Dict[str, List[np.ndarray]]) -> None:
+        """Concatenate the files of this source into one grouped, normalised
+        store. Grouping and normalisation happen once, over all files, so an
+        origin is normalised against its own rows wherever they came from."""
+        if origin_code_chunks:
+            origin_codes = np.concatenate(origin_code_chunks)
+            dest_codes = np.concatenate(dest_code_chunks)
+            likelihoods = np.concatenate(likelihood_chunks)
+        else:
+            origin_codes = np.empty(0, dtype=np.int32)
+            dest_codes = np.empty(0, dtype=np.int32)
+            likelihoods = np.empty(0, dtype=np.float64)
+        metadata_arrays = {
+            meta_key: np.concatenate(chunks)
+            for meta_key, chunks in metadata_chunks.items()
+        }
+
         # Sort by origin code (stable, to preserve within-origin file order —
         # matches the old groupby+iterrows behaviour), then group densely:
         # origin codes are 0..V-1 by construction, so bincount/cumsum gives
@@ -991,8 +1100,9 @@ class OriginDestinationMatrixSource(DataSource):
         likelihoods = likelihoods[order]
         metadata_arrays = {k: v[order] for k, v in metadata_arrays.items()}
 
-        vocab_size = len(origin_code_table)
-        counts = np.bincount(origin_codes, minlength=vocab_size) if len(origin_codes) else np.zeros(vocab_size, dtype=np.int64)
+        vocab_size = len(self._origin_code_table)
+        counts = (np.bincount(origin_codes, minlength=vocab_size) if len(origin_codes)
+                  else np.zeros(vocab_size, dtype=np.int64))
         group_stops = np.cumsum(counts)
         group_starts = group_stops - counts
 
@@ -1008,9 +1118,6 @@ class OriginDestinationMatrixSource(DataSource):
             if total > 0:
                 likelihoods[start:stop] /= total
 
-        self._origin_code_table = origin_code_table
-        self._dest_code_table = dest_code_table
-        self._metadata_code_tables = metadata_code_tables
         self._dest_codes = dest_codes
         self._likelihoods = likelihoods
         self._metadata_arrays = metadata_arrays
@@ -1018,7 +1125,7 @@ class OriginDestinationMatrixSource(DataSource):
         self._group_starts = group_starts
         self._group_stops = group_stops
 
-        logger.info(f"  ✓ Loaded {vocab_size} origins from {file_path.name}")
+        logger.info(f"  ✓ Loaded {vocab_size} origins for source '{self.name}'")
 
     def _boundary_units(self, geo_units: set) -> set:
         """Narrow the loaded geo units to the level destinations are declared at.

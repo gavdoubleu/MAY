@@ -414,17 +414,28 @@ def write_od_csv(path, origin, destination, likelihood, extra_columns=None):
 def make_od_config(csv_path, out_of_boundary="error", metadata_columns=None,
                     exclude_destinations=None, on_empty=None, outside_value=None,
                     redistributed_flag=None, chunk_size=None, destination_level=None):
-    file_config = {
-        "path": str(csv_path),
-        "key_columns": {"origin": None},
-        "destination_column": "destination",
-        "likelihood_column": "likelihood",
-        "metadata_columns": metadata_columns or {},
-        "exclude_destinations": exclude_destinations or [],
-    }
-    if destination_level is not None:
-        file_config["destination_level"] = destination_level
-    config = {"files": [file_config], "out_of_boundary": out_of_boundary}
+    """csv_path: one path, or a list of paths for a multi-file source.
+    metadata_columns: one mapping applied to every file, or a list of mappings
+    aligned with csv_path."""
+    csv_paths = csv_path if isinstance(csv_path, (list, tuple)) else [csv_path]
+    if isinstance(metadata_columns, (list, tuple)):
+        per_file_metadata = list(metadata_columns)
+    else:
+        per_file_metadata = [metadata_columns or {}] * len(csv_paths)
+    file_configs = []
+    for path, file_metadata in zip(csv_paths, per_file_metadata):
+        file_config = {
+            "path": str(path),
+            "key_columns": {"origin": None},
+            "destination_column": "destination",
+            "likelihood_column": "likelihood",
+            "metadata_columns": file_metadata or {},
+            "exclude_destinations": exclude_destinations or [],
+        }
+        if destination_level is not None:
+            file_config["destination_level"] = destination_level
+        file_configs.append(file_config)
+    config = {"files": file_configs, "out_of_boundary": out_of_boundary}
     if on_empty is not None:
         config["on_empty"] = on_empty
     if outside_value is not None:
@@ -558,6 +569,75 @@ class TestOriginDestinationMatrixSource:
         assert source.lookup("A") is not None
         with pytest.raises(KeyError):
             source.lookup("B")
+
+
+class TestOriginDestinationMultiFile:
+    """One source, several files covering disjoint origins (the production
+    shape: England+Wales and Scotland in separate published tables). Every
+    file's origins must survive into one lookup."""
+
+    def test_origins_from_all_files_resolve(self, tmp_path):
+        first = write_od_csv(tmp_path / "first.csv", ["A", "A"], ["D1", "D2"], [3.0, 7.0],
+                             extra_columns={"mode": ["car", "bus"]})
+        second = write_od_csv(tmp_path / "second.csv", ["B"], ["D3"], [1.0],
+                              extra_columns={"mode": ["car"]})
+        source = OriginDestinationMatrixSource(
+            "test_od", make_od_config([first, second], metadata_columns={"mode": "mode"})
+        )
+        source.load_data()
+        assert {d for d, _, _ in source.lookup("A")} == {"D1", "D2"}
+        assert source.lookup("B") == [("D3", {"mode": "car"}, 1.0)]
+
+    def test_normalisation_is_per_origin_not_per_file(self, tmp_path):
+        first = write_od_csv(tmp_path / "first.csv", ["A", "A"], ["D1", "D2"], [3.0, 7.0])
+        second = write_od_csv(tmp_path / "second.csv", ["B", "B"], ["D1", "D2"], [1.0, 1.0])
+        source = OriginDestinationMatrixSource("test_od", make_od_config([first, second]))
+        source.load_data()
+        for origin in ("A", "B"):
+            assert abs(sum(lik for _, _, lik in source.lookup(origin)) - 1.0) < 1e-10
+
+    def test_metadata_code_tables_shared_across_files(self, tmp_path):
+        """Codes are assigned per source, not per file; a value first seen in
+        the second file must still decode back to itself."""
+        first = write_od_csv(tmp_path / "first.csv", ["A"], ["D1"], [1.0],
+                             extra_columns={"mode": ["car"]})
+        second = write_od_csv(tmp_path / "second.csv", ["B"], ["D2"], [1.0],
+                              extra_columns={"mode": ["bus"]})
+        source = OriginDestinationMatrixSource(
+            "test_od", make_od_config([first, second], metadata_columns={"mode": "mode"})
+        )
+        source.load_data()
+        assert source.lookup("A")[0][1]["mode"] == "car"
+        assert source.lookup("B")[0][1]["mode"] == "bus"
+
+    def test_overlapping_origins_across_files_fail_loud(self, tmp_path):
+        first = write_od_csv(tmp_path / "first.csv", ["A"], ["D1"], [1.0])
+        second = write_od_csv(tmp_path / "second.csv", ["A"], ["D2"], [1.0])
+        source = OriginDestinationMatrixSource("test_od", make_od_config([first, second]))
+        with pytest.raises(Exception, match="disjoint"):
+            source.load_data()
+
+    def test_files_disagreeing_on_metadata_columns_fail_loud(self, tmp_path):
+        first = write_od_csv(tmp_path / "first.csv", ["A"], ["D1"], [1.0],
+                             extra_columns={"mode": ["car"], "code": ["X"]})
+        second = write_od_csv(tmp_path / "second.csv", ["B"], ["D2"], [1.0],
+                              extra_columns={"mode": ["bus"]})
+        source = OriginDestinationMatrixSource(
+            "test_od",
+            make_od_config([first, second],
+                           metadata_columns=[{"mode": "mode", "destination_code": "code"},
+                                             {"mode": "mode"}]),
+        )
+        with pytest.raises(ValueError, match="metadata_columns"):
+            source.load_data()
+
+    def test_declared_metadata_column_absent_from_csv_fails_loud(self, tmp_path):
+        csv_path = write_od_csv(tmp_path / "od.csv", ["A"], ["D1"], [1.0])
+        source = OriginDestinationMatrixSource(
+            "test_od", make_od_config(csv_path, metadata_columns={"mode": "mode"})
+        )
+        with pytest.raises(Exception, match="mode"):
+            source.load_data()
 
 
 class TestOriginDestinationMatrixBoundaryPolicy:
