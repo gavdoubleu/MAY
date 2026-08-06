@@ -796,7 +796,6 @@ class OriginDestinationMatrixSource(DataSource):
         # Per-row: does this row's metadata read back as the outside sentinel
         # rather than as stored values? True only for sentinel rows minted with
         # no source row behind them (redistribute + on_empty='outside').
-        self._metadata_stamped_outside = np.empty(0, dtype=bool)
         self._group_starts = np.empty(0, dtype=np.int64)
         self._group_stops = np.empty(0, dtype=np.int64)
         self._file_configs = config.get('files', [])
@@ -1145,6 +1144,7 @@ class OriginDestinationMatrixSource(DataSource):
         # over origins (~thousands to low hundred-thousands), not a
         # Python-tuple loop over rows — the row count was the memory/time
         # problem, not the origin count.
+        massless_origins: List[str] = []
         for code in range(vocab_size):
             start, stop = int(group_starts[code]), int(group_stops[code])
             if stop <= start:
@@ -1152,15 +1152,71 @@ class OriginDestinationMatrixSource(DataSource):
             total = likelihoods[start:stop].sum()
             if total > 0:
                 likelihoods[start:stop] /= total
+            else:
+                # A massless origin: every row carries zero likelihood, so
+                # there is nothing to divide by. The destinations and their
+                # metadata are still real observations, so the origin is
+                # weighted uniformly rather than left as a zero vector no
+                # downstream draw can sample from. Settled here, once, so no
+                # later stage (the boundary policy above all) has to re-handle
+                # a sum that cannot be normalised.
+                likelihoods[start:stop] = 1.0 / (stop - start)
+                massless_origins.append(self._origin_code_table[code])
+
+        if massless_origins:
+            logger.warning(
+                f"  [massless] {len(massless_origins)} origin(s) in source "
+                f"'{self.name}' carry zero likelihood mass on every row "
+                f"(e.g. {massless_origins[:15]}). Their weights are INVENTED: "
+                "mass spread uniformly over the destinations observed."
+            )
 
         self._dest_codes = dest_codes
         self._likelihoods = likelihoods
         self._metadata_arrays = metadata_arrays
-        self._metadata_stamped_outside = np.zeros(len(dest_codes), dtype=bool)
         self._group_starts = group_starts
         self._group_stops = group_stops
 
         logger.info(f"  ✓ Loaded {vocab_size} origins for source '{self.name}'")
+
+    def _collapse_onto_sentinel(
+            self, outside_metadata: Dict[str, np.ndarray], outside_likelihoods: np.ndarray,
+            outside_code: int, dest_dtype: np.dtype,
+    ) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray]]:
+        """Merge out-of-boundary rows onto sentinel rows, one per distinct
+        combination of the `sentinel_preserves` columns.
+
+        Each out-of-boundary row takes the sentinel as its destination but
+        keeps the metadata named by `sentinel_preserves`; rows agreeing on
+        those merge. Collapsing them all onto one row would erase the
+        distinctions a downstream draw may condition on, and a draw restricted
+        to travelling work modes would then find no sentinel row at all and
+        silently renormalise the out-of-area mass onto in-world destinations.
+        Grouping on EVERY column is the opposite failure: destination-unique
+        columns make the collapse a no-op and the sentinel count tracks the
+        out-of-boundary row count.
+
+        The same collapse serves both routes to a sentinel — the `outside`
+        policy, and a `redistribute` origin with no valid destinations. The
+        latter is just the case where every row of the origin is out, so there
+        is no reason for it to invent anything the former does not.
+
+        Returns the sentinel rows' (destination codes, masses, metadata).
+        """
+        group_metadata, group_masses = _group_by_metadata(
+            {k: outside_metadata[k] for k in self._sentinel_preserves},
+            outside_likelihoods,
+        )
+        # Non-preserved columns keep their (dense) slot but carry no meaning on
+        # a sentinel row; lookup() omits them rather than reporting a
+        # placeholder as if it were data.
+        sentinel_metadata = {
+            k: (group_metadata[k] if k in group_metadata
+                else np.zeros(len(group_masses), dtype=v.dtype))
+            for k, v in outside_metadata.items()
+        }
+        sentinel_dest_codes = np.full(len(group_masses), outside_code, dtype=dest_dtype)
+        return sentinel_dest_codes, group_masses, sentinel_metadata
 
     def _boundary_units(self, geo_units: set) -> set:
         """Narrow the loaded geo units to the level destinations are declared at.
@@ -1245,7 +1301,7 @@ class OriginDestinationMatrixSource(DataSource):
             return outside_code
 
         error_offenders: Dict[str, List[str]] = {}
-        empty_origins: List[str] = []
+        origins_with_no_valid_destinations: List[str] = []
         origins_with_out = 0
         dropped_options = 0
         out_mass_total = 0.0
@@ -1254,18 +1310,14 @@ class OriginDestinationMatrixSource(DataSource):
         new_dest_chunks: List[np.ndarray] = []
         new_likelihood_chunks: List[np.ndarray] = []
         new_metadata_chunks: Dict[str, List[np.ndarray]] = {k: [] for k in metadata_arrays}
-        new_stamped_chunks: List[np.ndarray] = []
         new_counts = np.zeros(vocab_size, dtype=np.int64)
 
         def append_rows(code: int, dest_slice: np.ndarray, lik_slice: np.ndarray,
-                        meta_slices: Dict[str, np.ndarray],
-                        stamped: Optional[np.ndarray] = None) -> None:
+                        meta_slices: Dict[str, np.ndarray]) -> None:
             new_dest_chunks.append(dest_slice)
             new_likelihood_chunks.append(lik_slice)
             for k in metadata_arrays:
                 new_metadata_chunks[k].append(meta_slices[k])
-            new_stamped_chunks.append(np.zeros(len(dest_slice), dtype=bool)
-                                       if stamped is None else stamped)
             new_counts[code] = len(dest_slice)
 
         for code in range(vocab_size):
@@ -1291,24 +1343,29 @@ class OriginDestinationMatrixSource(DataSource):
                 append_rows(code, dest_codes[start:stop], likelihoods[start:stop],
                             {k: v[start:stop] for k, v in metadata_arrays.items()})
             elif self._out_of_boundary == 'redistribute':
-                dropped_options += int((~in_b).sum())
                 in_total = float(likelihoods[start:stop][in_b].sum())
                 if in_total <= 0:
-                    empty_origins.append(origin_str)
+                    # Every destination of this origin is out-of-boundary, so
+                    # nothing was dropped in favour of an in-world alternative
+                    # — there was none. Counting these rows as dropped would
+                    # overstate the discarded options.
+                    origins_with_no_valid_destinations.append(origin_str)
                     if self._on_empty == 'outside':
-                        # No in-boundary row survives, so there is no source
-                        # metadata to carry. This sentinel is stamped instead:
-                        # the placeholder values below are never read back, the
-                        # stamp flag makes lookup() report outside_value.
-                        code_ = get_outside_code()
-                        append_rows(
-                            code, np.array([code_], dtype=dest_codes.dtype),
-                            np.array([1.0], dtype=likelihoods.dtype),
-                            {k: np.zeros(1, dtype=v.dtype) for k, v in metadata_arrays.items()},
-                            stamped=np.ones(1, dtype=bool),
+                        # Every row is out-of-boundary, so this is the 'outside'
+                        # policy's case with the in-boundary side empty: take
+                        # the same collapse, carrying the same real metadata.
+                        sentinel_dest_codes, sentinel_masses, sentinel_metadata = (
+                            self._collapse_onto_sentinel(
+                                {k: v[start:stop] for k, v in metadata_arrays.items()},
+                                likelihoods[start:stop],
+                                get_outside_code(), dest_codes.dtype,
+                            )
                         )
+                        append_rows(code, sentinel_dest_codes, sentinel_masses,
+                                    sentinel_metadata)
                     # else: on_empty='error' — will raise below, leave empty.
                 else:
+                    dropped_options += int((~in_b).sum())
                     append_rows(
                         code, dest_codes[start:stop][in_b],
                         likelihoods[start:stop][in_b] / in_total,
@@ -1320,35 +1377,17 @@ class OriginDestinationMatrixSource(DataSource):
                     self._redistributed_fraction[origin_str] = out_mass
             else:  # 'outside'
                 outside_origins += 1
-                # Each out-of-boundary row takes the sentinel as its destination
-                # but keeps the metadata named by sentinel_preserves; rows
-                # agreeing on those merge. Collapsing them all onto one row
-                # would erase the distinctions a downstream draw may condition
-                # on, and a draw restricted to travelling work modes would then
-                # find no sentinel row at all and silently renormalise the
-                # out-of-area mass onto in-world destinations. Grouping on
-                # EVERY column is the opposite failure: destination-unique
-                # columns make the collapse a no-op and the sentinel count
-                # tracks the out-of-boundary row count.
-                group_metadata, group_masses = _group_by_metadata(
-                    {k: metadata_arrays[k][start:stop][~in_b]
-                     for k in self._sentinel_preserves},
-                    likelihoods[start:stop][~in_b],
+                sentinel_dest_codes, sentinel_masses, sentinel_metadata = (
+                    self._collapse_onto_sentinel(
+                        {k: v[start:stop][~in_b] for k, v in metadata_arrays.items()},
+                        likelihoods[start:stop][~in_b],
+                        get_outside_code(), dest_codes.dtype,
+                    )
                 )
-                code_ = get_outside_code()
-                # Non-preserved columns keep their (dense) slot but carry no
-                # meaning on a sentinel row; lookup() omits them rather than
-                # reporting a placeholder as if it were data.
-                sentinel_metadata = {
-                    k: (group_metadata[k] if k in group_metadata
-                        else np.zeros(len(group_masses), dtype=v.dtype))
-                    for k, v in metadata_arrays.items()
-                }
                 append_rows(
                     code,
-                    np.concatenate([dest_codes[start:stop][in_b],
-                                    np.full(len(group_masses), code_, dtype=dest_codes.dtype)]),
-                    np.concatenate([likelihoods[start:stop][in_b], group_masses]),
+                    np.concatenate([dest_codes[start:stop][in_b], sentinel_dest_codes]),
+                    np.concatenate([likelihoods[start:stop][in_b], sentinel_masses]),
                     {k: np.concatenate([v[start:stop][in_b], sentinel_metadata[k]])
                      for k, v in metadata_arrays.items()},
                 )
@@ -1363,17 +1402,23 @@ class OriginDestinationMatrixSource(DataSource):
             )
 
         if self._out_of_boundary == 'redistribute':
-            if empty_origins:
+            if origins_with_no_valid_destinations:
+                destination_of_their_flow = (
+                    f"their whole flow went to the sentinel '{self._outside_value}'"
+                    if self._on_empty == 'outside' else "no flow survives for them")
                 logger.warning(
-                    f"  [out_of_boundary] {len(empty_origins)} origin(s) have NO "
-                    f"in-boundary destination (e.g. {empty_origins[:15]})."
+                    f"  [out_of_boundary] {len(origins_with_no_valid_destinations)} "
+                    f"origin(s) have NO in-boundary destination, so "
+                    f"{destination_of_their_flow} (e.g. "
+                    f"{origins_with_no_valid_destinations[:15]})."
                 )
                 if self._on_empty == 'error':
                     raise ValueError(
-                        f"O-D source '{self.name}': {len(empty_origins)} origin(s) have "
+                        f"O-D source '{self.name}': "
+                        f"{len(origins_with_no_valid_destinations)} origin(s) have "
                         f"no in-boundary destination and on_empty='error' "
-                        f"(e.g. {empty_origins[:15]}). Switch on_empty to 'outside', or "
-                        "shrink/extend the world."
+                        f"(e.g. {origins_with_no_valid_destinations[:15]}). Switch "
+                        "on_empty to 'outside', or shrink/extend the world."
                     )
             mean_pct = 100.0 * out_mass_total / origins_with_out if origins_with_out else 0.0
             logger.info(
@@ -1395,8 +1440,6 @@ class OriginDestinationMatrixSource(DataSource):
             k: (np.concatenate(v) if v else np.empty(0, dtype=metadata_arrays[k].dtype))
             for k, v in new_metadata_chunks.items()
         }
-        self._metadata_stamped_outside = (np.concatenate(new_stamped_chunks)
-                                           if new_stamped_chunks else np.empty(0, dtype=bool))
         self._group_stops = np.cumsum(new_counts)
         self._group_starts = self._group_stops - new_counts
 
@@ -1425,27 +1468,23 @@ class OriginDestinationMatrixSource(DataSource):
         for i in range(start, stop):
             dest = self._dest_code_table[int(self._dest_codes[i])]
             likelihood = float(self._likelihoods[i])
-            if self._metadata_stamped_outside[i]:
-                # A sentinel with no source row behind it: nothing to report but
-                # the sentinel itself. Sentinel rows that DID absorb real flow
-                # keep that flow's metadata, so a conditioned draw still sees them.
-                metadata = {k: self._outside_value for k in self._metadata_arrays}
-            else:
-                # On a sentinel row only the preserved columns carry meaning;
-                # the rest are omitted, not filled, so nothing downstream can
-                # mistake a placeholder for a value.
-                is_sentinel = (self._outside_dest_code is not None
-                               and int(self._dest_codes[i]) == self._outside_dest_code)
-                metadata = {}
-                for meta_key, arr in self._metadata_arrays.items():
-                    if is_sentinel and meta_key not in self._sentinel_preserves:
-                        continue
-                    value = arr[i]
-                    if meta_key in self._metadata_code_tables:
-                        value = self._metadata_code_tables[meta_key][int(value)]
-                    elif hasattr(value, 'item'):
-                        value = value.item()
-                    metadata[meta_key] = value
+            # Every sentinel row absorbed real out-of-boundary flow, so it
+            # carries that flow's preserved metadata. Only the preserved
+            # columns mean anything there; the rest are omitted, not filled, so
+            # nothing downstream can mistake a placeholder for a value —
+            # outside_value names a destination and never a metadata value.
+            is_sentinel = (self._outside_dest_code is not None
+                           and int(self._dest_codes[i]) == self._outside_dest_code)
+            metadata = {}
+            for meta_key, arr in self._metadata_arrays.items():
+                if is_sentinel and meta_key not in self._sentinel_preserves:
+                    continue
+                value = arr[i]
+                if meta_key in self._metadata_code_tables:
+                    value = self._metadata_code_tables[meta_key][int(value)]
+                elif hasattr(value, 'item'):
+                    value = value.item()
+                metadata[meta_key] = value
             result.append((dest, metadata, likelihood))
         return result
 

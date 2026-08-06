@@ -795,6 +795,97 @@ class TestOriginDestinationSentinelPreserves:
         assert outside[0][2] == pytest.approx(0.6)
 
 
+class TestOriginDestinationNoValidDestinations:
+    """An origin whose every destination is out-of-boundary takes the same
+    grouped collapse as the `outside` policy.
+
+    Its rows are real rows with real metadata, so there is nothing to invent:
+    the sentinel carries the preserved metadata of the flow that left, one row
+    per distinct combination, exactly as a partly-out-of-boundary origin does.
+    """
+
+    def _source(self, csv_path, sentinel_preserves, metadata_columns=None):
+        return OriginDestinationMatrixSource(
+            "test_od",
+            make_od_config(csv_path, out_of_boundary="redistribute", on_empty="outside",
+                            outside_value="OUTSIDE", metadata_columns=metadata_columns,
+                            sentinel_preserves=sentinel_preserves),
+        )
+
+    def test_one_sentinel_row_per_preserved_combination(self, tmp_path):
+        csv_path = write_od_csv(
+            tmp_path / "od.csv", ["A"] * 3, ["OUT1", "OUT2", "OUT3"], [0.5, 0.3, 0.2],
+            extra_columns={"mode": ["car", "bus", "bus"]},
+        )
+        source = self._source(csv_path, ["mode"], metadata_columns={"mode": "mode"})
+        source.load_data(geo_units={"A"})
+        outside = {m["mode"]: lik for d, m, lik in source.lookup("A") if d == "OUTSIDE"}
+        assert outside == {"car": pytest.approx(0.5), "bus": pytest.approx(0.5)}
+
+    def test_sentinel_rows_sum_to_one(self, tmp_path):
+        csv_path = write_od_csv(
+            tmp_path / "od.csv", ["A"] * 3, ["OUT1", "OUT2", "OUT3"], [3.0, 1.0, 6.0],
+            extra_columns={"mode": ["car", "bus", "walk"]},
+        )
+        source = self._source(csv_path, ["mode"], metadata_columns={"mode": "mode"})
+        source.load_data(geo_units={"A"})
+        result = source.lookup("A")
+        assert {d for d, _, _ in result} == {"OUTSIDE"}
+        assert sum(lik for _, _, lik in result) == pytest.approx(1.0)
+
+    def test_no_metadata_key_reports_the_sentinel_value(self, tmp_path):
+        """Non-preserved columns are omitted from a sentinel row, never
+        reported as `outside_value` — that names a destination and nothing
+        else."""
+        csv_path = write_od_csv(
+            tmp_path / "od.csv", ["A"], ["OUT1"], [1.0],
+            extra_columns={"mode": ["car"], "dest_code": ["C1"]},
+        )
+        source = self._source(csv_path, ["mode"],
+                              metadata_columns={"mode": "mode", "dest_code": "dest_code"})
+        source.load_data(geo_units={"A"})
+        (_, metadata, _), = source.lookup("A")
+        assert metadata == {"mode": "car"}
+
+
+class TestOriginDestinationMasslessOrigin:
+    """An origin whose rows all carry zero likelihood has nothing to normalise.
+
+    A property of the data, not of the run — unrelated to the boundary. The
+    observed metadata combinations are still real, so the origin is reported
+    and weighted uniformly rather than dropped or failed on.
+    """
+
+    def test_uniform_weights_and_warning(self, tmp_path, caplog):
+        import logging
+        csv_path = write_od_csv(
+            tmp_path / "od.csv", ["A", "A", "B"], ["IN1", "IN2", "IN1"], [0.0, 0.0, 1.0],
+        )
+        source = OriginDestinationMatrixSource("test_od", make_od_config(csv_path))
+        with caplog.at_level(logging.WARNING):
+            source.load_data(geo_units={"A", "B", "IN1", "IN2"})
+        assert [lik for _, _, lik in source.lookup("A")] == [pytest.approx(0.5)] * 2
+        assert [lik for _, _, lik in source.lookup("B")] == [pytest.approx(1.0)]
+        assert any("massless" in message and "A" in message for message in caplog.messages)
+
+    def test_massless_origin_outside_the_boundary_keeps_its_modes(self, tmp_path):
+        """Masslessness is settled at load, so the sentinel collapse sees
+        ordinary weights and the modes present in the data survive."""
+        csv_path = write_od_csv(
+            tmp_path / "od.csv", ["A"] * 3, ["OUT1", "OUT2", "OUT3"], [0.0, 0.0, 0.0],
+            extra_columns={"mode": ["car", "bus", "bus"]},
+        )
+        source = OriginDestinationMatrixSource(
+            "test_od",
+            make_od_config(csv_path, out_of_boundary="redistribute", on_empty="outside",
+                            outside_value="OUTSIDE", metadata_columns={"mode": "mode"},
+                            sentinel_preserves=["mode"]),
+        )
+        source.load_data(geo_units={"A"})
+        outside = {m["mode"]: lik for d, m, lik in source.lookup("A") if d == "OUTSIDE"}
+        assert outside == {"car": pytest.approx(1 / 3), "bus": pytest.approx(2 / 3)}
+
+
 class TestOriginDestinationBoundaryLevel:
     """Boundary membership is scoped to the declared `destination_level`.
 
