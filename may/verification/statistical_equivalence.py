@@ -45,15 +45,38 @@ class MetricResult:
     test: str
     statistic: float
     pvalue: float
-    verdict: str         # "OK" | "SHIFTED"
+    verdict: str         # "OK" | "SHIFTED" | "MISSING"
+    tied: bool = False   # baseline and candidate histograms were identical
 
 
 @dataclass
 class ComparisonReport:
-    """Aggregate verdict across all metrics."""
+    """Aggregate verdict across all metrics.
+
+    Carries the gate's *width* alongside its metric count. A metric whose
+    inputs no in-scope stage writes is identical in every run and contributes
+    no evidence, so a bare count overstates what a pass licenses — hence
+    `compared_count`, the metrics that actually had something to disagree
+    about, reported next to it.
+    """
 
     passed: bool
     results: Dict[str, MetricResult] = field(default_factory=dict)
+
+    @property
+    def tied_count(self) -> int:
+        """Metrics whose baseline and candidate histograms were identical."""
+        return sum(1 for result in self.results.values() if result.tied)
+
+    @property
+    def compared_count(self) -> int:
+        """Metrics that differed, so the test performed carries information.
+
+        Excludes MISSING metrics: absent from the candidate, they were never
+        put to a test and belong to neither side of the width.
+        """
+        return sum(1 for result in self.results.values()
+                   if not result.tied and result.verdict != "MISSING")
 
 
 def _compare_nominal(baseline: Distribution, candidate: Distribution,
@@ -87,6 +110,23 @@ def _compare_ordinal(baseline: Distribution, candidate: Distribution,
 _COMPARATORS = {"nominal": _compare_nominal, "ordinal": _compare_ordinal}
 
 
+def _normalised_counts(distribution: Distribution) -> Dict:
+    """Histogram with keys cast the way this metric's comparator reads them.
+
+    `save_baseline` stringifies every key, so a baseline loaded from disk meets
+    an in-memory extraction with differently-typed keys for the same value.
+    Normalising the way the comparators already do — labels for nominal, floats
+    for ordinal — is what lets a genuine tie be recognised across that boundary.
+    """
+    caster = str if distribution.kind == "nominal" else float
+    return {caster(value): int(count) for value, count in distribution.counts.items()}
+
+
+def _is_tie(baseline: Distribution, candidate: Distribution) -> bool:
+    """True when the two histograms are identical, so nothing could disagree."""
+    return _normalised_counts(baseline) == _normalised_counts(candidate)
+
+
 def compare_distributions(baseline: Dict[str, Distribution],
                           candidate: Dict[str, Distribution],
                           alpha: float = 0.05) -> ComparisonReport:
@@ -105,7 +145,11 @@ def compare_distributions(baseline: Dict[str, Distribution],
             results[name] = MetricResult("none", float("nan"), 0.0, "MISSING")
             continue
         comparator = _COMPARATORS[base_dist.kind]
-        results[name] = comparator(base_dist, candidate[name], alpha)
+        result = comparator(base_dist, candidate[name], alpha)
+        # Classified after testing, not instead of it: a tie is still put to
+        # the test so every metric's verdict is reached the same way.
+        result.tied = _is_tie(base_dist, candidate[name])
+        results[name] = result
 
     passed = all(r.verdict == "OK" for r in results.values())
     return ComparisonReport(passed=passed, results=results)
@@ -233,8 +277,14 @@ def load_baseline(path) -> Dict[str, Distribution]:
 
 def format_report(report: ComparisonReport, only_shifted: bool = True) -> str:
     """Human-readable summary; by default lists only the metrics that shifted."""
-    lines = [f"Tier-2 statistical equivalence: {'PASS' if report.passed else 'FAIL'} "
-             f"({len(report.results)} metrics)"]
+    missing_count = sum(1 for result in report.results.values()
+                        if result.verdict == "MISSING")
+    width = (f"{len(report.results)} metrics: {report.compared_count} compared, "
+             f"{report.tied_count} tied (identical histograms)")
+    if missing_count:
+        width += f", {missing_count} missing"
+    lines = [f"Tier-2 statistical equivalence: "
+             f"{'PASS' if report.passed else 'FAIL'} ({width})"]
     for name, result in sorted(report.results.items()):
         if only_shifted and result.verdict == "OK":
             continue

@@ -13,6 +13,7 @@ from may.verification.statistical_equivalence import (
     Distribution,
     compare_distributions,
     extract_distributions,
+    format_report,
     load_baseline,
     save_baseline,
 )
@@ -175,6 +176,103 @@ class TestStructuralMismatch:
 
         assert not report.passed
         assert report.results["age_by_geo:A"].verdict == "MISSING"
+
+
+class TestGateWidth:
+    """A pass licenses a claim about the metrics that could actually move.
+
+    Metrics whose inputs no in-scope stage writes agree in every run, so a
+    total count overstates the evidence: 436 tied metrics and 5 compared ones
+    is a 5-metric gate. The report separates the two so the headline count
+    cannot be mistaken for the gate's width.
+    """
+
+    def test_identical_metrics_are_reported_as_tied(self):
+        counts = {"car": 5000, "walk": 3000}
+        baseline = {"work_mode": Distribution(kind="nominal", counts=counts)}
+        candidate = {"work_mode": Distribution(kind="nominal", counts=dict(counts))}
+
+        report = compare_distributions(baseline, candidate)
+
+        assert report.tied_count == 1
+        assert report.compared_count == 0
+        assert report.results["work_mode"].tied
+
+    def test_differing_metrics_are_reported_as_compared(self):
+        baseline = {
+            "work_mode": Distribution(kind="nominal", counts={"car": 5000, "walk": 3000}),
+            "age_by_geo:A": Distribution(kind="ordinal", counts={20: 3, 40: 2}),
+        }
+        candidate = {
+            "work_mode": Distribution(kind="nominal", counts={"car": 4000, "walk": 4000}),
+            "age_by_geo:A": Distribution(kind="ordinal", counts={20: 3, 40: 2}),
+        }
+
+        report = compare_distributions(baseline, candidate)
+
+        assert report.compared_count == 1
+        assert report.tied_count == 1
+        assert report.results["work_mode"].tied is False
+        assert report.results["age_by_geo:A"].tied
+
+    def test_tie_is_reported_but_does_not_change_the_verdict(self):
+        """Classification is descriptive only — a tie is still tested and
+        still carries a verdict, so `passed` means exactly what it did."""
+        counts = {1: 4000, 2: 6000}
+        baseline = {"household_size": Distribution(kind="ordinal", counts=counts)}
+        candidate = {"household_size": Distribution(kind="ordinal", counts=dict(counts))}
+
+        report = compare_distributions(baseline, candidate)
+
+        assert report.passed
+        assert report.results["household_size"].verdict == "OK"
+        assert report.results["household_size"].test == "ks"
+
+    def test_missing_metric_is_neither_tied_nor_compared(self):
+        """A metric absent from the candidate was never put to a test, so it
+        cannot count towards either side of the width."""
+        baseline = {
+            "work_mode": Distribution(kind="nominal", counts={"car": 10, "walk": 5}),
+            "age_by_geo:A": Distribution(kind="ordinal", counts={20: 3}),
+        }
+        candidate = {
+            "work_mode": Distribution(kind="nominal", counts={"car": 10, "walk": 5}),
+        }
+
+        report = compare_distributions(baseline, candidate)
+
+        assert report.tied_count == 1
+        assert report.compared_count == 0
+        assert report.results["age_by_geo:A"].tied is False
+
+    def test_baseline_reloaded_from_disk_still_ties_against_extraction(self, tmp_path):
+        """`save_baseline` stringifies histogram keys, so a baseline read back
+        from JSON meets an in-memory extraction with differently-typed keys.
+        A tie must be recognised through that, or every ordinal metric in a
+        real gate run would be misreported as compared."""
+        distributions = extract_distributions(_write_world(tmp_path / "world.h5"))
+        path = tmp_path / "baseline.json"
+        save_baseline(distributions, path)
+
+        report = compare_distributions(load_baseline(path), distributions)
+
+        assert report.compared_count == 0
+        assert report.tied_count == len(distributions)
+
+    def test_report_states_the_width_not_just_the_count(self, tmp_path):
+        baseline = {
+            "work_mode": Distribution(kind="nominal", counts={"car": 5000, "walk": 3000}),
+            "age_by_geo:A": Distribution(kind="ordinal", counts={20: 3, 40: 2}),
+        }
+        candidate = {
+            "work_mode": Distribution(kind="nominal", counts={"car": 4000, "walk": 4000}),
+            "age_by_geo:A": Distribution(kind="ordinal", counts={20: 3, 40: 2}),
+        }
+
+        summary = format_report(compare_distributions(baseline, candidate))
+
+        assert "1 compared" in summary
+        assert "1 tied" in summary
 
 
 class TestBaselineRoundTrip:
