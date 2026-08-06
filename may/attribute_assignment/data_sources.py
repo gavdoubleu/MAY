@@ -315,11 +315,10 @@ class GeoDistributionSource(DataSource):
         for _, row in df.iterrows():
             geo_unit = row[key_column]
 
-            # Build probability distribution
-            probs = {}
-            for output_key, df_column in value_columns.items():
-                if df_column in df.columns:
-                    probs[output_key] = row[df_column]
+            # Build probability distribution. Every declared column is known to
+            # exist — _require_declared_columns checked the file at load.
+            probs = {output_key: row[df_column]
+                     for output_key, df_column in value_columns.items()}
 
             # Normalize probabilities
             probs = self._normalize_probabilities(probs)
@@ -421,11 +420,10 @@ class DiversitySource(DataSource):
         for _, row in df.iterrows():
             geo_unit = row[key_column]
 
-            # Get diversity counts
-            counts = {}
-            for output_key, df_column in value_columns.items():
-                if df_column in df.columns:
-                    counts[output_key] = float(row[df_column])
+            # Get diversity counts. Every declared column is known to exist —
+            # _require_declared_columns checked the file at load.
+            counts = {output_key: float(row[df_column])
+                      for output_key, df_column in value_columns.items()}
 
             # Normalize to probabilities
             total = sum(counts.values())
@@ -521,11 +519,11 @@ class PairProbabilitySource(DataSource):
             geo_unit = row[geo_col]
             first_value = row[first_value_col]
 
-            # Build second person probability distribution
-            second_probs = {}
-            for output_key, df_column in value_columns.items():
-                if df_column in df.columns:
-                    second_probs[output_key] = float(row[df_column])
+            # Build second person probability distribution. Every declared
+            # column is known to exist — _require_declared_columns checked the
+            # file at load.
+            second_probs = {output_key: float(row[df_column])
+                            for output_key, df_column in value_columns.items()}
 
             # Normalize
             second_probs = self._normalize_probabilities(second_probs)
