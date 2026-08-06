@@ -57,10 +57,19 @@ def _seed_and_invoke(payload):
 
 
 def parallel_map(worker_fn: Callable, slices: Sequence[Slice], *,
-                 global_seed: int = 0, workers: int = None) -> List:
+                 global_seed: int = 0, workers: int = None,
+                 max_tasks_per_child: int = None) -> List:
     """Run `worker_fn(slice, rng)` for each Slice across a bounded process pool,
     returning results in input order. Worker count is decoupled from Slice count
     — the pool drains the Slices from a shared queue.
+
+    `max_tasks_per_child` retires and reforks a worker after that many Slices.
+    A long-lived forked worker keeps whatever it wrote — module-level or
+    process-global state a `worker_fn` accumulates never resets between
+    Slices the same worker draws (see `CONTEXT.md`'s "Worker world copy").
+    That is invisible and unreclaimable from the parent, unlike its own
+    memory. `None` (the default) never retires a worker, matching today's
+    behaviour.
     """
     payloads = [(worker_fn, unit_slice, global_seed) for unit_slice in slices]
     # Never fork more workers than there are Slices to run.
@@ -71,14 +80,16 @@ def parallel_map(worker_fn: Callable, slices: Sequence[Slice], *,
     # in-process-vs-forked comparison.
     if worker_count <= 1:
         return [_seed_and_invoke(payload) for payload in payloads]
-    with _FORK_CONTEXT.Pool(processes=worker_count) as pool:
+    with _FORK_CONTEXT.Pool(processes=worker_count,
+                            maxtasksperchild=max_tasks_per_child) as pool:
         return pool.map(_seed_and_invoke, payloads)
 
 
 def parallel_map_in_order(worker_fn: Callable, slices: Sequence[Slice], *,
                           global_seed: int = 0, workers: int = None,
                           force_fork: bool = False,
-                          look_ahead: int = None) -> Iterator[Tuple[int, Any]]:
+                          look_ahead: int = None,
+                          max_tasks_per_child: int = None) -> Iterator[Tuple[int, Any]]:
     """As `parallel_map`, but yields `(slice_index, result)` one at a time, in
     input order, with only a bounded number of Slices ever in flight.
 
@@ -105,6 +116,10 @@ def parallel_map_in_order(worker_fn: Callable, slices: Sequence[Slice], *,
     as well as report the change, and the caller would apply it twice. Such a
     caller must fork at every worker count, which also makes its one-worker run
     a genuine control for its many-worker run rather than a different code path.
+
+    `max_tasks_per_child` retires and reforks a worker after that many Slices,
+    bounding the memory a long-lived worker itself accumulates — see
+    `parallel_map`'s docstring. `None` never retires a worker.
     """
     payloads = [(slice_index, (worker_fn, unit_slice, global_seed))
                 for slice_index, unit_slice in enumerate(slices)]
@@ -118,7 +133,8 @@ def parallel_map_in_order(worker_fn: Callable, slices: Sequence[Slice], *,
             yield _seed_and_invoke_indexed(payload)
         return
     window = look_ahead if look_ahead is not None else worker_count * 2
-    with _FORK_CONTEXT.Pool(processes=worker_count) as pool:
+    with _FORK_CONTEXT.Pool(processes=worker_count,
+                            maxtasksperchild=max_tasks_per_child) as pool:
         # Dispatched and not yet handed over. Held as `AsyncResult`s in
         # dispatch order, which is input order, so the head is always the next
         # Slice to yield — `get()` on it waits for that Slice and no other,

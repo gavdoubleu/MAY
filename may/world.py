@@ -173,7 +173,8 @@ class World:
         return stats
 
     def assign_attributes(self, config_path: str, geo_units: Optional[Set[str]] = None,
-                          workers: Optional[int] = None):
+                          workers: Optional[int] = None,
+                          max_tasks_per_child: Optional[int] = None):
         """
         Assign attributes to all people in the world.
 
@@ -186,6 +187,9 @@ class World:
             workers: Process-pool size, from the world config's
                 `parallel.workers`. None keeps this stage's own default, which
                 is the SLURM allocation and then the machine's CPU count.
+            max_tasks_per_child: Recycling cadence, from the world config's
+                `parallel.max_tasks_per_child`. None keeps today's behaviour
+                of never retiring a worker.
 
         Returns:
             Dictionary with assignment statistics
@@ -216,7 +220,8 @@ class World:
             config_path=config_path,
             geo_units=geo_units,
             population=self.population,
-            workers=workers
+            workers=workers,
+            max_tasks_per_child=max_tasks_per_child
         )
 
         return stats
@@ -439,8 +444,36 @@ def resolve_configured_workers(config):
     return workers
 
 
+def resolve_configured_max_tasks_per_child(config):
+    """Recycling cadence from the world config's `parallel:` block, or None.
+
+    Sibling to `resolve_configured_workers`, same one-dial-for-both-stages
+    reasoning: a forked worker is reused for every Slice it draws for the
+    life of the pool, and nothing resets what it accumulated in between
+    (`CONTEXT.md`'s "Worker world copy"). Neither stage's parent-side memory
+    defence — residence's `memory_budget_mb` flush, attribute assignment's
+    plain streamed apply — sees or bounds that worker-side growth.
+
+    None means "never retire a worker", which is today's behaviour for both
+    stages. A run that has asked for nothing should not have that moved
+    under it.
+    """
+    max_tasks_per_child = (config or {}).get("parallel", {}).get("max_tasks_per_child")
+    if max_tasks_per_child is None:
+        return None
+    if (isinstance(max_tasks_per_child, bool)
+            or not isinstance(max_tasks_per_child, int)
+            or max_tasks_per_child < 1):
+        raise HouseholdError(
+            f"parallel.max_tasks_per_child must be a positive whole number "
+            f"of Slices, not {max_tasks_per_child!r}; omit the key to never "
+            f"retire a worker"
+        )
+    return max_tasks_per_child
+
+
 def setup_households(geo, population, venues, config, strategy_file=None,
-                     world=None, workers=None):
+                     world=None, workers=None, max_tasks_per_child=None):
     """
     Setup and distribute households based on configuration.
 
@@ -467,6 +500,9 @@ def setup_households(geo, population, venues, config, strategy_file=None,
             config's `parallel.workers`. None keeps this stage's own default
             of one worker — it forks a whole world per worker, and its
             per-worker footprint has not been measured at scale.
+        max_tasks_per_child: Recycling cadence for the geo-unit loop's pool,
+            from the world config's `parallel.max_tasks_per_child`. None
+            keeps today's behaviour of never retiring a worker.
 
     Returns:
         HouseholdDistributor object with allocated households
@@ -513,6 +549,7 @@ def setup_households(geo, population, venues, config, strategy_file=None,
             export_debug_csv=debug_outputs_enabled,
             subset_flusher=subset_flusher,
             workers=workers if workers is not None else 1,
+            max_tasks_per_child=max_tasks_per_child,
         )
 
     # Show where households are located and examples

@@ -27,7 +27,8 @@ class AttributeAssignmentError(Exception):
 
 
 def assign_attributes(venue_manager, config_path: str, geo_units: Optional[set] = None,
-                      population=None, workers: Optional[int] = None) -> Dict[str, Any]:
+                      population=None, workers: Optional[int] = None,
+                      max_tasks_per_child: Optional[int] = None) -> Dict[str, Any]:
     """
     Convenience function to assign attributes to a population.
 
@@ -39,6 +40,8 @@ def assign_attributes(venue_manager, config_path: str, geo_units: Optional[set] 
             which collects people from it rather than from venue membership
         workers: Process-pool size. None resolves to the SLURM allocation,
             then the machine's CPU count.
+        max_tasks_per_child: Recycling cadence. None never retires a worker,
+            matching today's behaviour.
 
     Returns:
         Assignment statistics dictionary
@@ -66,7 +69,8 @@ def assign_attributes(venue_manager, config_path: str, geo_units: Optional[set] 
     # Create assigner and run
     assigner = AttributeAssigner(config, data_manager)
     stats = assigner.assign_all(venue_manager, population=population,
-                               workers=workers)
+                               workers=workers,
+                               max_tasks_per_child=max_tasks_per_child)
 
     return stats
 class AttributeAssigner:
@@ -191,7 +195,8 @@ class AttributeAssigner:
 
         return self._strategy_cache[config_key]
 
-    def assign_all(self, venue_manager, population=None, workers=None) -> Dict[str, Any]:
+    def assign_all(self, venue_manager, population=None, workers=None,
+                   max_tasks_per_child=None) -> Dict[str, Any]:
         """
         Assign attribute based on assignment level (household or person).
 
@@ -203,6 +208,8 @@ class AttributeAssigner:
             workers: Process-pool size for the geo_unit-partitioned parallel
                 assignment. None resolves to the SLURM/CPU default; 1 runs
                 in-process (no fork). Output is identical across worker count.
+            max_tasks_per_child: Recycling cadence for the same pool. None
+                never retires a worker, matching today's behaviour.
 
         Returns:
             Dictionary with assignment statistics
@@ -219,9 +226,11 @@ class AttributeAssigner:
                     f"population manager — people are collected from the population, "
                     f"not from venue membership"
                 )
-            self._assign_all_people(population, workers=workers)
+            self._assign_all_people(population, workers=workers,
+                                    max_tasks_per_child=max_tasks_per_child)
         elif self.config.assignment_level == "person_by_residence":
-            self._assign_all_residences(venue_manager, workers=workers)
+            self._assign_all_residences(venue_manager, workers=workers,
+                                        max_tasks_per_child=max_tasks_per_child)
         else:
             raise ValueError(f"Unknown assignment_level: '{self.config.assignment_level}'. "
                            f"Expected 'person' or 'person_by_residence'.")
@@ -243,7 +252,8 @@ class AttributeAssigner:
 
         return self.stats
 
-    def _assign_all_residences(self, venue_manager, workers=None):
+    def _assign_all_residences(self, venue_manager, workers=None,
+                               max_tasks_per_child=None):
         """Assign attributes at residence level (households and communal
         establishments).
 
@@ -265,7 +275,8 @@ class AttributeAssigner:
         slices, geo_to_venues, id_to_person = _partition_venues_by_geo(all_venues)
         logger.info(f"  Residences across {len(slices)} geo_unit(s)")
         results = self._dispatch_residence_slices(
-            slices, geo_to_venues, id_to_person, residence_venue_types, workers)
+            slices, geo_to_venues, id_to_person, residence_venue_types, workers,
+            max_tasks_per_child)
         self._apply_assignment_results(results, id_to_person)
 
         # Set total_people from the authoritative venue count
@@ -276,7 +287,8 @@ class AttributeAssigner:
                         f"people in other residences")
 
     def _dispatch_residence_slices(self, slices, geo_to_venues, id_to_person,
-                                   residence_venue_types, workers):
+                                   residence_venue_types, workers,
+                                   max_tasks_per_child=None):
         """Publish the world to workers via the module-global context (read over
         fork copy-on-write, never pickled), run each geo_unit Slice, then clear
         it."""
@@ -286,7 +298,8 @@ class AttributeAssigner:
             geo_to_venues=geo_to_venues, residence_venue_types=residence_venue_types)
         try:
             return parallel_map(_assign_residence_slice, slices,
-                                global_seed=self._global_seed, workers=workers)
+                                global_seed=self._global_seed, workers=workers,
+                                max_tasks_per_child=max_tasks_per_child)
         finally:
             _ACTIVE_ASSIGNMENT_CONTEXT = None
 
@@ -444,7 +457,7 @@ class AttributeAssigner:
 
         return True
 
-    def _assign_all_people(self, population, workers=None):
+    def _assign_all_people(self, population, workers=None, max_tasks_per_child=None):
         """
         Assign attributes at person level.
 
@@ -502,7 +515,8 @@ class AttributeAssigner:
 
         # Partition into geo_unit-keyed population Slices and dispatch.
         slices, id_to_person = _partition_people_by_geo(eligible_people)
-        results = self._dispatch_person_slices(slices, id_to_person, rule, workers)
+        results = self._dispatch_person_slices(slices, id_to_person, rule, workers,
+                                               max_tasks_per_child)
         self._apply_assignment_results(results, id_to_person, preserved)
 
         logger.info(f"✓ Processed {len(all_people)} people")
@@ -511,7 +525,8 @@ class AttributeAssigner:
         logger.info(f"✓ Unassigned {self.stats['unassigned_people']} people (failed assignment)")
         logger.info("")
 
-    def _dispatch_person_slices(self, slices, id_to_person, rule, workers):
+    def _dispatch_person_slices(self, slices, id_to_person, rule, workers,
+                                max_tasks_per_child=None):
         """Publish the world to workers via the module-global context (read over
         fork copy-on-write, never pickled), run each Slice, then clear it."""
         global _ACTIVE_ASSIGNMENT_CONTEXT
@@ -519,7 +534,8 @@ class AttributeAssigner:
             assigner=self, id_to_person=id_to_person, rule=rule)
         try:
             return parallel_map(_assign_person_slice, slices,
-                                global_seed=self._global_seed, workers=workers)
+                                global_seed=self._global_seed, workers=workers,
+                                max_tasks_per_child=max_tasks_per_child)
         finally:
             _ACTIVE_ASSIGNMENT_CONTEXT = None
 

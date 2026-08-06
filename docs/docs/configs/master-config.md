@@ -170,6 +170,29 @@ Values that are not positive whole numbers are rejected before the run starts,
 `true` and `0` included — a pool size nobody can name is a config error, not a
 default to fall back to silently.
 
+```yaml
+parallel:
+  max_tasks_per_child: 4
+```
+
+How many `Loop unit`s (residence allocation) or Slices (attribute assignment)
+a single forked worker runs before it is retired and reforked. A worker is
+reused for everything it is handed for the life of the pool; nothing resets
+what it accumulated in between (see `CONTEXT.md`'s "Worker world copy"). That
+growth is invisible to, and unbounded by, `memory_budget_mb` — the flush only
+measures the *parent's* resident set — so at scale a worker's own memory can
+exhaust the node with the budget honoured throughout.
+
+Omit the key to never retire a worker, matching today's behaviour. This is a
+separate knob from `memory_budget_mb` deliberately: a worker's per-unit
+footprint cannot be anticipated any more than the pool size can be sized from
+it (see the note above on why `parallel.workers` is CPU-only), so recycling
+cadence is a count an operator sets from observed behaviour, not a number
+derived from the budget.
+
+Values that are not positive whole numbers are rejected the same way
+`parallel.workers` is, `true` and `0` included.
+
 ---
 
 ## `debug_outputs`

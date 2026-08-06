@@ -10,7 +10,8 @@ import yaml
 from may.config_loader import setup_geography
 from may.geography import VenueManager, VenueError
 from may.population import PopulationManager, PopulationError
-from may.world import World, setup_households, resolve_configured_workers
+from may.world import (World, setup_households, resolve_configured_workers,
+                       resolve_configured_max_tasks_per_child)
 from may.residence.household_distributor import HouseholdError
 from may.attribute_assignment import AttributeAssignmentError
 from may.venue_distributor import VenueDistributor
@@ -243,6 +244,10 @@ def main():
     configured_workers = resolve_configured_workers(config)
     if configured_workers is not None:
         logger.info(f"Parallel stages will run across {configured_workers} worker(s)")
+    configured_max_tasks_per_child = resolve_configured_max_tasks_per_child(config)
+    if configured_max_tasks_per_child is not None:
+        logger.info(f"Parallel stages will retire a worker after "
+                   f"{configured_max_tasks_per_child} task(s)")
 
     if timeline_config.get("enabled", False) and timeline_config.get("steps"):
         logger.info("")
@@ -286,7 +291,8 @@ def main():
                     world.household_distributor = setup_households(
                         geo, population, venues, config,
                         strategy_file=step_config, world=world,
-                        workers=configured_workers
+                        workers=configured_workers,
+                        max_tasks_per_child=configured_max_tasks_per_child
                     )
                 except HouseholdError as e:
                     logger.error(f"Household allocation failed: {e}")
@@ -297,7 +303,8 @@ def main():
                 logger.info(f"[ATTRIBUTE] {step_config}")
                 try:
                     world.assign_attributes(step_config,
-                                            workers=configured_workers)
+                                            workers=configured_workers,
+                                            max_tasks_per_child=configured_max_tasks_per_child)
                 except AttributeAssignmentError as e:
                     logger.error(f"Attribute assignment failed: {e}")
                     sys.exit(1)

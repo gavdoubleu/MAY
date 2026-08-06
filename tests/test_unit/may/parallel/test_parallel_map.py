@@ -241,6 +241,37 @@ def _record_completion(unit_slice, rng):
     return unit_slice.unit_codes[0]
 
 
+def test_max_tasks_per_child_recycles_the_worker():
+    # A worker retired after N tasks gets a fresh pid for its (N+1)th task —
+    # this is the mechanism that bounds a forked worker's own resident-set
+    # growth, distinct from the parent-side flush/look-ahead bounds.
+    slices = [GeoUnitSlice([f'E{index}']) for index in range(4)]
+
+    pids = [pid for _, pid in parallel_map_in_order(
+        _return_pid, slices, workers=1, force_fork=True,
+        max_tasks_per_child=2)]
+
+    assert pids[0] == pids[1]
+    assert pids[2] == pids[3]
+    assert pids[0] != pids[2]
+
+
+def test_max_tasks_per_child_does_not_change_results():
+    # Recycling is a memory concern only; a Slice's stream is seeded from its
+    # own identity (ADR-0002), so results must not depend on whether, or how
+    # often, the worker running it gets retired and reforked.
+    slices = [GeoUnitSlice(['E1', 'E2']),
+              GeoUnitSlice(['E3']),
+              GeoUnitSlice(['E4', 'E5', 'E6']),
+              GeoUnitSlice(['E7'])]
+
+    baseline = parallel_map(_draw, slices, workers=4)
+    for max_tasks_per_child in (1, 2):
+        recycled = parallel_map(_draw, slices, workers=4,
+                                max_tasks_per_child=max_tasks_per_child)
+        assert recycled == baseline
+
+
 def test_in_order_dispatches_no_further_ahead_than_the_look_ahead():
     # Phase 6. `imap_unordered` drained its input eagerly in a feeder thread,
     # so "at most pool-size Slices in flight" was never true: behind one slow

@@ -142,7 +142,8 @@ def execute_allocation_strategy(population,
                                 random_seed: Optional[int] = None,
                                 subset_flusher: Optional[Callable] = None,
                                 plan_sink: Optional[Callable] = None,
-                                workers: Optional[int] = 1):
+                                workers: Optional[int] = 1,
+                                max_tasks_per_child: Optional[int] = None):
     """
     Execute a unified allocation strategy from YAML configuration.
 
@@ -181,6 +182,13 @@ def execute_allocation_strategy(population,
             starts shared with the parent, but copy-on-write is undone by
             refcounting alone, so a pool costs roughly a world per worker at a
             scale where one world is already the constraint.
+        max_tasks_per_child: Retires and reforks a worker after that many loop
+            units. A worker is reused for every unit it draws for the life of
+            the pool, and nothing resets what it accumulated in between (see
+            `CONTEXT.md`'s "Worker world copy") — unlike the parent's own
+            memory, that growth is invisible to `memory_budget_mb` and
+            unbounded by it. None (the default) never retires a worker,
+            matching today's behaviour.
 
     Returns:
         dict: Complete statistics for all steps, aggregated across units
@@ -334,7 +342,8 @@ def execute_allocation_strategy(population,
         applied_units = 0
         for _, outcome in parallel_map_in_order(
                 _run_one_geo_unit, unit_slices, global_seed=global_seed,
-                workers=workers, force_fork=True):
+                workers=workers, force_fork=True,
+                max_tasks_per_child=max_tasks_per_child):
             unit_plan, stats_by_step, tallies = outcome
             applied_units += 1
 
