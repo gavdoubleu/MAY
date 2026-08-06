@@ -42,7 +42,8 @@ RANDOM_SEED = 42
 def _build_world():
     """A fresh stress world — every run must start from an unallocated one."""
     geography = Geography(data_dir=f"{STRESS_DATA}/geography",
-                          levels=["SGU", "MGU", "LGU"])
+                          levels=["SGU", "MGU", "LGU"],
+                          hierarchy_file="hierarchy.csv")
     geography.load_from_csv()
 
     venue_manager = VenueManager(geography, data_dir=f"{STRESS_DATA}/venues")

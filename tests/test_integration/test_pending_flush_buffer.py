@@ -72,7 +72,8 @@ def build_fixtures():
     from may.residence.household_distributor import HouseholdDistributor
 
     geo = Geography(data_dir=f"{STRESS_DATA}/geography",
-                    levels=["SGU", "MGU", "LGU"])
+                    levels=["SGU", "MGU", "LGU"],
+                    hierarchy_file="hierarchy.csv")
     geo.load_from_csv()
     venues = VenueManager(geo, data_dir=f"{STRESS_DATA}/venues")
     venues.load_from_yaml_config("test_venues_config.yaml")

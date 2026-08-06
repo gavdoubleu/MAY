@@ -15,7 +15,7 @@ STRESS_DATA = "tests/test_data/stress_world"
 
 @pytest.fixture
 def geography():
-    geo = Geography(data_dir=f"{STRESS_DATA}/geography", levels=["SGU", "MGU", "LGU"])
+    geo = Geography(data_dir=f"{STRESS_DATA}/geography", levels=["SGU", "MGU", "LGU"], hierarchy_file="hierarchy.csv")
     geo.load_from_csv()
     return geo
 
@@ -144,8 +144,7 @@ class TestStressWorldSetup:
         assert hd.fallback_priority == [0, 1, 3, 2]
 
     def test_promotion_config(self, hd):
-        """Promotion knobs load (promotion runs where the strategy invokes it —
-        there is no global enable flag)."""
+        """Promotion settings load; the strategy decides where promotion runs."""
         assert hd.config['promotion']['max_attempts'] == 4
 
 
@@ -530,7 +529,7 @@ class TestPatternAssumptions:
     def test_assumption_allocates_exact_count(self, hd):
         """
         Pattern '0 >=0 0 0' with assumption '0 2 0 0' should allocate
-        exactly 2 YA — not more (flexible), not fewer.
+        exactly 2 YA, not more (flexible) and not fewer.
         """
         np.random.seed(42)
         hd._prepare_person_pools()
@@ -872,7 +871,7 @@ class TestPromotionAllocation:
         household (0 0 0 2 → has 2 OA but 0 Adults) is promoted to accept kids,
         the pattern becomes ">=0 >=0 >=0 >=2" which passes pattern validation.
         The fix ensures that before adding people, the actual household composition
-        is checked against the validation rules — not just the promoted pattern.
+        is checked against the validation rules as well as the promoted pattern.
         """
         np.random.seed(42)
         hd._prepare_person_pools()
@@ -883,7 +882,7 @@ class TestPromotionAllocation:
             rule_name="Elderly pair",
         )
 
-        # Promote to accept kids — should NOT add kids to elderly household
+        # Promote to accept kids. This should NOT add kids to the elderly household
         # because validation rule requires Adults >= 1 when Kids >= 1
         _ = hd.promote_and_allocate(
             target_categories=["Kids"],
@@ -1031,7 +1030,7 @@ class TestFullPipelineIntegration:
         """
         With demotion + excess + overflow + promotion, allocation rate
         should be very high. This is a 28-person world with sufficient
-        household slots — any failure to place people is a bug.
+        household slots, so any failure to place people is a bug.
         """
         np.random.seed(42)
         total_population = len(population_manager.get_all_people())
@@ -1241,7 +1240,8 @@ class TestAllocationDeterminism:
 
     def _run_full_strategy(self, random_seed):
         geography = Geography(data_dir=f"{STRESS_DATA}/geography",
-                              levels=["SGU", "MGU", "LGU"])
+                              levels=["SGU", "MGU", "LGU"],
+                              hierarchy_file="hierarchy.csv")
         geography.load_from_csv()
         venue_manager = VenueManager(geography, data_dir=f"{STRESS_DATA}/venues")
         venue_manager.load_from_yaml_config("test_venues_config.yaml")

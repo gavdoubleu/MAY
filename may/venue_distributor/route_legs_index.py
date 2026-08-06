@@ -25,7 +25,7 @@ sized by row count anywhere in the index.
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import numpy as np
 import pandas as pd
@@ -172,6 +172,18 @@ class RouteLegsIndex:
         logger.info(
             f"  Indexed {n_legs:,} legs across {len(self._sorted_group_keys):,} (O,class) routes"
         )
+
+    def served_units(self) -> Set[str]:
+        """Every MGU this index routes from or to.
+
+        Callers use it to decide which units a rider can reach a stop in, so it
+        must name exactly the units the surviving legs mention. It does: the
+        mode filter is applied before the key columns are encoded, and no row
+        is dropped afterwards, so the key code tables hold that set precisely.
+        Sized by vocabulary, not by legs.
+        """
+        return (set(self._key_code_tables["origin_mgu"].decode)
+                | set(self._key_code_tables["dest_mgu"].decode))
 
     def get(self, origin: str, dest: str, mode_class: str) -> Optional[List[Dict[str, Any]]]:
         origin_code = self._key_code_tables["origin_mgu"].code_of(origin)

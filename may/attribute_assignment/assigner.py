@@ -21,12 +21,13 @@ _ACTIVE_ASSIGNMENT_CONTEXT = None
 class AttributeAssignmentError(Exception):
     """Raised when assignment can't complete on the given data/config. Mirrors
     PopulationError/VenueError/HouseholdError: every eligible person is assigned
-    on complete data, or the build fails loud. A person left unassigned
-    — strategy failure, unclassifiable residence, no matching role, no value —
-    aborts the run."""
+    on complete data, or the build fails loud. A person left unassigned for any
+    reason (strategy failure, unclassifiable residence, no matching role, no
+    value) aborts the run."""
 
 
 def assign_attributes(venue_manager, config_path: str, geo_units: Optional[set] = None,
+                      geo_units_by_level: Optional[Dict[str, set]] = None,
                       population=None, workers: Optional[int] = None,
                       max_tasks_per_child: Optional[int] = None) -> Dict[str, Any]:
     """
@@ -36,6 +37,8 @@ def assign_attributes(venue_manager, config_path: str, geo_units: Optional[set] 
         venue_manager: VenueManager with households and venues
         config_path: Path to YAML configuration file
         geo_units: Optional set of geo unit codes to preload data for
+        geo_units_by_level: The same names split by hierarchy level. Sources that
+            declare the level their values live at match against one level only.
         population: Population manager; required for person-level assignment,
             which collects people from it rather than from venue membership
         workers: Process-pool size. None resolves to the SLURM allocation,
@@ -57,7 +60,7 @@ def assign_attributes(venue_manager, config_path: str, geo_units: Optional[set] 
     try:
         if geo_units:
             logger.info(f"Preloading data for {len(geo_units)} geographical units...")
-            data_manager.load_all(geo_units)
+            data_manager.load_all(geo_units, geo_units_by_level)
         else:
             logger.info("Loading all data sources...")
             data_manager.load_all()
@@ -102,7 +105,6 @@ class AttributeAssigner:
 
         # Cache strategy objects to avoid repeated creation
         self._strategy_cache = {}  # Maps strategy config hash to strategy instance
-
         # Pre-compute filter configuration
         self._has_filters = hasattr(config, 'filters') and config.filters
         self._optimized_filters = []
@@ -434,9 +436,9 @@ class AttributeAssigner:
                     if a in person_activities:
                         return False
 
-        # 2b. Activity-venue filters: require an actually-assigned venue of a
-        # given type (optionally in a given subset) under some activity. Used to
-        # gate commute on people who genuinely got a workplace venue.
+        # 2b. Activity-venue filters: require a venue of a given type (optionally
+        # in a given subset) already assigned under some activity, so commute is
+        # gated on people who hold a workplace venue.
         for f in self._activity_venue_filters:
             venue_map = person.activity_map.get(f['activity'], {})
             venue_types = f['venue_types']
@@ -576,7 +578,8 @@ class AttributeAssigner:
         # Prepare batch data
         logger.info(f"  Preparing batch data for {total:,} people...")
         households = [self._get_person_residence_venue(p) for p in eligible_people]
-        contexts = [{'attribute_name': self.attribute_name} for _ in eligible_people]
+        contexts = [{'attribute_name': self.attribute_name}
+                    for _ in eligible_people]
 
         # A batch fails as a whole; surface it as AttributeAssignmentError.
         logger.info(f"  Running batch assignment...")
@@ -809,7 +812,7 @@ class AttributeAssigner:
                     self.stats['assignments_by_strategy'][strategy.strategy_type] += 1
                     self.stats['assigned_people'] += 1
 
-                    # Track distribution — use str() for unhashable types (e.g. lists)
+                    # Track distribution, using str() for unhashable types (e.g. lists)
                     dist_key = str(value) if isinstance(value, (list, dict)) else value
                     self.stats['attribute_distribution'][dist_key] += 1
 
@@ -839,7 +842,7 @@ class AttributeAssigner:
         Get person assignment order that satisfies role dependencies.
 
         Uses a topological sort so inheritors are processed after the roles they
-        inherit from. Members are ordered by id as the stable base/tie-breaker —
+        inherit from. Members are ordered by id as the stable base/tie-breaker, so
         which role a person takes (primary vs secondary, child, elder) depends on
         their subset and this order, not on any configurable category priority.
         """
@@ -910,7 +913,7 @@ class AttributeAssigner:
 
         # 4. Every member must be orderable. Cross-role cycles are rejected at
         #    config load, so unprocessed people here mean the derived per-person
-        #    graph is inconsistent — fail loud.
+        #    graph is inconsistent, so fail loud.
         if processed_count < len(members):
             processed_ids = {p.id for p in result}
             unordered = [p.id for p in base_sorted if p.id not in processed_ids]

@@ -38,6 +38,10 @@ class DataSource:
         self.config = config
         self.cache: Dict[str, Any] = {}
         self._data_loaded = False
+        # Loaded geo unit names keyed by hierarchy level, set by the manager
+        # before load_data. Only sources that declare a level for their values
+        # read it.
+        self.geo_units_by_level: Optional[Dict[str, set]] = None
 
     def load_data(self, geo_units: Optional[set] = None):
         """
@@ -73,7 +77,7 @@ class DataSource:
                 "Fix the data/config."
             )
 
-        # Clamp negative values to 0 — negative probabilities are invalid
+        # Clamp negative values to 0, since negative probabilities are invalid
         has_negatives = False
         for v in probs.values():
             if v < 0:
@@ -136,6 +140,49 @@ def _ordered_key_columns(file_config: Dict[str, Any], source_name: str,
     return columns
 
 
+def _merge_disjoint(target: Dict, new: Dict, source_name: str, file_path) -> None:
+    """
+    Merge one file's lookup into the accumulated lookup. A key appearing in
+    two files of one source is a data error. Merging would have to pick a
+    winner silently, so overlap instead fails loud, naming examples.
+    """
+    overlap = target.keys() & new.keys()
+    if overlap:
+        examples = sorted(overlap, key=str)[:5]
+        raise ValueError(
+            f"source '{source_name}': {len(overlap)} key(s) in {file_path} "
+            f"were already loaded from an earlier file, e.g. {examples}. "
+            f"Files within one source must cover disjoint keys."
+        )
+    target.update(new)
+
+
+def _group_by_metadata(metadata_slices: Dict[str, np.ndarray],
+                       likelihoods: np.ndarray) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
+    """
+    Merge rows carrying identical metadata, summing their likelihood mass.
+
+    Returns the per-group metadata columns and the summed mass per group, in
+    one pass over a structured view rather than a Python dict keyed on row
+    tuples. Values are compared as stored — raw for numeric metadata columns,
+    as CodeTable codes for the rest — which is exact either way because a code
+    is one-to-one with its value.
+
+    With no metadata columns every row shares the same (empty) key, so this
+    collapses to a single group carrying the total.
+    """
+    if not metadata_slices:
+        return {}, np.array([likelihoods.sum()], dtype=likelihoods.dtype)
+    keys = np.empty(len(likelihoods),
+                    dtype=[(key, column.dtype) for key, column in metadata_slices.items()])
+    for key, column in metadata_slices.items():
+        keys[key] = column
+    unique_keys, inverse = np.unique(keys, return_inverse=True)
+    masses = np.bincount(inverse.ravel(), weights=likelihoods, minlength=len(unique_keys))
+    return ({key: unique_keys[key] for key in metadata_slices},
+            masses.astype(likelihoods.dtype))
+
+
 class GeoDistributionSource(DataSource):
     """
     Data source for geographical unit-specific attribute distributions.
@@ -168,7 +215,9 @@ class GeoDistributionSource(DataSource):
         """
         logger.info(f"Loading data for source '{self.name}'...")
 
-        # Process file configuration (should be just one file)
+        # Each file contributes its own geo units; the merged lookup must be
+        # key-disjoint across files.
+        merged: Dict[str, Dict[str, float]] = {}
         for file_config in self._file_configs:
             file_path = Path(pr.resolve(file_config['path']))
 
@@ -186,20 +235,21 @@ class GeoDistributionSource(DataSource):
                     value_columns = file_config.get('value_columns', {})
                     total_column = file_config.get('total_column')
 
-                    # Store lookup dictionary
-                    self._lookup = self._parse_dataframe(
+                    lookup = self._parse_dataframe(
                         df, key_column, value_columns, total_column
                     )
 
-                    logger.info(f"  ✓ Loaded {len(self._lookup)} geographical units from {file_path.name}")
+                    logger.info(f"  ✓ Loaded {len(lookup)} geographical units from {file_path.name}")
 
                 except Exception as e:
                     # Fail loud on a load/parse error.
                     raise RuntimeError(
                         f"failed to load data source file {file_path}: {e}"
                     ) from e
+                _merge_disjoint(merged, lookup, self.name, file_path)
             else:
                 raise FileNotFoundError(f"data source file not found: {file_path}")
+        self._lookup = merged
 
         self._data_loaded = True
 
@@ -300,6 +350,7 @@ class DiversitySource(DataSource):
         """Load diversity data from CSV file."""
         logger.info(f"Loading data for source '{self.name}'...")
 
+        merged: Dict[str, Dict[str, float]] = {}
         for file_config in self._file_configs:
             file_path = Path(pr.resolve(file_config['path']))
 
@@ -312,17 +363,19 @@ class DiversitySource(DataSource):
                         df = df[df[key_column].isin(geo_units)]
 
                     value_columns = file_config.get('value_columns', {})
-                    self._lookup = self._parse_diversity_dataframe(df, key_column, value_columns)
+                    lookup = self._parse_diversity_dataframe(df, key_column, value_columns)
 
-                    logger.info(f"  ✓ Loaded {len(self._lookup)} geographical units from {file_path.name}")
+                    logger.info(f"  ✓ Loaded {len(lookup)} geographical units from {file_path.name}")
 
                 except Exception as e:
                     # Fail loud on a load/parse error.
                     raise RuntimeError(
                         f"failed to load data source file {file_path}: {e}"
                     ) from e
+                _merge_disjoint(merged, lookup, self.name, file_path)
             else:
                 raise FileNotFoundError(f"data source file not found: {file_path}")
+        self._lookup = merged
 
         self._data_loaded = True
 
@@ -388,12 +441,9 @@ class PairProbabilitySource(DataSource):
         """Load pair probability data."""
         logger.info(f"Loading data for source '{self.name}'...")
 
+        merged: Dict[str, Dict[str, Dict[str, float]]] = {}
         for file_config in self._file_configs:
             file_path = Path(pr.resolve(file_config['path']))
-
-            if geo_units:
-                # Partnership data covers all areas, just filter
-                pass
 
             if file_path.exists():
                 try:
@@ -405,17 +455,19 @@ class PairProbabilitySource(DataSource):
                         df = df[df[key_columns[0]].isin(geo_units)]
 
                     value_columns = file_config.get('value_columns', {})
-                    self._lookups = self._parse_pair_dataframe(df, key_columns, value_columns)
+                    lookups = self._parse_pair_dataframe(df, key_columns, value_columns)
 
-                    logger.info(f"  ✓ Loaded {len(self._lookups)} geographical units from {file_path.name}")
+                    logger.info(f"  ✓ Loaded {len(lookups)} geographical units from {file_path.name}")
 
                 except Exception as e:
                     # Fail loud on a load/parse error.
                     raise RuntimeError(
                         f"failed to load data source file {file_path}: {e}"
                     ) from e
+                _merge_disjoint(merged, lookups, self.name, file_path)
             else:
                 raise FileNotFoundError(f"data source file not found: {file_path}")
+        self._lookups = merged
 
         self._data_loaded = True
 
@@ -508,6 +560,7 @@ class MultiKeyLookupSource(DataSource):
         """Load CSV data and convert to dictionary for fast lookups."""
         logger.info(f"Loading data for source '{self.name}'...")
 
+        merged: Dict = {}
         for file_config in self._file_configs:
             file_path = Path(pr.resolve(file_config['path']))
 
@@ -523,14 +576,22 @@ class MultiKeyLookupSource(DataSource):
                                 df = df[df[col] == value]
                                 logger.info(f"  Applied filter: {col} == '{value}' ({len(df)} rows remaining)")
 
-                    # Get key and value columns
-                    self._key_columns = list(file_config.get('key_columns', {}).keys())
+                    # Key/value column config must agree across a source's
+                    # files, so the lookup has one shape.
+                    key_columns = list(file_config.get('key_columns', {}).keys())
+                    if self._key_columns and key_columns != self._key_columns:
+                        raise ValueError(
+                            f"key_columns differ between files: {self._key_columns} "
+                            f"vs {key_columns}."
+                        )
+                    self._key_columns = key_columns
                     self._key_columns_config = file_config.get('key_columns', {})
                     self._value_columns = file_config.get('value_columns', {})
 
                     # Build dictionary: {(key1, key2, ...): {col1: val1, col2: val2, ...}}
                     logger.info(f"  Building lookup dictionary from {len(df)} rows...")
 
+                    file_lookup = {}
                     for _, row in df.iterrows():
                         # Build key tuple
                         key = tuple(row[col] for col in self._key_columns)
@@ -538,16 +599,18 @@ class MultiKeyLookupSource(DataSource):
                         # Build value dict
                         values = {name: float(row[csv_col]) for name, csv_col in self._value_columns.items()}
 
-                        self._lookup_dict[key] = values
+                        file_lookup[key] = values
 
-                    logger.info(f"  ✓ Loaded {len(self._lookup_dict)} rows from {file_path.name} into dictionary")
+                    logger.info(f"  ✓ Loaded {len(file_lookup)} rows from {file_path.name} into dictionary")
                 except Exception as e:
                     # Fail loud on a load/parse error.
                     raise RuntimeError(
                         f"failed to load data source file {file_path}: {e}"
                     ) from e
+                _merge_disjoint(merged, file_lookup, self.name, file_path)
             else:
                 raise FileNotFoundError(f"data source file not found: {file_path}")
+        self._lookup_dict = merged
 
         self._data_loaded = True
 
@@ -726,11 +789,15 @@ class OriginDestinationMatrixSource(DataSource):
         self._dest_codes = np.empty(0, dtype=np.int32)
         self._likelihoods = np.empty(0, dtype=np.float64)
         self._metadata_arrays: Dict[str, np.ndarray] = {}
+        # Per-row: does this row's metadata read back as the outside sentinel
+        # rather than as stored values? True only for sentinel rows minted with
+        # no source row behind them (redistribute + on_empty='outside').
+        self._metadata_stamped_outside = np.empty(0, dtype=bool)
         self._group_starts = np.empty(0, dtype=np.int64)
         self._group_stops = np.empty(0, dtype=np.int64)
         self._file_configs = config.get('files', [])
 
-        # Out-of-boundary destination policy. Required, no default —
+        # Out-of-boundary destination policy. Required, with no default, because
         # a destination drawn outside the loaded world boundary is routine in
         # region runs and impossible in whole-country runs, so the engine refuses
         # to guess what to do with it.
@@ -768,7 +835,7 @@ class OriginDestinationMatrixSource(DataSource):
 
         # Optional marker for redistributed assignments. Names the person
         # property set true when an assignment was bounced back in-boundary, so
-        # the venue layer can deprioritise it. Config-named — the engine carries
+        # the venue layer can deprioritise it. Config-named, so the engine carries
         # whatever the scenario calls it. Only meaningful under 'redistribute':
         # flagging it elsewhere raises (no silent no-ops).
         self._redistributed_flag = config.get('redistributed_flag')
@@ -809,7 +876,7 @@ class OriginDestinationMatrixSource(DataSource):
                 ) from e
 
         # Apply the out-of-boundary policy AFTER parsing and OUTSIDE the
-        # per-file try/except above — policy violations must fail loud.
+        # per-file try/except above, since policy violations must fail loud.
         self._apply_boundary_policy(geo_units)
 
         self._data_loaded = True
@@ -947,17 +1014,52 @@ class OriginDestinationMatrixSource(DataSource):
         self._dest_codes = dest_codes
         self._likelihoods = likelihoods
         self._metadata_arrays = metadata_arrays
+        self._metadata_stamped_outside = np.zeros(len(dest_codes), dtype=bool)
         self._group_starts = group_starts
         self._group_stops = group_stops
 
         logger.info(f"  ✓ Loaded {vocab_size} origins from {file_path.name}")
+
+    def _boundary_units(self, geo_units: set) -> set:
+        """Narrow the loaded geo units to the level destinations are declared at.
+
+        Every file entry must agree on `destination_level`; a source mixing
+        levels in one destination column has no single answer here. When the
+        caller supplied no level breakdown (a direct programmatic load rather
+        than a World run) the flat set stands in.
+        """
+        levels = {fc.get('destination_level') for fc in self._file_configs}
+        levels.discard(None)
+        if not levels:
+            return geo_units
+        if len(levels) > 1:
+            raise ValueError(
+                f"O-D source '{self.name}': files disagree on 'destination_level' "
+                f"({sorted(levels)}). All destinations in one source must live at "
+                "the same hierarchy level."
+            )
+        level = levels.pop()
+        if not self.geo_units_by_level:
+            return geo_units
+        if level not in self.geo_units_by_level:
+            raise ValueError(
+                f"O-D source '{self.name}': destination_level='{level}' is not a "
+                f"level in the loaded geography ({sorted(self.geo_units_by_level)})."
+            )
+        return self.geo_units_by_level[level]
 
     def _apply_boundary_policy(self, geo_units: Optional[set]):
         """
         Resolve destinations that fall outside the loaded world boundary
         according to the configured `out_of_boundary` policy.
 
-        Boundary membership is "destination value is among the loaded geo_units".
+        Boundary membership is "destination value is among the loaded geo units
+        AT `destination_level`". Scoping to the declared level matters because
+        names repeat across levels: a census O-D table lists whole-country
+        catch-alls ("Wales", "England") next to real LADs, and an unscoped check
+        would call "Wales" in-boundary whenever any Welsh unit is loaded, then
+        hand a non-existent LAD to the steps that sample within it.
+
         With no geo_units (an unbounded / whole-world run) there is no boundary,
         so the policy is a no-op.
 
@@ -968,6 +1070,11 @@ class OriginDestinationMatrixSource(DataSource):
         """
         if not geo_units:
             return
+
+        # Narrow to the level destinations are declared at BEFORE the membership
+        # test: names repeat across levels, so an unscoped set calls a
+        # whole-country catch-all in-boundary.
+        geo_units = self._boundary_units(geo_units)
 
         vocab_size = len(self._origin_code_table)
         dest_codes = self._dest_codes
@@ -1004,14 +1111,18 @@ class OriginDestinationMatrixSource(DataSource):
         new_dest_chunks: List[np.ndarray] = []
         new_likelihood_chunks: List[np.ndarray] = []
         new_metadata_chunks: Dict[str, List[np.ndarray]] = {k: [] for k in metadata_arrays}
+        new_stamped_chunks: List[np.ndarray] = []
         new_counts = np.zeros(vocab_size, dtype=np.int64)
 
         def append_rows(code: int, dest_slice: np.ndarray, lik_slice: np.ndarray,
-                        meta_slices: Dict[str, np.ndarray]) -> None:
+                        meta_slices: Dict[str, np.ndarray],
+                        stamped: Optional[np.ndarray] = None) -> None:
             new_dest_chunks.append(dest_slice)
             new_likelihood_chunks.append(lik_slice)
             for k in metadata_arrays:
                 new_metadata_chunks[k].append(meta_slices[k])
+            new_stamped_chunks.append(np.zeros(len(dest_slice), dtype=bool)
+                                       if stamped is None else stamped)
             new_counts[code] = len(dest_slice)
 
         for code in range(vocab_size):
@@ -1042,11 +1153,16 @@ class OriginDestinationMatrixSource(DataSource):
                 if in_total <= 0:
                     empty_origins.append(origin_str)
                     if self._on_empty == 'outside':
+                        # No in-boundary row survives, so there is no source
+                        # metadata to carry. This sentinel is stamped instead:
+                        # the placeholder values below are never read back, the
+                        # stamp flag makes lookup() report outside_value.
                         code_ = get_outside_code()
                         append_rows(
                             code, np.array([code_], dtype=dest_codes.dtype),
                             np.array([1.0], dtype=likelihoods.dtype),
                             {k: np.zeros(1, dtype=v.dtype) for k, v in metadata_arrays.items()},
+                            stamped=np.ones(1, dtype=bool),
                         )
                     # else: on_empty='error' — will raise below, leave empty.
                 else:
@@ -1061,12 +1177,24 @@ class OriginDestinationMatrixSource(DataSource):
                     self._redistributed_fraction[origin_str] = out_mass
             else:  # 'outside'
                 outside_origins += 1
+                # Each out-of-boundary row takes the sentinel as its destination
+                # but keeps its own metadata; rows with identical metadata merge.
+                # Collapsing them all onto one row stamped with the sentinel
+                # would erase the distinctions a downstream draw may condition
+                # on, and a draw restricted to travelling work modes would then
+                # find no sentinel row at all and silently renormalise the
+                # out-of-area mass onto in-world destinations.
+                group_metadata, group_masses = _group_by_metadata(
+                    {k: v[start:stop][~in_b] for k, v in metadata_arrays.items()},
+                    likelihoods[start:stop][~in_b],
+                )
                 code_ = get_outside_code()
                 append_rows(
                     code,
-                    np.concatenate([dest_codes[start:stop][in_b], [code_]]).astype(dest_codes.dtype),
-                    np.concatenate([likelihoods[start:stop][in_b], [out_mass]]).astype(likelihoods.dtype),
-                    {k: np.concatenate([v[start:stop][in_b], np.zeros(1, dtype=v.dtype)])
+                    np.concatenate([dest_codes[start:stop][in_b],
+                                    np.full(len(group_masses), code_, dtype=dest_codes.dtype)]),
+                    np.concatenate([likelihoods[start:stop][in_b], group_masses]),
+                    {k: np.concatenate([v[start:stop][in_b], group_metadata[k]])
                      for k, v in metadata_arrays.items()},
                 )
 
@@ -1112,6 +1240,8 @@ class OriginDestinationMatrixSource(DataSource):
             k: (np.concatenate(v) if v else np.empty(0, dtype=metadata_arrays[k].dtype))
             for k, v in new_metadata_chunks.items()
         }
+        self._metadata_stamped_outside = (np.concatenate(new_stamped_chunks)
+                                           if new_stamped_chunks else np.empty(0, dtype=bool))
         self._group_stops = np.cumsum(new_counts)
         self._group_starts = self._group_stops - new_counts
 
@@ -1140,7 +1270,10 @@ class OriginDestinationMatrixSource(DataSource):
         for i in range(start, stop):
             dest = self._dest_code_table[int(self._dest_codes[i])]
             likelihood = float(self._likelihoods[i])
-            if self._outside_value is not None and dest == self._outside_value:
+            if self._metadata_stamped_outside[i]:
+                # A sentinel with no source row behind it: nothing to report but
+                # the sentinel itself. Sentinel rows that DID absorb real flow
+                # keep that flow's metadata, so a conditioned draw still sees them.
                 metadata = {k: self._outside_value for k in self._metadata_arrays}
             else:
                 metadata = {}
@@ -1168,7 +1301,7 @@ class GUSamplerSource(DataSource):
         # Lookup: parent_gu_name -> {child_gu_code: weight}
         self._lookup: Dict[str, Dict[str, float]] = {}
         self._file_configs = config.get('files', [])
-        # Person attribute that supplies the parent GU to sample within — read
+        # Person attribute that supplies the parent GU to sample within, read
         # from config (key_columns value), so the sampler is generic over any
         # parent attribute / hierarchy level.
         self._parent_attribute: Optional[str] = None
@@ -1185,8 +1318,8 @@ class GUSamplerSource(DataSource):
                     df = pd.read_csv(file_path)
 
                     # Parent-GU lookup key: canonical one-entry key_columns mapping.
-                    # Its value names the person attribute that supplies the parent GU
-                    # — generic over any parent attribute.
+                    # Its value names the person attribute that supplies the parent GU,
+                    # which keeps this generic over any parent attribute.
                     parent_column = _ordered_key_columns(file_config, self.name, expected=1)[0]
                     key_resolution = file_config['key_columns'][parent_column]
                     if not isinstance(key_resolution, dict) or not key_resolution.get('attribute'):
@@ -1224,6 +1357,7 @@ class GUSamplerSource(DataSource):
                                 df = df[~df[col].isin(exclude_values)]
 
                     # Group by parent GU and build child GU distribution
+                    file_lookup = {}
                     for parent_name, group in df.groupby(parent_column):
                         geo_dist = {}
                         for _, row in group.iterrows():
@@ -1234,15 +1368,16 @@ class GUSamplerSource(DataSource):
 
                         # Normalize to probabilities
                         if geo_dist:
-                            self._lookup[parent_name] = self._normalize_probabilities(geo_dist)
+                            file_lookup[parent_name] = self._normalize_probabilities(geo_dist)
 
-                    logger.info(f"  ✓ Loaded {geo_unit_level} distributions for {len(self._lookup)} parent GUs from {file_path.name}")
+                    logger.info(f"  ✓ Loaded {geo_unit_level} distributions for {len(file_lookup)} parent GUs from {file_path.name}")
 
                 except Exception as e:
                     # Fail loud on a load/parse error.
                     raise RuntimeError(
                         f"failed to load data source file {file_path}: {e}"
                     ) from e
+                _merge_disjoint(self._lookup, file_lookup, self.name, file_path)
             else:
                 raise FileNotFoundError(f"data source file not found: {file_path}")
 
@@ -1329,15 +1464,19 @@ class DataSourceManager:
             else:
                 self.sources[source_name] = cls(source_name, source_config.config)
 
-    def load_all(self, geo_units: Optional[set] = None):
+    def load_all(self, geo_units: Optional[set] = None,
+                 geo_units_by_level: Optional[Dict[str, set]] = None):
         """
         Load all data sources.
 
         Args:
             geo_units: Optional set of geographical unit codes to preload
+            geo_units_by_level: The same names keyed by hierarchy level, for
+                sources that declare which level their values live at.
         """
         logger.info("Loading all data sources...")
         for source_name, source in self.sources.items():
+            source.geo_units_by_level = geo_units_by_level
             source.load_data(geo_units)
         logger.info("✓ All data sources loaded")
 
