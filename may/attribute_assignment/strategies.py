@@ -1,6 +1,6 @@
 import logging
 import numpy as np
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 
 logger = logging.getLogger("may.attribute_assignment.strategies")
 
@@ -948,7 +948,7 @@ class CommutingLikelihoodStrategy(AssignmentStrategy):
             )
         return [(d, m, l / total) for (d, m, l) in kept]
 
-    def _resolve_origin_code(self, person) -> Optional[str]:
+    def _resolve_origin_code(self, person) -> Tuple[Optional[str], Optional[str]]:
         """
         Resolve person's origin geographical unit to the correct level for O-D matrix lookup.
 
@@ -958,42 +958,49 @@ class CommutingLikelihoodStrategy(AssignmentStrategy):
             person: Person object
 
         Returns:
-            Origin code string, or None if resolution fails
+            `(origin_code, None)` when the residence yields an origin key, else
+            `(None, reason)` naming which resolution step failed.
+
+        The reason is returned rather than collapsed into a bare `None`: the
+        ways to be an `Unresolvable origin` (see `CONTEXT.md`) are separate
+        faults — no residence at all, a residence with no ancestor at the
+        declared level, a source that was never registered — and the caller
+        must be able to tell the operator which one it hit. One `None`
+        standing for all of them is what left the batch path reporting a
+        lookup that never happened.
         """
         origin_geo_unit = getattr(person, 'geographical_unit', None)
         if not origin_geo_unit:
-            return None
+            return None, "person has no geographical_unit to resolve an origin from"
 
         source = self.data_manager.get_source(self.data_source_name)
         if not source:
-            return None
+            return None, f"data source '{self.data_source_name}' not found"
 
-        if hasattr(source, '_file_configs') and source._file_configs:
-            file_config = source._file_configs[0]
-            key_columns = file_config.get('key_columns', {})
-
+        file_configs = getattr(source, '_file_configs', None)
+        if file_configs:
+            key_columns = file_configs[0].get('key_columns', {})
             if key_columns:
                 first_key_config = list(key_columns.values())[0]
+                if (isinstance(first_key_config, dict)
+                        and first_key_config.get('type') == 'ancestor_lookup'):
+                    level = first_key_config.get('level')
+                    property_name = first_key_config.get('property', 'name')
 
-                if isinstance(first_key_config, dict):
-                    lookup_type = first_key_config.get('type')
-                    if lookup_type == 'ancestor_lookup':
-                        level = first_key_config.get('level')
-                        property_name = first_key_config.get('property', 'name')
+                    ancestor = origin_geo_unit.get_ancestor_by_level(level)
+                    if not ancestor:
+                        return None, (f"residence '{origin_geo_unit.name}' has "
+                                      f"no ancestor at level '{level}'")
+                    origin_code = getattr(ancestor, property_name)
+                    if not origin_code:
+                        return None, (f"ancestor at level '{level}' has an "
+                                      f"empty '{property_name}'")
+                    return origin_code, None
 
-                        ancestor = origin_geo_unit.get_ancestor_by_level(level)
-                        if ancestor:
-                            return getattr(ancestor, property_name)
-                        else:
-                            return None
-                    else:
-                        return origin_geo_unit.name
-                else:
-                    return origin_geo_unit.name
-            else:
-                return origin_geo_unit.name
-        else:
-            return origin_geo_unit.name
+        # Every other configuration keys the matrix on the residence itself.
+        if not origin_geo_unit.name:
+            return None, "person's geographical_unit has an empty name"
+        return origin_geo_unit.name, None
 
     def assign_batch(self, people_list: List, households_list: List, contexts_list: List[Dict[str, Any]]) -> List[Any]:
         """
@@ -1016,7 +1023,7 @@ class CommutingLikelihoodStrategy(AssignmentStrategy):
         source = self.data_manager.get_source(self.data_source_name)
         if not source:
             logger.warning(f"Data source '{self.data_source_name}' not found")
-            return [self._fail(person, "no commuting-flow row for this origin")
+            return [self._fail(person, f"data source '{self.data_source_name}' not found")
                     for person, household, context in zip(people_list, households_list, contexts_list)]
         self._require_sentinel_carries_what_is_read(source)
 
@@ -1025,11 +1032,15 @@ class CommutingLikelihoodStrategy(AssignmentStrategy):
         origin_groups = defaultdict(list)
 
         for i, person in enumerate(people_list):
-            origin_code = self._resolve_origin_code(person)
-            if origin_code:
-                allowed = self._condition_allowed(person)
-                origin_groups[(origin_code,
-                               frozenset(allowed) if allowed else None)].append(i)
+            origin_code, reason = self._resolve_origin_code(person)
+            if not origin_code:
+                # Never silently leave the slot unfilled: an unfilled slot
+                # reaches the operator as a count with no person and no cause.
+                logger.warning(f"Unresolvable origin for person {person.id}: {reason}")
+                self._fail(person, reason)
+            allowed = self._condition_allowed(person)
+            origin_groups[(origin_code,
+                           frozenset(allowed) if allowed else None)].append(i)
 
         results = [None] * len(people_list)
 
@@ -1105,15 +1116,15 @@ class CommutingLikelihoodStrategy(AssignmentStrategy):
             If single output: returns the assigned value
             If multiple outputs: returns dict with all assigned values
         """
-        origin_code = self._resolve_origin_code(person)
+        origin_code, reason = self._resolve_origin_code(person)
         if not origin_code:
-            logger.warning(f"Could not resolve origin code for person {person.id}")
-            return self._fail(person, "no commuting-flow row for this origin")
+            logger.warning(f"Unresolvable origin for person {person.id}: {reason}")
+            return self._fail(person, reason)
 
         source = self.data_manager.get_source(self.data_source_name)
         if not source:
             logger.warning(f"Data source '{self.data_source_name}' not found")
-            return self._fail(person, "no commuting-flow row for this origin")
+            return self._fail(person, f"data source '{self.data_source_name}' not found")
         self._require_sentinel_carries_what_is_read(source)
 
         destinations = source.lookup(origin_code)

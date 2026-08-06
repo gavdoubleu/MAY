@@ -104,12 +104,16 @@ class ODMatrixSource:
     row would keep. Omitted by default: a source with no `outside_value` cannot
     produce one."""
     def __init__(self, lookup_data=None, out_of_boundary='error', on_empty=None,
-                 outside_value=None, sentinel_preserves=None):
+                 outside_value=None, sentinel_preserves=None, file_configs=None):
         self._lookup_data = lookup_data or {}
         self._out_of_boundary = out_of_boundary
         self._on_empty = on_empty
         self._outside_value = outside_value
         self._sentinel_preserves = list(sentinel_preserves or [])
+        # Only set when a test needs origin resolution to go through an
+        # ancestor_lookup; absent means origins are the residence's own name.
+        if file_configs is not None:
+            self._file_configs = file_configs
 
     def lookup(self, origin_code):
         return self._lookup_data.get(origin_code, [])
@@ -560,7 +564,7 @@ class TestCommutingLikelihoodStrategy:
 
         person = MinimalPerson(geographical_unit=None)
         geo = MinimalGeoUnit("E00001234")
-        with pytest.raises(RuntimeError, match="no commuting-flow row"):
+        with pytest.raises(RuntimeError, match="no geographical_unit"):
             strategy.assign(person, MinimalVenue(geographical_unit=geo), {"attribute_name": "loc"})
 
     def test_missing_data_source_raises(self):
@@ -571,7 +575,7 @@ class TestCommutingLikelihoodStrategy:
 
         person = MinimalPerson(geographical_unit=MinimalGeoUnit("ORIGIN_A"))
         geo = MinimalGeoUnit("E00001234")
-        with pytest.raises(RuntimeError, match="no commuting-flow row"):
+        with pytest.raises(RuntimeError, match="data source 'commuting_flows' not found"):
             strategy.assign(person, MinimalVenue(geographical_unit=geo), {"attribute_name": "loc"})
 
     def test_empty_destinations_raises(self):
@@ -623,25 +627,6 @@ class TestCommutingLikelihoodStrategy:
         assert results[1] == "DEST_2"
         assert results[2] == "DEST_1"
 
-    def test_batch_no_geo_person_gets_none(self):
-        """Person with no geo unit in batch → result is None."""
-        source = self._make_od_source({"ORIGIN_A": [("DEST_1", {}, 1.0)]})
-        dm = SimpleDataManager(sources={"commuting_flows": source})
-        config = self._make_strategy(outputs={"loc": "destination"})
-        strategy = CommutingLikelihoodStrategy(config, dm)
-
-        p1 = MinimalPerson(geographical_unit=MinimalGeoUnit("ORIGIN_A"))
-        p2 = MinimalPerson(geographical_unit=None)
-
-        results = strategy.assign_batch(
-            [p1, p2],
-            [MinimalVenue()] * 2,
-            [{"attribute_name": "loc"}] * 2,
-        )
-        assert results[0] == "DEST_1"
-        assert results[1] is None  # no origin → skipped
-
-
     def test_metadata_key_missing_raises_valueerror(self):
         """
         If output_source is not 'destination' and not in metadata,
@@ -690,6 +675,114 @@ class TestCommutingLikelihoodStrategy:
         person = MinimalPerson(geographical_unit=MinimalGeoUnit("ORIGIN_A"))
         result = strategy.assign(person, MinimalVenue(), {"attribute_name": "loc"})
         assert result == {}
+
+
+class TestCommutingLikelihoodUnresolvableOrigin:
+    """An `Unresolvable origin` (CONTEXT.md) — a person whose residence never
+    becomes an origin key, so no lookup is ever attempted — fails loud naming
+    the person and which resolution step failed.
+
+    Both entry points must agree. `assign_batch` is what production runs and
+    `assign` is the per-person path; the same input must produce the same
+    outcome from either, so every case here is parametrised over both. The
+    assertion is on the *diagnosis*, not merely that something raised: a count
+    with no person id and no cause is the defect this replaces.
+
+    The two ways to be unresolvable are separate faults, so they are asserted
+    separately — reporting either as "no commuting-flow row for this origin"
+    names a lookup that never happened.
+    """
+
+    def _strategy(self, source):
+        config = {
+            "strategy": "commuting_likelihood",
+            "data_source": "commuting_flows",
+            "outputs": {"loc": "destination"},
+        }
+        return CommutingLikelihoodStrategy(
+            config, SimpleDataManager(sources={"commuting_flows": source})
+        )
+
+    def _no_residence_case(self):
+        """Person carries no geographical_unit at all."""
+        source = ODMatrixSource(lookup_data={"ORIGIN_A": [("DEST_1", {}, 1.0)]})
+        return (self._strategy(source),
+                MinimalPerson(geographical_unit=None),
+                "no geographical_unit")
+
+    def _no_ancestor_case(self):
+        """Origins are declared at LGU, but this residence's hierarchy stops at
+        SGU — so there is no ancestor to resolve the origin key from."""
+        source = ODMatrixSource(
+            lookup_data={"LGU_A": [("DEST_1", {}, 1.0)]},
+            file_configs=[{
+                "key_columns": {
+                    "LGU_origin_name": {
+                        "attribute": "geographical_unit",
+                        "type": "ancestor_lookup",
+                        "level": "LGU",
+                        "property": "name",
+                    }
+                }
+            }],
+        )
+        person = MinimalPerson(
+            geographical_unit=MinimalGeoUnit("E00001234", level="SGU")
+        )
+        return self._strategy(source), person, "no ancestor at level 'LGU'"
+
+    def _invoke(self, entry_point, strategy, person):
+        context = {"attribute_name": "loc"}
+        if entry_point == "assign":
+            return strategy.assign(person, MinimalVenue(), context)
+        return strategy.assign_batch([person], [MinimalVenue()], [context])
+
+    @pytest.mark.parametrize("entry_point", ["assign", "assign_batch"])
+    @pytest.mark.parametrize("case", ["no_residence", "no_ancestor"])
+    def test_raises_naming_the_person_and_the_cause(self, entry_point, case):
+        strategy, person, expected_cause = getattr(self, f"_{case}_case")()
+
+        with pytest.raises(RuntimeError) as excinfo:
+            self._invoke(entry_point, strategy, person)
+
+        message = str(excinfo.value)
+        assert str(person.id) in message, "the operator cannot act on a count"
+        assert expected_cause in message
+
+    @pytest.mark.parametrize("entry_point", ["assign", "assign_batch"])
+    def test_missing_data_source_is_not_blamed_on_the_person(self, entry_point):
+        """A missing data source is a config fault, not a property of this
+        person's geography, and must not be reported as an unresolvable
+        origin."""
+        strategy = CommutingLikelihoodStrategy(
+            {
+                "strategy": "commuting_likelihood",
+                "data_source": "commuting_flows",
+                "outputs": {"loc": "destination"},
+            },
+            SimpleDataManager(sources={}),
+        )
+        person = MinimalPerson(geographical_unit=MinimalGeoUnit("ORIGIN_A"))
+
+        with pytest.raises(RuntimeError) as excinfo:
+            self._invoke(entry_point, strategy, person)
+
+        assert "commuting_flows" in str(excinfo.value)
+
+    def test_a_resolvable_person_does_not_mask_an_unresolvable_one(self):
+        """The whole batch fails: an unresolvable origin is never absorbed as a
+        silently unassigned slot next to people who did resolve."""
+        source = ODMatrixSource(lookup_data={"ORIGIN_A": [("DEST_1", {}, 1.0)]})
+        strategy = self._strategy(source)
+        resolvable = MinimalPerson(geographical_unit=MinimalGeoUnit("ORIGIN_A"))
+        unresolvable = MinimalPerson(geographical_unit=None)
+
+        with pytest.raises(RuntimeError, match=str(unresolvable.id)):
+            strategy.assign_batch(
+                [resolvable, unresolvable],
+                [MinimalVenue()] * 2,
+                [{"attribute_name": "loc"}] * 2,
+            )
 
 
 class TestCommutingLikelihoodCondition:
