@@ -869,6 +869,55 @@ class CommutingLikelihoodStrategy(AssignmentStrategy):
         # matches an attribute already assigned to the person. Lets a coarser
         # matrix answer only "where", once a finer source has answered "whether".
         self.condition = config.get('condition')
+        # One-shot guard for the sentinel contract check below: the two configs
+        # it compares are fixed for the run, so once is enough.
+        self._sentinel_contract_checked = False
+
+    def _require_sentinel_carries_what_is_read(self, source) -> None:
+        """Fail loud if a sentinel row would lack metadata this strategy reads.
+
+        `sentinel_preserves` is declared on the source, which cannot see
+        strategy config, so a list too thin for what is conditioned on or
+        output here cannot be caught at load. Left unchecked it does not even
+        fail at draw time: `_filter_by_condition` tests `m.get(key) in
+        allowed`, so a sentinel missing the condition key is silently dropped
+        and its out-of-area mass renormalised onto in-world destinations —
+        every worker with no in-world workplace quietly gains one.
+
+        Runs once per strategy, on first source resolution: the answer depends
+        only on the two configs, both fixed for the run.
+        """
+        if self._sentinel_contract_checked:
+            return
+        self._sentinel_contract_checked = True
+
+        # Only a source that can actually emit a sentinel has a contract here.
+        outside_can_occur = (
+            getattr(source, '_outside_value', None)
+            and (getattr(source, '_out_of_boundary', None) == 'outside'
+                 or getattr(source, '_on_empty', None) == 'outside')
+        )
+        if not outside_can_occur:
+            return
+
+        required = {output_source for output_source in self.outputs.values()
+                    if output_source != 'destination'}
+        if self.condition:
+            # 'destination' is the sentinel itself, never metadata — everything
+            # else is read off the row that was drawn.
+            required.add(self.condition['metadata_key'])
+        missing = sorted(required - set(getattr(source, '_sentinel_preserves', [])))
+        if missing:
+            raise ValueError(
+                f"commuting_likelihood strategy reads metadata {missing} that "
+                f"O-D source '{self.data_source_name}' drops from its sentinel "
+                f"rows. A sentinel keeps only the columns named in that source's "
+                f"'sentinel_preserves' "
+                f"({sorted(getattr(source, '_sentinel_preserves', []))}), so "
+                f"out-of-boundary flow would be silently dropped from the draw. "
+                f"Add {missing} to 'sentinel_preserves' on the source, or stop "
+                "reading it in the strategy. No fallbacks."
+            )
 
     def _condition_allowed(self, person) -> Optional[set]:
         """Metadata values this person's destinations may carry, or None if unconditioned."""
@@ -969,6 +1018,7 @@ class CommutingLikelihoodStrategy(AssignmentStrategy):
             logger.warning(f"Data source '{self.data_source_name}' not found")
             return [self._fail(person, "no commuting-flow row for this origin")
                     for person, household, context in zip(people_list, households_list, contexts_list)]
+        self._require_sentinel_carries_what_is_read(source)
 
         # Group by origin and, when conditioning, by the condition value too:
         # every member of a group then shares one filtered distribution.
@@ -1064,6 +1114,7 @@ class CommutingLikelihoodStrategy(AssignmentStrategy):
         if not source:
             logger.warning(f"Data source '{self.data_source_name}' not found")
             return self._fail(person, "no commuting-flow row for this origin")
+        self._require_sentinel_carries_what_is_read(source)
 
         destinations = source.lookup(origin_code)
         if destinations:

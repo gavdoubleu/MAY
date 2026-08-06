@@ -97,9 +97,19 @@ class MultiKeySource:
 
 
 class ODMatrixSource:
-    """Source that returns O-D matrix format: List[(dest, metadata, likelihood)]."""
-    def __init__(self, lookup_data=None):
+    """Source that returns O-D matrix format: List[(dest, metadata, likelihood)].
+
+    The boundary-policy attributes mirror the real source's, so a strategy can
+    be asked whether this source may emit a sentinel and which metadata such a
+    row would keep. Omitted by default: a source with no `outside_value` cannot
+    produce one."""
+    def __init__(self, lookup_data=None, out_of_boundary='error', on_empty=None,
+                 outside_value=None, sentinel_preserves=None):
         self._lookup_data = lookup_data or {}
+        self._out_of_boundary = out_of_boundary
+        self._on_empty = on_empty
+        self._outside_value = outside_value
+        self._sentinel_preserves = list(sentinel_preserves or [])
 
     def lookup(self, origin_code):
         return self._lookup_data.get(origin_code, [])
@@ -774,6 +784,110 @@ class TestCommutingLikelihoodCondition:
         with pytest.raises(ValueError, match="is not in the map"):
             strategy.assign(self._person("nonsense"), MinimalVenue(),
                             {"attribute_name": "workplace_location"})
+
+
+class TestCommutingLikelihoodSentinelContract:
+    """The strategy checks upfront that a sentinel row will carry every
+    metadata key it is going to read.
+
+    `sentinel_preserves` is declared on the source, which cannot see strategy
+    config, so a list too thin for what this strategy conditions on or outputs
+    is invisible at load. It is not merely thin either: `_filter_by_condition`
+    tests `m.get(key) in allowed`, so a MISSING condition key silently drops the
+    sentinel row and renormalises the out-of-area mass back onto in-world
+    destinations. The check runs once, when the source is first resolved.
+    """
+
+    LOOKUP = {"Cardiff": [("Cardiff", {"work_mode": "Normal"}, 1.0)]}
+    CONDITION = {
+        "attribute": "commutes",
+        "metadata_key": "work_mode",
+        "map": {"travels": ["Normal"], "from_home": ["From_Home"]},
+    }
+
+    def _strategy(self, sentinel_preserves, outputs=None, condition=None,
+                  **source_kwargs):
+        source_kwargs.setdefault("out_of_boundary", "outside")
+        source_kwargs.setdefault("outside_value", "OUTSIDE")
+        source = ODMatrixSource(lookup_data=self.LOOKUP,
+                                sentinel_preserves=sentinel_preserves, **source_kwargs)
+        config = {
+            "strategy": "commuting_likelihood",
+            "data_source": "commuting_flows",
+            "outputs": outputs or {"workplace_location": "destination",
+                                    "work_mode": "work_mode"},
+        }
+        if condition is not None:
+            config["condition"] = condition
+        return CommutingLikelihoodStrategy(
+            config, SimpleDataManager(sources={"commuting_flows": source}))
+
+    def _people(self, count=2, commutes="travels"):
+        return [MinimalPerson(geographical_unit=MinimalGeoUnit("Cardiff"),
+                              properties={"commutes": commutes})
+                for _ in range(count)]
+
+    def _assign_batch(self, strategy, count=2):
+        people = self._people(count)
+        return strategy.assign_batch(people, [MinimalVenue()] * count,
+                                     [{"attribute_name": "workplace_location"}] * count)
+
+    def test_condition_key_not_preserved_fails_loud(self):
+        strategy = self._strategy([], condition=self.CONDITION)
+        with pytest.raises(ValueError, match="sentinel_preserves"):
+            self._assign_batch(strategy)
+
+    def test_output_key_not_preserved_fails_loud(self):
+        strategy = self._strategy(["work_mode"],
+                                   outputs={"workplace_location": "destination",
+                                            "industry": "industry"})
+        with pytest.raises(ValueError, match="sentinel_preserves"):
+            self._assign_batch(strategy)
+
+    def test_error_names_the_missing_keys_and_both_configs(self):
+        strategy = self._strategy([], condition=self.CONDITION)
+        with pytest.raises(ValueError) as raised:
+            self._assign_batch(strategy)
+        message = str(raised.value)
+        assert "work_mode" in message
+        assert "commuting_flows" in message          # the source config
+        assert "commuting_likelihood" in message     # the strategy config
+
+    def test_destination_output_needs_no_preservation(self):
+        """'destination' is the sentinel itself, never metadata."""
+        strategy = self._strategy([], outputs={"workplace_location": "destination"})
+        assert self._assign_batch(strategy) == ["Cardiff", "Cardiff"]
+
+    def test_covered_contract_passes(self):
+        strategy = self._strategy(["work_mode"], condition=self.CONDITION)
+        results = self._assign_batch(strategy)
+        assert all(r["work_mode"] == "Normal" for r in results)
+
+    def test_source_that_cannot_emit_a_sentinel_is_not_checked(self):
+        """With out_of_boundary='error' no sentinel row can ever exist, so an
+        empty sentinel_preserves constrains nothing."""
+        strategy = self._strategy([], condition=self.CONDITION,
+                                   out_of_boundary="error", outside_value=None)
+        assert len(self._assign_batch(strategy)) == 2
+
+    def test_redistribute_on_empty_outside_is_checked(self):
+        strategy = self._strategy([], condition=self.CONDITION,
+                                   out_of_boundary="redistribute", on_empty="outside")
+        with pytest.raises(ValueError, match="sentinel_preserves"):
+            self._assign_batch(strategy)
+
+    def test_sequential_assign_is_checked_too(self):
+        strategy = self._strategy([], condition=self.CONDITION)
+        with pytest.raises(ValueError, match="sentinel_preserves"):
+            strategy.assign(self._people(1)[0], MinimalVenue(),
+                            {"attribute_name": "workplace_location"})
+
+    def test_checked_once_per_strategy(self):
+        """A contract satisfied at first resolve is not re-tested per batch."""
+        strategy = self._strategy(["work_mode"], condition=self.CONDITION)
+        self._assign_batch(strategy)
+        strategy.data_manager.get_source("commuting_flows")._sentinel_preserves = []
+        assert len(self._assign_batch(strategy)) == 2
 
 
 # GUSamplerStrategy Tests
