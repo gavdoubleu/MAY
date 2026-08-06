@@ -105,6 +105,50 @@ class DataSource:
             )
 
 
+class MissingDeclaredColumns(Exception):
+    """A file does not have a column its own file block declares.
+
+    Kept distinct from the generic per-file load failure so the loaders can
+    re-raise it unwrapped: this is a config-contract violation, not a failure
+    to read a file, and disguising it as one loses both the type and the
+    carefully-built message.
+    """
+
+
+def _require_declared_columns(df: pd.DataFrame, source_name: str, file_path: Path,
+                              key_columns: List[str],
+                              value_columns: Dict[str, str]) -> None:
+    """Every column a file block declares must exist in that file.
+
+    Checked once per file, straight after `read_csv`, before the geo filter or
+    any row parsing: per-row it would report the same fault thousands of times,
+    and after the filter a missing key column has already skipped it silently.
+
+    A missing *value* column is the reason this exists. The row loop would drop
+    it and `_normalize_probabilities` would scale the survivors back to 1.0,
+    inventing the absent category's probability mass into its siblings — a
+    complete, well-formed, confidently wrong distribution that nothing
+    downstream can detect. Key columns are checked in the same pass because
+    their absence silently skips the geo-unit filter.
+    """
+    present = set(df.columns)
+    missing = [f"'{column}' (key_columns)"
+               for column in key_columns if column not in present]
+    missing += [f"'{column}' (value_columns['{output_key}'])"
+                for output_key, column in value_columns.items()
+                if column not in present]
+    if not missing:
+        return
+
+    raise MissingDeclaredColumns(
+        f"source '{source_name}': {file_path} does not have declared column(s) "
+        f"{', '.join(missing)}. The file has {sorted(present)}. Every declared "
+        "column must exist: a missing value column would be dropped and the "
+        "survivors renormalised, inventing its probability mass into the "
+        "other categories. Fix the config or the file."
+    )
+
+
 def _ordered_key_columns(file_config: Dict[str, Any], source_name: str,
                          *, expected: Optional[int] = None) -> List[str]:
     """
@@ -226,21 +270,24 @@ class GeoDistributionSource(DataSource):
                 try:
                     df = pd.read_csv(file_path)
 
-                    # Filter to needed areas
                     key_column = _ordered_key_columns(file_config, self.name, expected=1)[0]
-                    if geo_units and key_column in df.columns:
+                    value_columns = file_config.get('value_columns', {})
+                    _require_declared_columns(df, self.name, file_path,
+                                              [key_column], value_columns)
+
+                    # Filter to needed areas
+                    if geo_units:
                         df = df[df[key_column].isin(geo_units)]
 
-                    # Parse value columns
-                    value_columns = file_config.get('value_columns', {})
                     total_column = file_config.get('total_column')
-
                     lookup = self._parse_dataframe(
                         df, key_column, value_columns, total_column
                     )
 
                     logger.info(f"  ✓ Loaded {len(lookup)} geographical units from {file_path.name}")
 
+                except MissingDeclaredColumns:
+                    raise
                 except Exception as e:
                     # Fail loud on a load/parse error.
                     raise RuntimeError(
@@ -358,15 +405,19 @@ class DiversitySource(DataSource):
                 try:
                     df = pd.read_csv(file_path)
                     key_column = _ordered_key_columns(file_config, self.name, expected=1)[0]
+                    value_columns = file_config.get('value_columns', {})
+                    _require_declared_columns(df, self.name, file_path,
+                                              [key_column], value_columns)
 
-                    if geo_units and key_column in df.columns:
+                    if geo_units:
                         df = df[df[key_column].isin(geo_units)]
 
-                    value_columns = file_config.get('value_columns', {})
                     lookup = self._parse_diversity_dataframe(df, key_column, value_columns)
 
                     logger.info(f"  ✓ Loaded {len(lookup)} geographical units from {file_path.name}")
 
+                except MissingDeclaredColumns:
+                    raise
                 except Exception as e:
                     # Fail loud on a load/parse error.
                     raise RuntimeError(
@@ -449,16 +500,21 @@ class PairProbabilitySource(DataSource):
                 try:
                     df = pd.read_csv(file_path)
 
-                    # Filter to needed areas if specified
                     key_columns = _ordered_key_columns(file_config, self.name, expected=2)
-                    if geo_units and key_columns[0] in df.columns:
+                    value_columns = file_config.get('value_columns', {})
+                    _require_declared_columns(df, self.name, file_path,
+                                              key_columns, value_columns)
+
+                    # Filter to needed areas if specified
+                    if geo_units:
                         df = df[df[key_columns[0]].isin(geo_units)]
 
-                    value_columns = file_config.get('value_columns', {})
                     lookups = self._parse_pair_dataframe(df, key_columns, value_columns)
 
                     logger.info(f"  ✓ Loaded {len(lookups)} geographical units from {file_path.name}")
 
+                except MissingDeclaredColumns:
+                    raise
                 except Exception as e:
                     # Fail loud on a load/parse error.
                     raise RuntimeError(
@@ -568,6 +624,11 @@ class MultiKeyLookupSource(DataSource):
                 try:
                     df = pd.read_csv(file_path)
 
+                    _require_declared_columns(
+                        df, self.name, file_path,
+                        list(file_config.get('key_columns', {}).keys()),
+                        file_config.get('value_columns', {}))
+
                     # Apply row filters if specified
                     row_filter = file_config.get('row_filter', {})
                     if row_filter:
@@ -602,6 +663,8 @@ class MultiKeyLookupSource(DataSource):
                         file_lookup[key] = values
 
                     logger.info(f"  ✓ Loaded {len(file_lookup)} rows from {file_path.name} into dictionary")
+                except MissingDeclaredColumns:
+                    raise
                 except Exception as e:
                     # Fail loud on a load/parse error.
                     raise RuntimeError(

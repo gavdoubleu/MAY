@@ -27,6 +27,8 @@ from may.attribute_assignment.data_sources import (
     GUSamplerSource,
     DataSourceManager,
     _ordered_key_columns,
+    _require_declared_columns,
+    MissingDeclaredColumns,
 )
 
 
@@ -1437,3 +1439,117 @@ class TestDiversitySource:
         source = DiversitySource("test", {"files": []})
         with pytest.raises(RuntimeError, match="Data not loaded"):
             source.lookup("E00001")
+
+
+# _require_declared_columns: a declared column absent from the file is fatal
+
+class TestRequireDeclaredColumns:
+    """The helper itself: what it reports, and that it reports it all at once."""
+
+    @staticmethod
+    def _frame():
+        return pd.DataFrame({"geo_unit": ["E00001"], "white": [80.0]})
+
+    def test_all_present_does_not_raise(self):
+        _require_declared_columns(
+            self._frame(), "test_geo", Path("/x/y.csv"),
+            key_columns=["geo_unit"], value_columns={"W": "white"},
+        )
+
+    def test_reports_every_missing_column_at_once(self):
+        """One raise names all of them, so a renamed file is fixed in one pass."""
+        with pytest.raises(MissingDeclaredColumns) as excinfo:
+            _require_declared_columns(
+                self._frame(), "test_geo", Path("/x/y.csv"),
+                key_columns=["geo_unit"],
+                value_columns={"W": "white", "A": "asian", "B": "black"},
+            )
+        message = str(excinfo.value)
+        assert "asian" in message and "black" in message
+
+    def test_message_names_source_file_and_actual_header(self):
+        with pytest.raises(MissingDeclaredColumns) as excinfo:
+            _require_declared_columns(
+                self._frame(), "test_geo", Path("/x/y.csv"),
+                key_columns=["geo_unit"], value_columns={"A": "asian"},
+            )
+        message = str(excinfo.value)
+        assert "test_geo" in message
+        assert "/x/y.csv" in message
+        assert "white" in message  # the columns the file does have
+
+    def test_missing_key_column_is_reported(self):
+        """A missing key column silently skips the geo filter, so it counts too."""
+        with pytest.raises(MissingDeclaredColumns) as excinfo:
+            _require_declared_columns(
+                self._frame(), "test_geo", Path("/x/y.csv"),
+                key_columns=["area_code"], value_columns={"W": "white"},
+            )
+        assert "area_code" in str(excinfo.value)
+
+
+class TestDeclaredColumnsCheckedAtLoad:
+    """Every loader checks its file before parsing, and the error is not wrapped.
+
+    `MissingDeclaredColumns` must escape the per-file `except Exception` that
+    turns parse errors into `RuntimeError`: a declared column that is not in
+    the file is a config-contract violation, not a failure to load a file.
+    """
+
+    def test_geo_distribution_missing_value_column(self, tmp_path):
+        path = tmp_path / "geo.csv"
+        path.write_text("geo_unit,W\nE00001,8\n")
+        source = GeoDistributionSource("test_geo", {"files": [{
+            "path": str(path),
+            "key_columns": {"geo_unit": None},
+            "value_columns": {"W": "W", "A": "A"},
+        }]})
+        with pytest.raises(MissingDeclaredColumns, match="A"):
+            source.load_data()
+
+    def test_diversity_missing_value_column(self, tmp_path):
+        path = tmp_path / "diversity.csv"
+        path.write_text("geo_unit,single\nE00001,7\n")
+        source = DiversitySource("test_diversity", {"files": [{
+            "path": str(path),
+            "key_columns": {"geo_unit": None},
+            "value_columns": {"single": "single", "two": "two"},
+        }]})
+        with pytest.raises(MissingDeclaredColumns, match="two"):
+            source.load_data()
+
+    def test_pair_missing_value_column(self, tmp_path):
+        path = tmp_path / "pair.csv"
+        path.write_text("geo_unit,first_eth,prob_W\nE00001,W,0.9\n")
+        source = PairProbabilitySource("test_pair", {"files": [{
+            "path": str(path),
+            "key_columns": {"geo_unit": None, "first_eth": None},
+            "value_columns": {"W": "prob_W", "A": "prob_A"},
+        }]})
+        with pytest.raises(MissingDeclaredColumns, match="prob_A"):
+            source.load_data()
+
+    def test_multi_key_missing_value_column(self, tmp_path):
+        """Already failed, but as a bare KeyError wrapped into RuntimeError."""
+        path = tmp_path / "multi.csv"
+        path.write_text("sex,age,cvd_prob\nm,30,0.1\n")
+        source = MultiKeyLookupSource("test_multi", {"files": [{
+            "path": str(path),
+            "key_columns": {"sex": {"attribute": "sex", "type": "direct"},
+                            "age": {"attribute": "age", "type": "direct"}},
+            "value_columns": {"cvd": "cvd_prob", "crd": "crd_prob"},
+        }]}, assignment_config=None)
+        with pytest.raises(MissingDeclaredColumns, match="crd_prob"):
+            source.load_data()
+
+    def test_geo_distribution_missing_key_column(self, tmp_path):
+        """Today this skips the geo filter, then dies at row[key_column]."""
+        path = tmp_path / "geo.csv"
+        path.write_text("area_code,W,A\nE00001,8,2\n")
+        source = GeoDistributionSource("test_geo", {"files": [{
+            "path": str(path),
+            "key_columns": {"geo_unit": None},
+            "value_columns": {"W": "W", "A": "A"},
+        }]})
+        with pytest.raises(MissingDeclaredColumns, match="geo_unit"):
+            source.load_data()
