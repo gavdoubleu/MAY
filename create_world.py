@@ -6,6 +6,7 @@ import pstats
 import sys
 import numpy as np
 import numba as nb
+import psutil
 import yaml
 from may.config_loader import setup_geography
 from may.geography import VenueManager, VenueError
@@ -60,26 +61,22 @@ def set_random_seed(seed=999):
 set_random_seed(0)
 
 
-def log_memory_usage(stage_label):
-    """DEBUG-level VmRSS/VmHWM snapshot from /proc/self/status (Linux only).
+_process = psutil.Process()
 
-    Silent on default (INFO) runs and on platforms without procfs; run with
-    MAY_LOG_LEVEL=DEBUG to capture per-stage memory for peak-RSS comparisons
-    between flushed and unflushed configs.
+
+def log_memory_usage(stage_label):
+    """DEBUG-level current-RSS snapshot, portable to every platform psutil
+    supports.
+
+    Silent on default (INFO) runs; run with MAY_LOG_LEVEL=DEBUG to capture
+    per-stage memory for comparisons between flushed and unflushed configs.
+    No peak/high-water-mark figure: psutil has no field for it that reads
+    the same across platforms (Linux's memory_full_info() carries none).
     """
     if not logger.isEnabledFor(logging.DEBUG):
         return
-    status_path = "/proc/self/status"
-    if not os.path.exists(status_path):
-        return
-    resident = peak = None
-    with open(status_path) as status_file:
-        for line in status_file:
-            if line.startswith("VmRSS:"):
-                resident = " ".join(line.split()[1:])
-            elif line.startswith("VmHWM:"):
-                peak = " ".join(line.split()[1:])
-    logger.debug(f"[MEMORY] after {stage_label}: VmRSS={resident} VmHWM={peak}")
+    resident_mb = _process.memory_info().rss / (1024 * 1024)
+    logger.debug(f"[MEMORY] after {stage_label}: VmRSS={resident_mb:.1f} MB")
 
 
 VALID_POPULATION_TYPES = {"matrix", "explicit", "explicit_batch"}

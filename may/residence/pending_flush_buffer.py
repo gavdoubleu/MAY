@@ -23,25 +23,24 @@ every time regardless — and leaves the interface callable from a parallel
 result drain, not only from a unit boundary.
 """
 
-import os
 import time
 from typing import Callable, Dict, List, Optional, Tuple
 
-_PAGE_SIZE_MB = os.sysconf('SC_PAGE_SIZE') / (1024 * 1024)
+import psutil
+
+_process = psutil.Process()
 
 
 def resident_set_size_mb() -> float:
     """This process's resident set, in megabytes.
 
     The parent creates every household as it applies each unit's plan, so its
-    own resident set is exactly what staging a batch gives back. Read from
-    `/proc/self/statm`, which is a two-field parse of a page already in
-    memory — cheap enough to read at every offer, which is what lets the
-    budget be a live reading rather than a periodic sample.
+    own resident set is exactly what staging a batch gives back. Read via
+    psutil, portable across Linux/macOS/Windows and cheap enough to read at
+    every offer, which is what lets the budget be a live reading rather than
+    a periodic sample (ADR-0008, second amendment).
     """
-    with open('/proc/self/statm', 'r') as statm:
-        resident_pages = int(statm.read().split()[1])
-    return resident_pages * _PAGE_SIZE_MB
+    return _process.memory_info().rss / (1024 * 1024)
 
 
 class PendingFlushBuffer:

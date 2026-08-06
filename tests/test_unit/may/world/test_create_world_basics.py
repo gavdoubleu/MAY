@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 import numpy as np
@@ -5,7 +6,7 @@ import numba as nb
 import pytest
 from unittest.mock import patch, MagicMock
 import create_world
-from create_world import set_random_seed, main, setup_population
+from create_world import set_random_seed, main, setup_population, log_memory_usage
 from may.population import PopulationError
 from may.utils import path_resolver as pr
 
@@ -121,3 +122,28 @@ def test_batch_data_dir_is_resolved_once_for_every_mode():
         assert loader.call_args.kwargs["data_dir"] == "/data/population"
     finally:
         pr._resolver = old
+
+
+def test_log_memory_usage_is_silent_below_debug_level(caplog):
+    """Default (INFO) runs pay nothing for the reading, on any platform."""
+    create_world.logger.setLevel(logging.INFO)
+    with caplog.at_level(logging.DEBUG):
+        log_memory_usage("test_stage")
+    assert caplog.text == ""
+
+
+def test_log_memory_usage_logs_current_rss_at_debug_level(caplog):
+    """At DEBUG level it reports psutil's live RSS, portable to every
+    platform psutil supports — no VmHWM/peak field, since psutil has no
+    cross-platform peak-RSS reading to report."""
+    create_world.logger.setLevel(logging.DEBUG)
+    fake_memory_info = MagicMock(rss=123 * 1024 * 1024)
+    with patch.object(create_world._process, "memory_info",
+                      return_value=fake_memory_info):
+        with caplog.at_level(logging.DEBUG, logger="create_world"):
+            log_memory_usage("test_stage")
+    assert "[MEMORY] after test_stage" in caplog.text
+    assert "123.0" in caplog.text
+    assert "VmHWM" not in caplog.text
+    create_world.logger.setLevel(
+        os.environ.get("MAY_LOG_LEVEL", "INFO").upper())
