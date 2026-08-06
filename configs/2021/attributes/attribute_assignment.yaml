@@ -202,7 +202,6 @@ data_sources:
           B: "B"
           M: "M"
           O: "O"
-        total_column: "total"
 
       - path: "${data_root}/population/ethnicity/SCT_ethnicity.csv"
         key_columns:
@@ -213,7 +212,6 @@ data_sources:
           B: "B"
           M: "M"
           O: "O"
-        total_column: "total"
 
       - path: "${data_root}/population/ethnicity/NI_ethnicity.csv"
         key_columns:
@@ -224,7 +222,6 @@ data_sources:
           B: "B"
           M: "M"
           O: "O"
-        total_column: "total"
 
 
   pair_probabilities:

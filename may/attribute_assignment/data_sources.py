@@ -279,10 +279,7 @@ class GeoDistributionSource(DataSource):
                     if geo_units:
                         df = df[df[key_column].isin(geo_units)]
 
-                    total_column = file_config.get('total_column')
-                    lookup = self._parse_dataframe(
-                        df, key_column, value_columns, total_column
-                    )
+                    lookup = self._parse_dataframe(df, key_column, value_columns)
 
                     logger.info(f"  ✓ Loaded {len(lookup)} geographical units from {file_path.name}")
 
@@ -301,8 +298,7 @@ class GeoDistributionSource(DataSource):
         self._data_loaded = True
 
     def _parse_dataframe(self, df: pd.DataFrame, key_column: str,
-                        value_columns: Dict[str, str],
-                        total_column: Optional[str] = None) -> Dict[str, Dict[str, float]]:
+                        value_columns: Dict[str, str]) -> Dict[str, Dict[str, float]]:
         """
         Parse DataFrame into lookup dictionary.
 
@@ -310,7 +306,6 @@ class GeoDistributionSource(DataSource):
             df: DataFrame to parse
             key_column: Column with geographical unit codes
             value_columns: Mapping of output keys to DataFrame columns
-            total_column: Optional column with totals (for normalization)
 
         Returns:
             Dictionary mapping geographical unit codes to probability distributions
@@ -320,23 +315,11 @@ class GeoDistributionSource(DataSource):
         for _, row in df.iterrows():
             geo_unit = row[key_column]
 
-            # Get total if available
-            if total_column and total_column in df.columns:
-                total = row[total_column]
-            else:
-                total = None
-
             # Build probability distribution
             probs = {}
             for output_key, df_column in value_columns.items():
                 if df_column in df.columns:
-                    value = row[df_column]
-
-                    # Normalize by total if provided
-                    if total is not None and total > 0:
-                        probs[output_key] = value / total
-                    else:
-                        probs[output_key] = value
+                    probs[output_key] = row[df_column]
 
             # Normalize probabilities
             probs = self._normalize_probabilities(probs)

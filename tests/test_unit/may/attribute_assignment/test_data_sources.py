@@ -317,29 +317,9 @@ class TestGeoDistributionSource:
         with pytest.raises(ValueError, match="already loaded"):
             source.load_data()
 
-    def test_parse_dataframe_with_total_column(self):
-        """When total_column is provided, values are divided by total first."""
-        source = GeoDistributionSource("test", {
-            "files": [],
-            "fallback": {},
-        })
-        df = pd.DataFrame({
-            "geo_unit": ["E00001", "E00002"],
-            "white": [80, 50],
-            "asian": [20, 50],
-            "total": [100, 100],
-        })
-        result = source._parse_dataframe(
-            df, "geo_unit",
-            {"W": "white", "A": "asian"},
-            total_column="total"
-        )
-        assert abs(result["E00001"]["W"] - 0.8) < 1e-10
-        assert abs(result["E00001"]["A"] - 0.2) < 1e-10
-        assert abs(result["E00002"]["W"] - 0.5) < 1e-10
-
-    def test_parse_dataframe_without_total_column(self):
-        """Without total_column, raw values are normalized."""
+    def test_parse_dataframe_normalises_raw_counts(self):
+        """Raw counts become shares. There is no denominator to declare: a
+        per-row total would cancel against this normalisation."""
         source = GeoDistributionSource("test", {
             "files": [],
             "fallback": {},
