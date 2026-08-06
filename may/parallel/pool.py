@@ -109,6 +109,9 @@ def parallel_map_in_order(worker_fn: Callable, slices: Sequence[Slice], *,
     `look_ahead` defaults to twice the worker count, so the pool stays fed
     while the caller works on what it was just handed. Below the worker count
     it idles workers; a caller whose results are large may still want that.
+    Has a floor of 1: `look_ahead <= 0` cannot dispatch anything, so it raises
+    `ValueError` on the pooled path rather than being silently reinterpreted;
+    omit the argument to keep the `worker_count * 2` default.
 
     `force_fork` suppresses the in-process shortcut below. A worker that
     *mutates* a world and returns a description of what it did needs that world
@@ -132,6 +135,10 @@ def parallel_map_in_order(worker_fn: Callable, slices: Sequence[Slice], *,
         for payload in payloads:
             yield _seed_and_invoke_indexed(payload)
         return
+    if look_ahead is not None and look_ahead <= 0:
+        raise ValueError(
+            f"look_ahead must be a positive number of Slices, not "
+            f"{look_ahead!r}; omit the key to default to worker_count * 2")
     window = look_ahead if look_ahead is not None else worker_count * 2
     with _FORK_CONTEXT.Pool(processes=worker_count,
                             maxtasksperchild=max_tasks_per_child) as pool:

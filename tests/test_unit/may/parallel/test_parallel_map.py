@@ -4,6 +4,7 @@ Tests exercise the public `parallel_map` / `Slice` interface only, never pool
 internals, so they survive re-implementation.
 """
 import numpy as np
+import pytest
 
 from may.parallel import parallel_map, parallel_map_in_order, GeoUnitSlice
 
@@ -296,3 +297,29 @@ def test_in_order_dispatches_no_further_ahead_than_the_look_ahead():
     finally:
         stream.close()
         manager.shutdown()
+
+
+@pytest.mark.parametrize('look_ahead', [0, -1])
+def test_non_positive_look_ahead_raises_on_the_pool_path(look_ahead):
+    # window <= 0 can never dispatch (the inner `len(in_flight) < window`
+    # condition is false forever), so `in_flight.popleft()` used to raise a
+    # bare IndexError naming neither `look_ahead` nor the mistake. Reject it
+    # loudly instead, distinct from omitting the argument (which still means
+    # `worker_count * 2`).
+    slices = [GeoUnitSlice([f'E{index}']) for index in range(4)]
+
+    with pytest.raises(ValueError, match='look_ahead'):
+        list(parallel_map_in_order(_count_codes, slices, workers=2,
+                                   force_fork=True, look_ahead=look_ahead))
+
+
+def test_non_positive_look_ahead_is_ignored_on_the_in_process_path():
+    # The worker_count<=1, not-force_fork path never buffers anything, so
+    # look_ahead is unused there — an invalid value passes through rather
+    # than raising for a bound that does not apply.
+    slices = [GeoUnitSlice(['E1']), GeoUnitSlice(['E2'])]
+
+    results = list(parallel_map_in_order(_count_codes, slices, workers=1,
+                                         look_ahead=0))
+
+    assert results == [(0, 1), (1, 1)]
