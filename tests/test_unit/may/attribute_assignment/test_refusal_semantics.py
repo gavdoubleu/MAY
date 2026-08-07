@@ -285,6 +285,92 @@ class TestTheEngineCanRefuseWithoutAStrategy:
         assert str(refusal).startswith("Strategy 'refusing_test' could not assign")
 
 
+class TestTheEngineNamesEveryPersonItRefuses:
+    """The end-of-attribute raise tells the operator each refusal was logged
+    with the person and the reason. A warning naming a venue or a household
+    breaks that promise for exactly the people it does not name."""
+
+    @staticmethod
+    def _capture(assigner):
+        recorded = []
+        assigner._record_refusal = recorded.append
+        return recorded
+
+    def _household_assigner(self, geo_unit):
+        config = _build_family_config(SimpleGeoSource(fallback={"W": 1.0}))
+        data_manager = SimpleDataManager(sources={
+            "geo_distribution": SimpleGeoSource(fallback={"W": 1.0}),
+            "pair_probabilities": SimpleGeoSource(),
+        })
+        return AttributeAssigner(config, data_manager)
+
+    def test_a_venue_type_with_no_rule_names_each_member(self, geo_unit):
+        config = MinimalConfig(
+            attribute_name="ethnicity",
+            venue_assignment_rules=[
+                {'venue_types': ['care_home'],
+                 'assignment': {'strategy': 'constant', 'value': 'W'}}
+            ],
+        )
+        assigner = AttributeAssigner(config, SimpleDataManager())
+        recorded = self._capture(assigner)
+        residents = _make_people(3, geo_unit)
+        venue = MinimalVenue(venue_type="student_dorms", members=residents,
+                             geographical_unit=geo_unit)
+
+        assigner._assign_other_residences([venue])
+
+        assert [refusal.person_id for refusal in recorded] == \
+            [person.id for person in residents]
+        assert all("student_dorms" in refusal.reason for refusal in recorded)
+
+    def test_an_unclassifiable_household_names_each_member(self, geo_unit):
+        assigner = self._household_assigner(geo_unit)
+        recorded = self._capture(assigner)
+        members = [MinimalPerson(age=30, category="Adults",
+                                 geographical_unit=geo_unit) for _ in range(2)]
+        # No pattern and no age categories: the structure cannot be classified.
+        household = MinimalVenue(venue_type="household", members=members,
+                                 geographical_unit=geo_unit)
+
+        assigner._assign_household(household)
+
+        assert [refusal.person_id for refusal in recorded] == \
+            [person.id for person in members]
+        assert all(str(household.id) in refusal.reason for refusal in recorded)
+
+    def test_a_person_with_no_role_is_named(self, geo_unit):
+        assigner = self._household_assigner(geo_unit)
+        assigner.config.get_person_role = lambda *args, **kwargs: None
+        recorded = self._capture(assigner)
+        person = MinimalPerson(age=35, category="Adults",
+                               geographical_unit=geo_unit)
+        household = MinimalVenue(venue_type="household", members=[person],
+                                 geographical_unit=geo_unit)
+        household.properties["_cached_actual_pattern"] = "0 0 1 0"
+
+        assigner._assign_household(household)
+
+        assert [refusal.person_id for refusal in recorded] == [person.id]
+        assert "role" in recorded[0].reason
+
+    def test_a_person_with_no_rule_for_their_role_is_named(self, geo_unit):
+        assigner = self._household_assigner(geo_unit)
+        assigner.config.get_assignment_rule = lambda *args, **kwargs: None
+        recorded = self._capture(assigner)
+        person = MinimalPerson(age=35, category="Adults",
+                               geographical_unit=geo_unit)
+        household = MinimalVenue(venue_type="household", members=[person],
+                                 geographical_unit=geo_unit)
+        household.properties["_cached_actual_pattern"] = "0 0 1 0"
+
+        assigner._assign_household(household)
+
+        assert [refusal.person_id for refusal in recorded] == [person.id]
+        assert "Independents" in recorded[0].reason
+        assert "primary_adult" in recorded[0].reason
+
+
 class TestEngineFaultAborts:
     """A broken engine is not a data verdict and must never be absorbed into
     a counter."""

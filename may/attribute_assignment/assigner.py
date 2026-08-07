@@ -358,9 +358,11 @@ class AttributeAssigner:
             # An attribute's scope belongs in its eligibility filters, not in
             # which venue types happen to have had a rule written for them.
             if not venue_rule:
-                logger.warning(f"No assignment rule for venue type '{venue.type}': "
-                               f"refusing its {len(members)} members")
-                self.stats['refusals'] += len(members)
+                for person in members:
+                    self._refuse_person(
+                        person,
+                        f"venue type '{venue.type}' has no venue_assignment_rules "
+                        f"entry")
                 continue
 
             # Get the assignment strategy from the rule. Outside the per-person
@@ -749,11 +751,10 @@ class AttributeAssigner:
         # Pass pre-calculated categories if possible, but get_household_structure currently uses internal logic
         structure = self.config.get_household_structure(household, verbose=self.verbose)
         if not structure:
-            if self.verbose:
-                logger.debug(f"  Could not classify household {household.id}, skipping")
-            else:
-                logger.warning(f"Could not classify household {household.id}, skipping")
-            self.stats['refusals'] += len(members)
+            for person in members:
+                self._refuse_person(
+                    person,
+                    f"household {household.id} matches no configured structure")
             return
 
         # Store structure in household properties
@@ -793,11 +794,10 @@ class AttributeAssigner:
             )
 
             if not role:
-                if self.verbose:
-                    logger.debug(f"    Could not determine role, skipping")
-                else:
-                    logger.warning(f"  Could not determine role for {person} in {household.id}")
-                self.stats['refusals'] += 1
+                self._refuse_person(
+                    person,
+                    f"no role in structure '{structure}' for their subset "
+                    f"'{category}' in household {household.id}")
                 continue
 
             # Track assigned roles
@@ -812,11 +812,10 @@ class AttributeAssigner:
             rule = self.config.get_assignment_rule(structure, role, verbose=self.verbose)
 
             if not rule:
-                if self.verbose:
-                    logger.debug(f"    No rule found for role '{role}', skipping")
-                else:
-                    logger.warning(f"  No rule for role '{role}' in structure '{structure}' for {person}")
-                self.stats['refusals'] += 1
+                self._refuse_person(
+                    person,
+                    f"no assignment rule for role '{role}' in structure "
+                    f"'{structure}'")
                 continue
 
             # 3c. Create and execute strategy. Only a Refusal is caught:
