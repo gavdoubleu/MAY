@@ -1,14 +1,9 @@
 # MAY Configuration File for England 2021, County Durham + Darlington.
 #
-# Every input here is the England+Wales (EW) file only; the Scotland and
-# Northern Ireland files sit next to them in data/ and are simply not listed.
-# For the four-nation version of this pipeline see config_commute_uk.yaml,
-# which stacks all three per-nation files under each key.
-#
-# The shared configs under attributes/, distributors/, venues/ and households/
-# are used by both, so they still list per-nation sources. That costs a little
-# read time and nothing else: rows outside the loaded geography are filtered
-# out on load and never match anything.
+# All input files are the merged UK-wide files (per-nation EW_/SCT_/NI_
+# sources were unified during data prep). This stays an England-only build
+# via the geography.filter below, not by picking a per-nation file — the
+# merged files are read in full and filtered down on load.
 
 # ROOTS (set these for your machine)
 # config_root: /absolute/path/to/configs/2021  # optional; defaults to this file's directory
@@ -22,17 +17,15 @@ geography:
   # Input files, named explicitly. Each key takes a single path or a list of
   # paths; a list is stacked into one table (all files must share columns,
   # and no unit may appear in two files). Relative paths resolve against
-  # data_dir. This is an England-only build, so only the England+Wales (EW)
-  # file is loaded. The Scotland (SCT_*) and Northern Ireland (NI_*) files
-  # exist alongside it and would just be dead weight here. There is no
-  # England-only cut of EW_hierarchy.csv; the filter below does that job.
-  hierarchy_file: EW_hierarchy.csv
+  # data_dir. hierarchy.csv is the merged UK-wide file; the filter below cuts
+  # it down to County Durham + Darlington on load.
+  hierarchy_file: hierarchy.csv
 
   # Coordinates per level, same path-or-list rule. A level omitted here
   # simply has no coordinates.
   coord_files:
-    SGU: EW_coord_sgu.csv
-    MGU: EW_coord_mgu.csv
+    SGU: coord_sgu.csv
+    MGU: coord_mgu.csv
 
   # Define hierarchy levels (smallest to largest)
   # If not specified, defaults to ["SGU", "MGU", "LGU"]
@@ -73,11 +66,10 @@ population:
   data_dir: "${data_root}/population"
 
   # Demographics files (matrix format: rows=geo_units, columns=ages).
-  # Path or list of paths; stacked files must share the same age columns and
-  # cover every loaded geo unit between them. England-only here, so the one
-  # England+Wales file covers every loaded SGU on its own.
-  demographics_male_file: EW_demographics_male.csv
-  demographics_female_file: EW_demographics_female.csv
+  # Merged UK-wide files; the geography filter above cuts them to the loaded
+  # SGUs.
+  demographics_male_file: demographics_male.csv
+  demographics_female_file: demographics_female.csv
 
 
 # VENUES
@@ -99,10 +91,10 @@ households:
   data_dir: "${data_root}/households"
 
   # Household composition data (CSV with patterns like ">=2 >=0 2 0").
-  # Path or list of paths. One England+Wales file here, so there is nothing to
-  # stack and no `column_policy` to set, since that key only matters when files with
-  # different pattern vocabularies (e.g. Northern Ireland's) are unioned.
-  data_file: EW_households.csv
+  # Merged UK-wide file; both the ">=2" and Northern Ireland's exactly-2/
+  # ">=3" pattern vocabularies are already baked in as columns, so no
+  # `column_policy` is needed here.
+  data_file: households.csv
 
   # Configuration file for age categories and demotion rules
   config_file: "${config_root}/households/households_config.yaml"

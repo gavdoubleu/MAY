@@ -65,7 +65,7 @@ data_sources:
     description: "MGU company-capacity totals within each LGU for job-supply weighting"
 
     files:
-      - path: "${data_root}/activities/work/EW_workplace_capacity_by_mgu.csv"
+      - path: "${data_root}/activities/work/workplace_capacity_by_mgu.csv"
 
         # Lookup key: the parent GU to sample within is the person's already
         # assigned workplace LGU. The key_columns value names that person
@@ -81,25 +81,6 @@ data_sources:
           level: "MGU"  # Geographical level
 
         weight_column: "Total"  # Total company capacity (sum of employee_count)
-
-      # Scotland and Northern Ireland, built to the same schema from their own
-      # companies files. Identical columns to the England+Wales file, so they
-      # stack; each MGU appears in exactly one of the three.
-      - path: "${data_root}/activities/work/SCT_workplace_capacity_by_mgu.csv"
-        key_columns:
-          LGU: {attribute: workplace_location}
-        geographical_unit_column:
-          name: "MGU"
-          level: "MGU"
-        weight_column: "Total"
-
-      - path: "${data_root}/activities/work/NI_workplace_capacity_by_mgu.csv"
-        key_columns:
-          LGU: {attribute: workplace_location}
-        geographical_unit_column:
-          name: "MGU"
-          level: "MGU"
-        weight_column: "Total"
 
 # Assignment Rules (Person-Level)
 assignment_rules:

@@ -66,23 +66,21 @@ data_sources:
     format: "multi_key"
     description: "Harmonised method-of-travel-to-work counts by residence SGU"
 
-    # One file per nation, in the same shape. The three censuses ask this
-    # question differently (Scotland has one "Underground, subway or tram"
-    # column where England & Wales has four modes in one; NI has a car-pool
-    # category the others fold into driver/passenger, and no tram category at
-    # all because it has no tram), so the harmonisation happens at build time in
-    # data/activities/commute/source/build_commute_mode_shares.py rather than
-    # here. That script emits one vocabulary and one key column name, which is
-    # what makes stacking possible: MultiKeyLookupSource requires key_columns to
-    # be byte-identical across a source's files, and the dict key has to equal
-    # the CSV header. The raw census headers never would have matched.
+    # Merged UK-wide file, one row set per residence SGU. The three censuses
+    # ask this question differently (Scotland has one "Underground, subway or
+    # tram" column where England & Wales has four modes in one; NI has a
+    # car-pool category the others fold into driver/passenger, and no tram
+    # category at all because it has no tram), so the harmonisation happens at
+    # build time in data/activities/commute/source/build_commute_mode_shares.py
+    # rather than here. That script emits one vocabulary and one key column
+    # name across all three nations before the merge.
     files:
-      - path: "${data_root}/activities/commute/EW_commute_mode_by_sgu.csv"
+      - path: "${data_root}/activities/commute/commute_mode_by_sgu.csv"
 
         # Key = residence SGU code (OA in England, Wales and Scotland; Data Zone
         # in Northern Ireland). Resolved from the person's residence unit, where
         # get_ancestor_by_level('SGU') returns self.
-        key_columns: &commute_mode_keys
+        key_columns:
           "sgu":
             attribute: "geographical_unit"
             type: "ancestor_lookup"
@@ -95,7 +93,7 @@ data_sources:
         # (assigned earlier) stays authoritative on who works from home.
         # Only tube/train/bus get a distributor + venue; the rest are terminal
         # modes with no commute venue.
-        value_columns: &commute_mode_values
+        value_columns:
           tube: "tube"
           train: "train"
           bus: "bus"
@@ -106,14 +104,6 @@ data_sources:
           bike: "bike"
           walk: "walk"
           other: "other"
-
-      - path: "${data_root}/activities/commute/SCT_commute_mode_by_sgu.csv"
-        key_columns: *commute_mode_keys
-        value_columns: *commute_mode_values
-
-      - path: "${data_root}/activities/commute/NI_commute_mode_by_sgu.csv"
-        key_columns: *commute_mode_keys
-        value_columns: *commute_mode_values
 
 # Assignment Rules (Person-Level)
 assignment_rules:

@@ -33,16 +33,12 @@ data_sources:
     # lifts; do not publish estimates of orientation by age off this file.
     path: "${data_root}/population/sexual_orientation/orientation_prevalence_synthetic.csv"
   geo_distribution:                    # P(orientation | geo_unit)
-    # One file per nation, stacked into a single geo_unit -> shares table. The
-    # three censuses each asked their own sexual-orientation question, so they
-    # are built separately and only harmonised at the end: all three carry the
-    # same three categories, renormalised over people who answered, keyed at the
-    # nation's MGU (MSOA, intermediate zone, super data zone). A geo_unit
-    # appearing in two files is a hard error.
-    path:
-      - "${data_root}/population/sexual_orientation/EW_orientation_by_mgu.csv"
-      - "${data_root}/population/sexual_orientation/SCT_orientation_by_mgu.csv"
-      - "${data_root}/population/sexual_orientation/NI_orientation_by_mgu.csv"
+    # Merged UK-wide geo_unit -> shares table. The three censuses each asked
+    # their own sexual-orientation question, so they were built separately and
+    # only harmonised at merge time: all three carry the same three
+    # categories, renormalised over people who answered, keyed at the
+    # nation's MGU (MSOA, intermediate zone, super data zone).
+    path: "${data_root}/population/sexual_orientation/orientation_by_mgu.csv"
     geo_level: "MGU"                   # the geography level this distribution is keyed at
 
 sexual_orientations:

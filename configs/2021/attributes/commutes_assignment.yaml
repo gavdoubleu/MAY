@@ -77,28 +77,20 @@ data_sources:
     # that file is then filtered by; two vintages would silently disagree about
     # how many people commute at all. Rerun the build script to change vintage.
     files:
-      - path: "${data_root}/activities/commute/EW_commute_split_by_sgu_prepandemic.csv"
+      - path: "${data_root}/activities/commute/commute_split_by_sgu_prepandemic.csv"
 
         # Key = residence SGU code (OA in England, Wales and Scotland; Data Zone
         # in Northern Ireland), same resolution as commute_mode_assignment.
-        key_columns: &commutes_keys
+        key_columns:
           "sgu":
             attribute: "geographical_unit"
             type: "ancestor_lookup"
             level: "SGU"
             property: "name"
 
-        value_columns: &commutes_values
+        value_columns:
           from_home: "from_home"
           travels: "travels"
-
-      - path: "${data_root}/activities/commute/SCT_commute_split_by_sgu_prepandemic.csv"
-        key_columns: *commutes_keys
-        value_columns: *commutes_values
-
-      - path: "${data_root}/activities/commute/NI_commute_split_by_sgu_prepandemic.csv"
-        key_columns: *commutes_keys
-        value_columns: *commutes_values
 
 # No fallback. An SGU where both columns are zero has no worker signal at all
 # (neither home workers nor travellers) and fails loud naming the SGU. Four such

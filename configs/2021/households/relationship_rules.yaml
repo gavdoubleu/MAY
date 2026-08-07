@@ -28,15 +28,12 @@ enabled: true
 #                      and weights are appropriate for your domain.
 same_category_sources:
   # Per-area P(same-sex couple) from the 2021/2022 census sexual-orientation
-  # marginals, one file per nation stacked into a single table.
+  # marginals, merged UK-wide.
   # Modeling assumption: homosexuals always pair same-sex; bisexuals pair
   # same-sex half the time; heterosexuals never. Adjust the weights below if
   # you prefer a different mapping.
   - attribute: "sex"
-    csv_path:
-      - "${data_root}/population/sexual_orientation/EW_orientation_by_mgu.csv"
-      - "${data_root}/population/sexual_orientation/SCT_orientation_by_mgu.csv"
-      - "${data_root}/population/sexual_orientation/NI_orientation_by_mgu.csv"
+    csv_path: "${data_root}/population/sexual_orientation/orientation_by_mgu.csv"
     geo_code_column: "geo_unit"
     geo_level: "MGU"
     formula:

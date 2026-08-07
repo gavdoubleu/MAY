@@ -1,0 +1,202 @@
+# MAY 2021 — the whole UK, every stage config.yaml enables.
+#
+# config.yaml is England-only (merged UK-wide files, filtered to two LADs).
+# This is the same pipeline, verbatim, with one change and no others:
+#
+#   `load_all: true` — no geographic filter at all. That is every output area
+#   in the UK, ~232K SGUs.
+#
+# `parallel.workers` MUST be set explicitly here, and must match job.sh's
+# --cpus-per-task. Omitting it does not mean "use the SLURM allocation" for
+# both parallel stages: attribute assignment would fall back to
+# SLURM_CPUS_PER_TASK, but residence allocation defaults to ONE worker
+# (may/world.py:568), and residence allocation is the long stage. job.sh
+# refuses to start if the two numbers disagree.
+
+data_root: data                                  # set to absolute path for collaboration
+# config_root defaults to this file's directory
+# output_root defaults to {CWD}/output
+
+# PARALLELISM
+# One dial for both parallel stages: the residence-allocation geo-unit loop
+# (may/residence/allocation_strategy.py, parallel_map_in_order over loop_level
+# = LGU, ~380 UK LADs) and attribute assignment (may/attribute_assignment/
+# assigner.py, parallel_map over population slices). Distributors and the
+# relationship pipeline are NOT parallelised and run single-process.
+#
+# Fork pool, so each worker starts as a copy-on-write copy of the parent world
+# and diverges as it writes. Peak memory grows with worker count — this is the
+# knob to lower first if the job OOMs.
+parallel:
+  workers: 16
+  # Retire and refork a worker after this many geo units. A forked worker keeps
+  # everything it ever wrote and the parent can neither see nor reclaim it; at
+  # ~380 LADs across 16 workers that is ~24 units of accumulation each without
+  # this. Raise it (or drop the key) if refork cost outweighs the saving.
+  max_tasks_per_child: 8
+
+# GEOGRAPHY
+
+geography:
+  data_dir: "${data_root}/geography"
+
+  # SGU -> Output Area, MGU -> MSOA (Data Zone / SOA in SCT / NI), LGU -> LAD,
+  # XLGU -> English region, or a whole nation for Wales / Scotland / N. Ireland.
+  levels: ["SGU", "MGU", "LGU", "XLGU"]
+
+  hierarchy_file: hierarchy.csv
+
+  coord_files:
+    SGU: coord_sgu.csv
+    MGU: coord_mgu.csv
+
+  # The whole UK. build_filters() returns None on this and the block below is
+  # never read; it is kept only so a scoped-down rerun is a one-line edit.
+  load_all: true
+  filter:
+    level: LGU
+    codes: []
+
+# POPULATION
+
+population:
+  data_dir: "${data_root}/population"
+  demographics_male_file: demographics_male.csv
+  demographics_female_file: demographics_female.csv
+
+# VENUES
+
+venues:
+  data_dir: "${data_root}/venues"
+  config_file: "${config_root}/venues/venues_config.yaml"
+  export_file: "venue_allocations.csv"
+
+# HOUSEHOLDS
+
+households:
+  data_dir: "${data_root}/households"
+  data_file: households.csv
+  config_file: "${config_root}/households/households_config.yaml"
+  rules_file: "${config_root}/households/relationship_rules.yaml"
+  export_file: "household_allocations.csv"
+
+# DEBUG OUTPUTS
+# Off, as in config.yaml. These auxiliary CSVs build DataFrames proportional to
+# the population — at UK scale they would dominate peak memory.
+
+debug_outputs:
+  enabled: false
+
+# TIMELINE — identical to config.yaml's, step for step.
+
+timeline:
+  enabled: true
+
+  steps:
+    # 0. Households + residence venues (care homes, boarding schools, dorms).
+    - type: residence_allocation
+      config: "${config_root}/households/allocation_strategy.yaml"
+
+    # 1. Initial attributes
+    - type: attribute
+      config: "${config_root}/attributes/attribute_assignment.yaml"
+
+    - type: attribute
+      config: "${config_root}/attributes/comorbidity_assignment.yaml"
+
+    # 2. Education
+    - type: distributor
+      config: "${config_root}/distributors/school_distributor.yaml"
+
+    - type: child_creator
+      config: "${config_root}/venue_child_creators/school_classrooms.yaml"
+
+    - type: distributor
+      config: "${config_root}/distributors/university_distributor.yaml"
+
+    - type: child_creator
+      config: "${config_root}/venue_child_creators/university_uni_years.yaml"
+
+    # 3. Employment. Gate first: only the employed get a workplace.
+    - type: attribute
+      config: "${config_root}/attributes/economic_activity_assignment.yaml"
+
+    # Commute/no-commute split at output-area resolution, before the workplace
+    # draw, so the O-D matrix only answers WHERE for people who do travel.
+    - type: attribute
+      config: "${config_root}/attributes/commutes_assignment.yaml"
+
+    - type: attribute
+      config: "${config_root}/attributes/workplace_assignment.yaml"
+
+    - type: attribute
+      config: "${config_root}/attributes/workplace_mgu_assignment.yaml"
+
+    - type: attribute
+      config: "${config_root}/attributes/work_sector_assignment.yaml"
+
+    # 4. Specific workplaces
+    - type: distributor
+      config: "${config_root}/distributors/specific_workplace_hospitals_distributor.yaml"
+
+    - type: distributor
+      config: "${config_root}/distributors/specific_workplace_care_homes_distributor.yaml"
+
+    - type: distributor
+      config: "${config_root}/distributors/specific_workplace_classrooms_distributor.yaml"
+
+    # 5. General employment
+    - type: distributor
+      config: "${config_root}/distributors/company_distributor.yaml"
+
+    - type: child_creator
+      config: "${config_root}/venue_child_creators/company_offices.yaml"
+
+    # 6. Work mode correction — on-site venues force work_mode Normal.
+    - type: attribute
+      config: "${config_root}/attributes/work_mode_correction.yaml"
+
+    # 7. Commute mode, after every workplace distributor so it can gate on the
+    # actually-assigned venue.
+    - type: attribute
+      config: "${config_root}/attributes/commute_mode_assignment.yaml"
+
+    # Route legs. Bus MUST stay last: train and tube rewrite riders the network
+    # cannot serve to `bus`, and only a later distributor picks those up.
+    - type: distributor
+      config: "${config_root}/distributors/route_commute_train.yaml"
+
+    - type: distributor
+      config: "${config_root}/distributors/route_commute_tube.yaml"
+
+    - type: distributor
+      config: "${config_root}/distributors/route_commute_bus.yaml"
+
+    # 8. Other services
+    - type: distributor
+      config: "${config_root}/distributors/hospital_distributor.yaml"
+
+    - type: distributor
+      config: "${config_root}/distributors/multi_venue_distributor.yaml"
+
+    - type: distributor
+      config: "${config_root}/distributors/care_home_visits_distributor.yaml"
+
+# RELATIONSHIPS
+
+relationship_pipeline:
+  enabled: true
+  relationships:
+    - config: "${config_root}/relationships/social_networks.yaml"
+
+romantic_relationships:
+  enabled: true
+  config: "${config_root}/relationships/romantic_relationships.yaml"
+
+# SERIALIZATION
+
+serialization:
+  enabled: true
+  config_file: "${config_root}/serialization_config.yaml"
+  output_dir: "${output_root}/2021_uk_full"
+  filename: "world_state.h5"

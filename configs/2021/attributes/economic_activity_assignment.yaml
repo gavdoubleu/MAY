@@ -67,9 +67,9 @@ data_sources:
     description: "Economic-activity counts by residence LGU, sex and age band"
 
     files:
-      - path: "${data_root}/activities/work/EW_economic_activity_by_lad_sex_age.csv"
+      - path: "${data_root}/activities/work/economic_activity_by_lad_sex_age.csv"
 
-        key_columns: &economic_activity_keys
+        key_columns:
           LGU_name:
             attribute: "geographical_unit"
             type: "ancestor_lookup"
@@ -83,21 +83,10 @@ data_sources:
             attribute: "age"
             type: "category_lookup"
 
-        value_columns: &economic_activity_values
+        value_columns:
           employed: "employed"
           unemployed: "unemployed"
           inactive: "inactive"
-
-      # Scotland (NRS) and Northern Ireland (NISRA), harmonised to the same
-      # columns and age bands as the ONS table at build time. LGU names are
-      # disjoint across the three, so they merge into one lookup.
-      - path: "${data_root}/activities/work/SCT_economic_activity_by_lad_sex_age.csv"
-        key_columns: *economic_activity_keys
-        value_columns: *economic_activity_values
-
-      - path: "${data_root}/activities/work/NI_economic_activity_by_lad_sex_age.csv"
-        key_columns: *economic_activity_keys
-        value_columns: *economic_activity_values
 
 # No fallback. Every (LGU, sex, age band) cell is populated (374 LGUs x 2 x 4,
 # zero gaps vs hierarchy) so a miss means the geography and table have diverged.
