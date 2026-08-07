@@ -166,7 +166,7 @@ class AttributeAssigner:
             'assignments_by_strategy': defaultdict(int),
             'attribute_distribution': defaultdict(int),
             'household_structure_counts': defaultdict(int),
-            'unassigned_people': 0,
+            'refusals': 0,
             'filtered_people': 0,  # People filtered out by age/activity filters
             'assigned_people': 0,  # People successfully assigned
             # People dropped by a categorical 'exclude' filter, keyed by attribute
@@ -242,9 +242,9 @@ class AttributeAssigner:
 
         # Fail loud if anyone who should have been assigned wasn't; the
         # per-person cause was logged above.
-        if self.stats['unassigned_people'] > 0:
+        if self.stats['refusals'] > 0:
             raise AttributeAssignmentError(
-                f"{self.stats['unassigned_people']} person(s) left unassigned for "
+                f"{self.stats['refusals']} person(s) left unassigned for "
                 f"attribute '{self.attribute_name}' — see the logged errors/warnings "
                 f"above for the per-person cause (missing data, unclassifiable "
                 f"residence, no matching role, or a strategy returning no value). "
@@ -364,7 +364,7 @@ class AttributeAssigner:
                         people_assigned += 1
                         venue_assigned += 1
                     else:
-                        self.stats['unassigned_people'] += 1
+                        self.stats['refusals'] += 1
                         logger.warning(f"Failed to assign {self.attribute_name} to person {person.id} in {venue.type}")
 
                 if venue_assigned > 0:
@@ -502,7 +502,7 @@ class AttributeAssigner:
         rule = self.config.get_person_assignment_rule()
         if not rule:
             logger.warning(f"No assignment rule for person-level attribute '{self.attribute_name}'")
-            self.stats['unassigned_people'] = len(eligible_people)
+            self.stats['refusals'] = len(eligible_people)
             logger.info("")
             return
 
@@ -524,7 +524,7 @@ class AttributeAssigner:
         logger.info(f"✓ Processed {len(all_people)} people")
         logger.info(f"✓ Filtered {self.stats['filtered_people']} people (age/activity filters)")
         logger.info(f"✓ Assigned {self.stats['assigned_people']} people")
-        logger.info(f"✓ Unassigned {self.stats['unassigned_people']} people (failed assignment)")
+        logger.info(f"✓ Refused {self.stats['refusals']} people")
         logger.info("")
 
     def _dispatch_person_slices(self, slices, id_to_person, rule, workers,
@@ -609,7 +609,7 @@ class AttributeAssigner:
                 self.stats['assignments_by_strategy'][strategy.strategy_type] += 1
                 self.stats['assigned_people'] += 1
             else:
-                self.stats['unassigned_people'] += 1
+                self.stats['refusals'] += 1
 
             # Log progress
             if (i + 1) % progress_interval == 0 or (i + 1) == total:
@@ -669,10 +669,10 @@ class AttributeAssigner:
                     self.stats['assignments_by_strategy'][strategy.strategy_type] += 1
                     self.stats['assigned_people'] += 1
                 else:
-                    self.stats['unassigned_people'] += 1
+                    self.stats['refusals'] += 1
             except Exception as e:
                 logger.error(f"Exception assigning {self.attribute_name} to person {person.id}: {e}")
-                self.stats['unassigned_people'] += 1
+                self.stats['refusals'] += 1
 
             if is_sample:
                 result = person.properties.get(self.attribute_name, "NOT_ASSIGNED")
@@ -732,7 +732,7 @@ class AttributeAssigner:
                 logger.debug(f"  Could not classify household {household.id}, skipping")
             else:
                 logger.warning(f"Could not classify household {household.id}, skipping")
-            self.stats['unassigned_people'] += len(members)
+            self.stats['refusals'] += len(members)
             return
 
         # Store structure in household properties
@@ -776,7 +776,7 @@ class AttributeAssigner:
                     logger.debug(f"    Could not determine role, skipping")
                 else:
                     logger.warning(f"  Could not determine role for {person} in {household.id}")
-                self.stats['unassigned_people'] += 1
+                self.stats['refusals'] += 1
                 continue
 
             # Track assigned roles
@@ -795,7 +795,7 @@ class AttributeAssigner:
                     logger.debug(f"    No rule found for role '{role}', skipping")
                 else:
                     logger.warning(f"  No rule for role '{role}' in structure '{structure}' for {person}")
-                self.stats['unassigned_people'] += 1
+                self.stats['refusals'] += 1
                 continue
 
             # 3c. Create and execute strategy
@@ -823,11 +823,11 @@ class AttributeAssigner:
                         logger.debug(f"  {person}: {self.attribute_name}={value} (role={role})")
                 else:
                     logger.warning(f"  Strategy returned None for {person} (role={role})")
-                    self.stats['unassigned_people'] += 1
+                    self.stats['refusals'] += 1
 
             except Exception as e:
                 logger.error(f"  Error assigning to {person}: {e}")
-                self.stats['unassigned_people'] += 1
+                self.stats['refusals'] += 1
 
         if self.verbose:
             logger.debug(f"{'=' * 80}\n")
@@ -987,8 +987,8 @@ class AttributeAssigner:
             logger.info(f"Filtered people (age/activity): {self.stats['filtered_people']}")
         if self.stats.get('assigned_people', 0) > 0:
             logger.info(f"Assigned people: {self.stats['assigned_people']}")
-        if self.stats['unassigned_people'] > 0:
-            logger.info(f"Unassigned people (failures): {self.stats['unassigned_people']}")
+        if self.stats['refusals'] > 0:
+            logger.info(f"Refusals: {self.stats['refusals']}")
 
         # Household-specific stats
         if self.stats['people_in_households'] > 0:

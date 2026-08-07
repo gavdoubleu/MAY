@@ -1,8 +1,53 @@
 import logging
 import numpy as np
-from typing import Dict, List, Any, Optional, Tuple
+from dataclasses import dataclass
+from typing import Dict, List, Any, Optional, Tuple, Union
 
 logger = logging.getLogger("may.attribute_assignment.strategies")
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """A strategy's verdict that one named person cannot be assigned from the
+    data given, carrying why and who decided.
+
+    A Refusal is the engine working, not failing: it is counted, logged and
+    raised on once per attribute with a total. Distinct from an engine fault
+    (a broken lookup, a missing attribute, a bug), which aborts where it
+    happened rather than being absorbed into a counter. See
+    docs/adr/0008-a-refusal-is-a-per-person-result-an-engine-fault-is-an-abort.md
+
+    `strategy_type` is carried on the value rather than only on the exception
+    so that a Refusal handed back from `assign_batch` — where there is no
+    exception to hang it on — still names which strategy declined.
+    """
+    person_id: Any
+    reason: str
+    strategy_type: str
+
+    def as_error(self) -> "AssignmentRefused":
+        """This verdict as the exception `assign` raises to deliver it."""
+        return AssignmentRefused(self, str(self))
+
+    def __str__(self) -> str:
+        return (
+            f"Strategy '{self.strategy_type}' could not assign person "
+            f"{self.person_id}: {self.reason}. No fallbacks. Fix the "
+            "data/config, or express the alternative as explicit primary logic."
+        )
+
+
+class AssignmentRefused(RuntimeError):
+    """A Refusal raised by `assign`, which holds exactly one person and so has
+    no per-person container to return verdicts in.
+
+    Carries the `Refusal` itself, so the call sites unwrap raised and returned
+    refusals into one counting path.
+    """
+
+    def __init__(self, refusal: Refusal, message: str):
+        super().__init__(message)
+        self.refusal = refusal
 
 
 # Config validation. Assignment blocks accept only the keys the engine reads,
@@ -234,12 +279,18 @@ class AssignmentStrategy:
         raise NotImplementedError("Subclasses must implement assign()")
 
     def _fail(self, person, reason: str):
-        """Abort assignment loudly. No fallbacks."""
-        raise RuntimeError(
-            f"Strategy '{self.strategy_type}' could not assign person {person.id}: "
-            f"{reason}. No fallbacks. Fix the data/config, or express the "
-            "alternative as explicit primary logic."
-        )
+        """Refuse this person loudly. No fallbacks.
+
+        The single primitive every strategy declines through, so a refusal has
+        one shape wherever it comes from.
+        """
+        raise self._refuse(person, reason).as_error()
+
+    def _refuse(self, person, reason: str) -> Refusal:
+        """Build this strategy's verdict on one person without raising it, for
+        the paths that carry a refusal as a value rather than an exception."""
+        return Refusal(person_id=person.id, reason=reason,
+                       strategy_type=self.strategy_type)
 
     def _weighted_draw(self, probs: Dict[str, float], person, *, size=None):
         """
@@ -948,7 +999,7 @@ class CommutingLikelihoodStrategy(AssignmentStrategy):
             )
         return [(d, m, l / total) for (d, m, l) in kept]
 
-    def _resolve_origin_code(self, person) -> Tuple[Optional[str], Optional[str]]:
+    def _resolve_origin_code(self, person) -> Union[str, Refusal]:
         """
         Resolve person's origin geographical unit to the correct level for O-D matrix lookup.
 
@@ -958,24 +1009,25 @@ class CommutingLikelihoodStrategy(AssignmentStrategy):
             person: Person object
 
         Returns:
-            `(origin_code, None)` when the residence yields an origin key, else
-            `(None, reason)` naming which resolution step failed.
+            The origin key when the residence yields one, else a `Refusal`
+            naming which resolution step failed.
 
-        The reason is returned rather than collapsed into a bare `None`: the
-        ways to be an `Unresolvable origin` (see `CONTEXT.md`) are separate
-        faults — no residence at all, a residence with no ancestor at the
-        declared level, a source that was never registered — and the caller
-        must be able to tell the operator which one it hit. One `None`
-        standing for all of them is what left the batch path reporting a
-        lookup that never happened.
+        A Refusal rather than a bare `None`: the ways to be an `Unresolvable
+        origin` (see `CONTEXT.md`) are separate faults — no residence at all,
+        a residence with no ancestor at the declared level, a source that was
+        never registered — and the caller must be able to tell the operator
+        which one it hit. One `None` standing for all of them is what left the
+        batch path reporting a lookup that never happened.
         """
         origin_geo_unit = getattr(person, 'geographical_unit', None)
         if not origin_geo_unit:
-            return None, "person has no geographical_unit to resolve an origin from"
+            return self._refuse(
+                person, "person has no geographical_unit to resolve an origin from")
 
         source = self.data_manager.get_source(self.data_source_name)
         if not source:
-            return None, f"data source '{self.data_source_name}' not found"
+            return self._refuse(
+                person, f"data source '{self.data_source_name}' not found")
 
         file_configs = getattr(source, '_file_configs', None)
         if file_configs:
@@ -989,18 +1041,21 @@ class CommutingLikelihoodStrategy(AssignmentStrategy):
 
                     ancestor = origin_geo_unit.get_ancestor_by_level(level)
                     if not ancestor:
-                        return None, (f"residence '{origin_geo_unit.name}' has "
-                                      f"no ancestor at level '{level}'")
+                        return self._refuse(
+                            person, f"residence '{origin_geo_unit.name}' has "
+                                    f"no ancestor at level '{level}'")
                     origin_code = getattr(ancestor, property_name)
                     if not origin_code:
-                        return None, (f"ancestor at level '{level}' has an "
-                                      f"empty '{property_name}'")
-                    return origin_code, None
+                        return self._refuse(
+                            person, f"ancestor at level '{level}' has an "
+                                    f"empty '{property_name}'")
+                    return origin_code
 
         # Every other configuration keys the matrix on the residence itself.
         if not origin_geo_unit.name:
-            return None, "person's geographical_unit has an empty name"
-        return origin_geo_unit.name, None
+            return self._refuse(
+                person, "person's geographical_unit has an empty name")
+        return origin_geo_unit.name
 
     def assign_batch(self, people_list: List, households_list: List, contexts_list: List[Dict[str, Any]]) -> List[Any]:
         """
@@ -1032,12 +1087,13 @@ class CommutingLikelihoodStrategy(AssignmentStrategy):
         origin_groups = defaultdict(list)
 
         for i, person in enumerate(people_list):
-            origin_code, reason = self._resolve_origin_code(person)
-            if not origin_code:
+            origin_code = self._resolve_origin_code(person)
+            if isinstance(origin_code, Refusal):
                 # Never silently leave the slot unfilled: an unfilled slot
                 # reaches the operator as a count with no person and no cause.
-                logger.warning(f"Unresolvable origin for person {person.id}: {reason}")
-                self._fail(person, reason)
+                logger.warning(f"Unresolvable origin for person {person.id}: "
+                               f"{origin_code.reason}")
+                raise origin_code.as_error()
             allowed = self._condition_allowed(person)
             origin_groups[(origin_code,
                            frozenset(allowed) if allowed else None)].append(i)
@@ -1116,10 +1172,11 @@ class CommutingLikelihoodStrategy(AssignmentStrategy):
             If single output: returns the assigned value
             If multiple outputs: returns dict with all assigned values
         """
-        origin_code, reason = self._resolve_origin_code(person)
-        if not origin_code:
-            logger.warning(f"Unresolvable origin for person {person.id}: {reason}")
-            return self._fail(person, reason)
+        origin_code = self._resolve_origin_code(person)
+        if isinstance(origin_code, Refusal):
+            logger.warning(f"Unresolvable origin for person {person.id}: "
+                           f"{origin_code.reason}")
+            raise origin_code.as_error()
 
         source = self.data_manager.get_source(self.data_source_name)
         if not source:

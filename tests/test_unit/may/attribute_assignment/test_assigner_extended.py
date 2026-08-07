@@ -463,7 +463,7 @@ class TestAssignHousehold:
         assert assigner.stats['assignments_by_role']['secondary_adult'] == 1
         assert assigner.stats['assignments_by_role']['children'] == 1
         assert assigner.stats['attribute_distribution']['W'] == 3
-        assert assigner.stats['unassigned_people'] == 0
+        assert assigner.stats['refusals'] == 0
 
     def test_empty_household_skipped(self, geo_unit):
         """Household with no members should be skipped entirely."""
@@ -489,7 +489,7 @@ class TestAssignHousehold:
 
         assigner._assign_household(household)
 
-        assert assigner.stats['unassigned_people'] == 1
+        assert assigner.stats['refusals'] == 1
         assert 'ethnicity' not in person.properties
 
     def test_single_parent_family(self, geo_unit):
@@ -595,7 +595,7 @@ class TestAssignHousehold:
         assert assigner.stats['assigned_people'] == 1
         assert assigner.stats['assignments_by_role']['primary_adult'] == 1
         assert assigner.stats['attribute_distribution']["['cvd', 'crd']"] == 1
-        assert assigner.stats['unassigned_people'] == 0
+        assert assigner.stats['refusals'] == 0
 
 
 # assign_all() Tests
@@ -792,7 +792,7 @@ class TestAssignAllResidencesStats:
         assert ch_person.properties["ethnicity"] == "A"
 
         # unassigned_people correctly reflects the 1 person from bad_hh
-        assert assigner.stats['unassigned_people'] == 1
+        assert assigner.stats['refusals'] == 1
         assert assigner.stats['total_people'] == 3
         assert assigner.stats['people_in_households'] == 1
 

@@ -832,7 +832,7 @@ class TestBatchVsSequentialEquivalence:
         strategy = NoneStrategy()
         assigner._assign_all_people_batch(people, strategy)
 
-        assert assigner.stats['unassigned_people'] == 5
+        assert assigner.stats['refusals'] == 5
         assert assigner.stats['assigned_people'] == 0
 
     def test_sequential_exception_counted_as_unassigned(self):
@@ -855,7 +855,7 @@ class TestBatchVsSequentialEquivalence:
         np.random.seed(42)
         assigner._assign_all_people_sequential(people, strategy)
 
-        assert assigner.stats['unassigned_people'] == 3
+        assert assigner.stats['refusals'] == 3
         assert assigner.stats['assigned_people'] == 0
 
 
