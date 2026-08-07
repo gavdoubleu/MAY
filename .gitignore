@@ -127,3 +127,10 @@ graphify-out/
 #
 # Plans
 plans/
+
+#
+# Local data drops: downloaded release archives and their unpacked trees.
+# Never committed — a 150MB zip in the history is unpushable.
+data_may.zip*
+data_may/
+data_may_original/
