@@ -404,6 +404,11 @@ class DrawStrategy(AssignmentStrategy):
         Batch draw. Group people by the distribution their source returns, then
         sample each group in one np.random.choice. Grouping is by the resolved
         distribution, so it needs no knowledge of how the source keys its lookup.
+
+        Returns one verdict per person: a drawn value or a `Refusal`. A group
+        is a sampling optimisation, not a unit of judgement — an unusable
+        distribution refuses every member of the group by name, not the one
+        member the draw happened to be attributed to.
         """
         from collections import defaultdict
 
@@ -418,7 +423,13 @@ class DrawStrategy(AssignmentStrategy):
         results = [None] * len(people_list)
         for members in groups.values():
             _, person0, probs = members[0]
-            sampled = self._weighted_draw(probs, person0, size=len(members))
+            try:
+                sampled = self._weighted_draw(probs, person0, size=len(members))
+            except AssignmentRefused as refused:
+                # The verdict is the group's; only who it names is per-person.
+                for idx, person, _probs in members:
+                    results[idx] = self._refuse(person, refused.refusal.reason)
+                continue
             for (idx, _person, _probs), value in zip(members, sampled):
                 results[idx] = value
         return results
@@ -1069,36 +1080,38 @@ class CommutingLikelihoodStrategy(AssignmentStrategy):
             contexts_list: List of context dicts (parallel to people_list)
 
         Returns:
-            List of assigned values (parallel to people_list)
-            - If single output: list of values
-            - If multiple outputs: list of dicts
+            One verdict per person, parallel to people_list: an assigned value
+            (a dict when several outputs are configured) or a `Refusal`. A
+            person the strategy cannot place costs only themselves their
+            assignment; the rest of the batch is still drawn.
         """
         from collections import defaultdict
 
         source = self.data_manager.get_source(self.data_source_name)
         if not source:
             logger.warning(f"Data source '{self.data_source_name}' not found")
-            return [self._fail(person, f"data source '{self.data_source_name}' not found")
-                    for person, household, context in zip(people_list, households_list, contexts_list)]
+            return [self._refuse(person, f"data source '{self.data_source_name}' not found")
+                    for person in people_list]
         self._require_sentinel_carries_what_is_read(source)
 
         # Group by origin and, when conditioning, by the condition value too:
         # every member of a group then shares one filtered distribution.
         origin_groups = defaultdict(list)
+        results = [None] * len(people_list)
 
         for i, person in enumerate(people_list):
             origin_code = self._resolve_origin_code(person)
             if isinstance(origin_code, Refusal):
-                # Never silently leave the slot unfilled: an unfilled slot
-                # reaches the operator as a count with no person and no cause.
+                # The slot carries the verdict. Never left unfilled: an
+                # unfilled slot reaches the operator as a count with no person
+                # and no cause.
                 logger.warning(f"Unresolvable origin for person {person.id}: "
                                f"{origin_code.reason}")
-                raise origin_code.as_error()
+                results[i] = origin_code
+                continue
             allowed = self._condition_allowed(person)
             origin_groups[(origin_code,
                            frozenset(allowed) if allowed else None)].append(i)
-
-        results = [None] * len(people_list)
 
         for (origin_code, allowed), indices in origin_groups.items():
             destinations = source.lookup(origin_code)
@@ -1107,10 +1120,8 @@ class CommutingLikelihoodStrategy(AssignmentStrategy):
             if not destinations:
                 logger.warning(f"No destinations found for origin {origin_code}")
                 for idx in indices:
-                    person = people_list[idx]
-                    household = households_list[idx]
-                    context = contexts_list[idx]
-                    results[idx] = self._fail(person, "no commuting-flow row for this origin")
+                    results[idx] = self._refuse(
+                        people_list[idx], "no commuting-flow row for this origin")
                 continue
 
             # destinations is List[(destination, metadata_dict, likelihood)]
@@ -1147,13 +1158,16 @@ class CommutingLikelihoodStrategy(AssignmentStrategy):
                 (attr for attr, src in self.outputs.items() if src == 'destination'),
                 None,
             )
+            # Refused people were never offered a destination, so they belong
+            # in neither half of this ratio.
+            assigned = [r for r in results if not isinstance(r, Refusal)]
             n_outside = sum(
-                1 for r in results
+                1 for r in assigned
                 if (r.get(dest_attr) if isinstance(r, dict) else r) == outside_value
             )
             if n_outside:
                 logger.info(
-                    f"  [out_of_boundary] {n_outside}/{len(results)} people assigned the "
+                    f"  [out_of_boundary] {n_outside}/{len(assigned)} people assigned the "
                     f"'{outside_value}' sentinel (no in-world destination)."
                 )
 
@@ -1277,9 +1291,16 @@ class ConstantStrategy(AssignmentStrategy):
         self.value = config.get('value')
 
     def assign_batch(self, people_list: List, households_list: List, contexts_list: List[Dict[str, Any]]) -> List[Any]:
-        """Batch assignment - all receive the same value."""
+        """Batch assignment - all receive the same value, or all are refused.
+
+        A missing 'value' is one verdict about every person handed over, so it
+        is returned once per person rather than raised on the first.
+        """
         if self.value is None:
-            return [self.assign(p, h, c) for p, h, c in zip(people_list, households_list, contexts_list)]
+            logger.warning("ConstantStrategy: No value configured for assignment "
+                           f"to {len(people_list)} people")
+            return [self._refuse(person, "constant strategy has no 'value'")
+                    for person in people_list]
         return [self.value] * len(people_list)
 
     def assign(self, person, household, context: Dict[str, Any]) -> Any:

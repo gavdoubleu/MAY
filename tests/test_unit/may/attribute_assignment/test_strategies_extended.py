@@ -16,6 +16,8 @@ import pytest
 import logging
 import numpy as np
 from may.attribute_assignment.strategies import (
+    AssignmentRefused,
+    Refusal,
     ProbabilisticConditionsStrategy,
     CommutingLikelihoodStrategy,
     GUSamplerStrategy,
@@ -682,10 +684,12 @@ class TestCommutingLikelihoodUnresolvableOrigin:
     becomes an origin key, so no lookup is ever attempted — fails loud naming
     the person and which resolution step failed.
 
-    Both entry points must agree. `assign_batch` is what production runs and
+    Both entry points must agree on the *verdict*, which they deliver
+    differently: `assign` holds one person and raises it, `assign_batch` holds
+    n and returns one per slot. `assign_batch` is what production runs and
     `assign` is the per-person path; the same input must produce the same
-    outcome from either, so every case here is parametrised over both. The
-    assertion is on the *diagnosis*, not merely that something raised: a count
+    diagnosis from either, so every case here is parametrised over both. The
+    assertion is on that diagnosis, not merely that something happened: a count
     with no person id and no cause is the defect this replaces.
 
     The two ways to be unresolvable are separate faults, so they are asserted
@@ -731,23 +735,26 @@ class TestCommutingLikelihoodUnresolvableOrigin:
         )
         return self._strategy(source), person, "no ancestor at level 'LGU'"
 
-    def _invoke(self, entry_point, strategy, person):
+    def _diagnosis(self, entry_point, strategy, person):
+        """The refusal this entry point delivers, however it delivers it."""
         context = {"attribute_name": "loc"}
         if entry_point == "assign":
-            return strategy.assign(person, MinimalVenue(), context)
-        return strategy.assign_batch([person], [MinimalVenue()], [context])
+            with pytest.raises(AssignmentRefused) as excinfo:
+                strategy.assign(person, MinimalVenue(), context)
+            return excinfo.value.refusal
+        results = strategy.assign_batch([person], [MinimalVenue()], [context])
+        assert isinstance(results[0], Refusal)
+        return results[0]
 
     @pytest.mark.parametrize("entry_point", ["assign", "assign_batch"])
     @pytest.mark.parametrize("case", ["no_residence", "no_ancestor"])
-    def test_raises_naming_the_person_and_the_cause(self, entry_point, case):
+    def test_names_the_person_and_the_cause(self, entry_point, case):
         strategy, person, expected_cause = getattr(self, f"_{case}_case")()
 
-        with pytest.raises(RuntimeError) as excinfo:
-            self._invoke(entry_point, strategy, person)
+        refusal = self._diagnosis(entry_point, strategy, person)
 
-        message = str(excinfo.value)
-        assert str(person.id) in message, "the operator cannot act on a count"
-        assert expected_cause in message
+        assert refusal.person_id == person.id, "the operator cannot act on a count"
+        assert expected_cause in refusal.reason
 
     @pytest.mark.parametrize("entry_point", ["assign", "assign_batch"])
     def test_missing_data_source_is_not_blamed_on_the_person(self, entry_point):
@@ -764,25 +771,25 @@ class TestCommutingLikelihoodUnresolvableOrigin:
         )
         person = MinimalPerson(geographical_unit=MinimalGeoUnit("ORIGIN_A"))
 
-        with pytest.raises(RuntimeError) as excinfo:
-            self._invoke(entry_point, strategy, person)
-
-        assert "commuting_flows" in str(excinfo.value)
+        assert "commuting_flows" in self._diagnosis(
+            entry_point, strategy, person).reason
 
     def test_a_resolvable_person_does_not_mask_an_unresolvable_one(self):
-        """The whole batch fails: an unresolvable origin is never absorbed as a
-        silently unassigned slot next to people who did resolve."""
+        """An unresolvable origin is never absorbed as a silently unassigned
+        slot next to people who did resolve: the slot names them and why."""
         source = ODMatrixSource(lookup_data={"ORIGIN_A": [("DEST_1", {}, 1.0)]})
         strategy = self._strategy(source)
         resolvable = MinimalPerson(geographical_unit=MinimalGeoUnit("ORIGIN_A"))
         unresolvable = MinimalPerson(geographical_unit=None)
 
-        with pytest.raises(RuntimeError, match=str(unresolvable.id)):
-            strategy.assign_batch(
-                [resolvable, unresolvable],
-                [MinimalVenue()] * 2,
-                [{"attribute_name": "loc"}] * 2,
-            )
+        results = strategy.assign_batch(
+            [resolvable, unresolvable],
+            [MinimalVenue()] * 2,
+            [{"attribute_name": "loc"}] * 2,
+        )
+
+        assert results[0] == "DEST_1"
+        assert results[1].person_id == unresolvable.id
 
 
 class TestCommutingLikelihoodCondition:
@@ -1230,19 +1237,22 @@ class TestCategoricalSamplerStrategy:
         )
         assert all(r == "X" for r in results)
 
-    def test_batch_zero_total_raises(self):
-        """Batch: an all-zero distribution is a data error → fail loud."""
+    def test_batch_zero_total_refuses_every_person(self):
+        """Batch: an all-zero distribution is a data error → a Refusal per
+        person, since every one of them is equally undrawable."""
         source = MultiKeySource(return_value={"A": 0.0, "B": 0.0})
         dm = SimpleDataManager(sources={"sector_probs": source})
         strategy = CategoricalSamplerStrategy(self._make_strategy(), dm)
 
         people = [MinimalPerson() for _ in range(3)]
-        with pytest.raises(RuntimeError, match="zero total weight"):
-            strategy.assign_batch(
-                people,
-                [MinimalVenue()] * 3,
-                [{"attribute_name": "sector"}] * 3,
-            )
+        results = strategy.assign_batch(
+            people,
+            [MinimalVenue()] * 3,
+            [{"attribute_name": "sector"}] * 3,
+        )
+
+        assert [r.person_id for r in results] == [p.id for p in people]
+        assert all("zero total weight" in r.reason for r in results)
 
 
     def test_negative_probabilities_clamped_to_zero(self):
@@ -1310,14 +1320,13 @@ class TestStrategyFactoryComplete:
 
 class TestConstantStrategyBatchConsistency:
     """
-    ConstantStrategy.assign_batch() delegates to assign() when value is None,
-    matching the sequential behaviour.
+    With no value configured, both entry points refuse every person handed
+    over; they differ only in how the verdict is carried.
     """
 
-    def test_batch_with_no_value_raises_like_assign(self):
+    def test_batch_refuses_everyone_that_assign_would_have_refused(self):
         """
-        Both assign() and assign_batch() raise when there's no value.
-        No fallbacks.
+        Same verdict, same reason, one per person. No fallbacks.
         """
         config = {"strategy": "constant"}  # no 'value' key → self.value = None
         strategy = ConstantStrategy(config, SimpleDataManager())
@@ -1335,5 +1344,8 @@ class TestConstantStrategyBatchConsistency:
         people = [MinimalPerson(geographical_unit=geo) for _ in range(3)]
         venues = [MinimalVenue(geographical_unit=geo) for _ in range(3)]
         contexts = [{"attribute_name": "attr"} for _ in range(3)]
-        with pytest.raises(RuntimeError, match="constant strategy has no 'value'"):
-            strategy.assign_batch(people, venues, contexts)
+
+        results = strategy.assign_batch(people, venues, contexts)
+
+        assert [r.person_id for r in results] == [p.id for p in people]
+        assert all(r.reason == "constant strategy has no 'value'" for r in results)
