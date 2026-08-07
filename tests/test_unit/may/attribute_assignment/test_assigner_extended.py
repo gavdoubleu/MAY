@@ -612,8 +612,12 @@ class TestAssignAll:
         dm = SimpleDataManager()
         assigner = AttributeAssigner(config, dm)
 
-        # person-level needs get_person_assignment_rule
-        config.get_person_assignment_rule = lambda: None
+        # person-level needs get_person_assignment_rule; an attribute with no
+        # rule at all aborts rather than routing anywhere.
+        config.get_person_assignment_rule = lambda: AssignmentRule(
+            role="person", priority=1, description="",
+            assignment={"strategy": "constant", "value": "W"},
+        )
 
         venue = MinimalVenue(venue_type="household", members=[])
         vm = MinimalVenueManager([venue])

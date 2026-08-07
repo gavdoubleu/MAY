@@ -528,12 +528,16 @@ class AttributeAssigner:
         logger.info("")
 
         # Get assignment rule and strategy
+        # No rule is an engine fault, not a population of refusals: nobody could
+        # ever be assigned, so there is no per-person verdict to give — the same
+        # reading ADR-0008 gives an unconstructable strategy.
         rule = self.config.get_person_assignment_rule()
         if not rule:
-            logger.warning(f"No assignment rule for person-level attribute '{self.attribute_name}'")
-            self.stats['refusals'] = len(eligible_people)
-            logger.info("")
-            return
+            raise AttributeAssignmentError(
+                f"'{self.attribute_name}' is assigned per person but declares no "
+                f"person-level assignment rule. No fallbacks. Give it a rule, or "
+                f"stop declaring the attribute."
+            )
 
         # Capture parent-computed pre-filter counters before dispatch: the
         # in-process (single-worker) path shares this assigner and resets

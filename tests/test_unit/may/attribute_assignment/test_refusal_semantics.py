@@ -31,6 +31,7 @@ from tests.test_unit.may.attribute_assignment.test_assigner import (
     SimpleGeoSource,
 )
 from tests.test_unit.may.attribute_assignment.test_assigner_extended import (
+    MinimalPopulation,
     _build_family_config,
 )
 
@@ -421,6 +422,35 @@ class TestEngineFaultAborts:
 
         with pytest.raises(KeyError):
             assigner._assign_household(household)
+
+    def test_no_person_level_rule_at_all_aborts(self, geo_unit):
+        """The same shape as an unconstructable strategy: nobody could ever be
+        assigned, so there is no per-person verdict to give. A config with no
+        rule is not a population of refused people."""
+        config = MinimalConfig(attribute_name="ethnicity",
+                               assignment_level="person")
+        config.get_person_assignment_rule = lambda: None
+        assigner = AttributeAssigner(config, SimpleDataManager())
+
+        with pytest.raises(AttributeAssignmentError) as caught:
+            assigner.assign_all(MinimalVenueManager([]),
+                                population=MinimalPopulation(
+                                    _make_people(3, geo_unit)))
+
+        assert "ethnicity" in str(caught.value)
+        assert assigner.stats['refusals'] == 0
+
+    def test_no_person_level_rule_aborts_even_with_nobody_eligible(self, geo_unit):
+        """It is the config that is incomplete, not the population — so the
+        headcount that happens to pass the filters cannot excuse it."""
+        config = MinimalConfig(attribute_name="ethnicity",
+                               assignment_level="person")
+        config.get_person_assignment_rule = lambda: None
+        assigner = AttributeAssigner(config, SimpleDataManager())
+
+        with pytest.raises(AttributeAssignmentError):
+            assigner.assign_all(MinimalVenueManager([]),
+                                population=MinimalPopulation([]))
 
     def test_unconstructable_strategy_aborts_the_venue_run(self, geo_unit):
         """No strategy means no member of that venue could ever be assigned,
