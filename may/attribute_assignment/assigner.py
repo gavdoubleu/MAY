@@ -21,9 +21,9 @@ _ACTIVE_ASSIGNMENT_CONTEXT = None
 class AttributeAssignmentError(Exception):
     """Raised when assignment can't complete on the given data/config. Mirrors
     PopulationError/VenueError/HouseholdError: every eligible person is assigned
-    on complete data, or the build fails loud. A person left unassigned for any
-    reason (strategy failure, unclassifiable residence, no matching role, no
-    value) aborts the run."""
+    on complete data, or the build fails loud. Refusals are counted and raised
+    on here, once per attribute with a total; an engine fault aborts where it
+    happened, as itself, and never reaches this."""
 
 
 def assign_attributes(venue_manager, config_path: str, geo_units: Optional[set] = None,
@@ -240,16 +240,14 @@ class AttributeAssigner:
         # Report statistics
         self._report_statistics()
 
-        # Fail loud if anyone who should have been assigned wasn't; the
-        # per-person cause was logged above.
+        # Fail loud on the total. Each refusal carried its own reason and was
+        # logged with it as it happened, so this counts rather than guesses.
         if self.stats['refusals'] > 0:
             raise AttributeAssignmentError(
-                f"{self.stats['refusals']} person(s) left unassigned for "
-                f"attribute '{self.attribute_name}' — see the logged errors/warnings "
-                f"above for the per-person cause (missing data, unclassifiable "
-                f"residence, no matching role, or a strategy returning no value). "
-                f"The engine assigns every eligible person on complete data or fails "
-                f"loud."
+                f"'{self.attribute_name}': {self.stats['refusals']} refusal(s). "
+                f"Each was logged above with the person and the reason given. "
+                f"The engine assigns every eligible person on complete data or "
+                f"fails loud."
             )
 
         return self.stats

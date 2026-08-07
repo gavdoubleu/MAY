@@ -72,7 +72,7 @@ def test_timeline_routing_and_geo_preload(fully_formed_world, test_dir, caplog):
     # classified. That incomplete config must fail loud rather than return a
     # half-assigned attribute. The wrapper still routes by assignment_level and
     # preloads geo_units before the guard fires.
-    with pytest.raises(AttributeAssignmentError, match="unassigned"):
+    with pytest.raises(AttributeAssignmentError, match="refusal"):
         fully_formed_world.assign_attributes(config_path)
 
     # Routing reached the assigner: the classifiable people DID get assigned

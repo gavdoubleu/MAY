@@ -733,11 +733,11 @@ class TestAssignAll:
         dm = SimpleDataManager(sources={"geo_distribution": SimpleGeoSource()})
         assigner = AttributeAssigner(config, dm)
 
-        # 1-member household with no pattern → unclassifiable → 1 unassigned.
+        # 1-member household with no pattern → unclassifiable → 1 refusal.
         person = MinimalPerson(age=30, category="Adults", geographical_unit=geo_unit)
         vm = MinimalVenueManager([MinimalVenue(venue_type="household", members=[person])])
 
-        with pytest.raises(AttributeAssignmentError, match="unassigned"):
+        with pytest.raises(AttributeAssignmentError, match="1 refusal"):
             assigner.assign_all(vm)
 
 

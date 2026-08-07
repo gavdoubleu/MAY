@@ -600,8 +600,10 @@ class TestAssignOtherResidences:
         result = assigner._assign_other_residences([])
         assert result == 0
 
-    def test_venue_with_no_matching_rule(self):
-        """Venue type not in any rule → skipped with warning."""
+    def test_venue_with_no_matching_rule_refuses_its_members(self):
+        """Venue type not in any rule → its members are refused, not skipped.
+        Which venue types have had a rule written for them is not where an
+        attribute's scope is declared; the eligibility filters are."""
         assigner = self._make_assigner(venue_assignment_rules=[
             {'venue_types': ['care_home'], 'assignment': {'strategy': 'constant', 'value': 'W'}}
         ])
@@ -612,6 +614,7 @@ class TestAssignOtherResidences:
         result = assigner._assign_other_residences([venue])
         assert result == 0
         assert 'ethnicity' not in person.properties
+        assert assigner.stats['refusals'] == 1
 
     def test_venue_with_matching_rule_assigns(self):
         assigner = self._make_assigner(venue_assignment_rules=[

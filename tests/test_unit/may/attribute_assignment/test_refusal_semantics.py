@@ -340,6 +340,36 @@ class TestRefusalReachesTheCompletenessCheck:
         with pytest.raises(AttributeAssignmentError):
             assigner.assign_all(MinimalVenueManager([venue]))
 
+    def test_the_raise_gives_the_total_and_points_at_the_logged_causes(self, geo_unit):
+        """Every refusal was logged with the strategy's own reason as it
+        happened. The end-of-attribute raise reports how many and sends the
+        operator there; it does not guess at causes it never knew."""
+        config = MinimalConfig(
+            attribute_name="ethnicity",
+            venue_assignment_rules=[
+                {'venue_types': ['care_home'],
+                 'assignment': {'strategy': 'refusing_test'}}
+            ],
+        )
+        assigner = AttributeAssigner(config, SimpleDataManager())
+        strategy = RefusingStrategy(refuse_at=[0, 2])
+        assigner._get_or_create_strategy = lambda assignment_config: strategy
+
+        venue = MinimalVenue(venue_type="care_home",
+                             members=_make_people(3, geo_unit),
+                             geographical_unit=geo_unit)
+
+        with pytest.raises(AttributeAssignmentError) as caught:
+            assigner.assign_all(MinimalVenueManager([venue]))
+
+        message = str(caught.value)
+        assert "2" in message
+        assert "refusal" in message
+        assert "ethnicity" in message
+        # The guessed disjunction of causes is gone: the log holds the real ones.
+        assert "unclassifiable residence" not in message
+        assert "no matching role" not in message
+
     def test_a_refusal_is_never_written_into_properties(self, geo_unit):
         """`venue_distributor` reads flags by truthiness, so a stored Refusal
         object would silently change how that person is treated downstream."""
