@@ -17,13 +17,17 @@ class Refusal:
     happened rather than being absorbed into a counter. See
     docs/adr/0008-a-refusal-is-a-per-person-result-an-engine-fault-is-an-abort.md
 
-    `strategy_type` is carried on the value rather than only on the exception
-    so that a Refusal handed back from `assign_batch` — where there is no
-    exception to hang it on — still names which strategy declined.
+    `refused_by` is carried on the value rather than only on the exception so
+    that a Refusal handed back from `assign_batch` — where there is no
+    exception to hang it on — still names who declined. It holds the decider as
+    it reads in the message: `Strategy 'draw'` for a strategy's verdict, or the
+    attribute's own name where the engine refuses before any strategy exists
+    (no rule, no structure, no role) and there is no strategy to attribute it
+    to.
     """
     person_id: Any
     reason: str
-    strategy_type: str
+    refused_by: str
 
     def as_error(self) -> "AssignmentRefused":
         """This verdict as the exception `assign` raises to deliver it."""
@@ -31,7 +35,7 @@ class Refusal:
 
     def __str__(self) -> str:
         return (
-            f"Strategy '{self.strategy_type}' could not assign person "
+            f"{self.refused_by} could not assign person "
             f"{self.person_id}: {self.reason}. No fallbacks. Fix the "
             "data/config, or express the alternative as explicit primary logic."
         )
@@ -290,7 +294,7 @@ class AssignmentStrategy:
         """Build this strategy's verdict on one person without raising it, for
         the paths that carry a refusal as a value rather than an exception."""
         return Refusal(person_id=person.id, reason=reason,
-                       strategy_type=self.strategy_type)
+                       refused_by=f"Strategy '{self.strategy_type}'")
 
     def _weighted_draw(self, probs: Dict[str, float], person, *, size=None):
         """

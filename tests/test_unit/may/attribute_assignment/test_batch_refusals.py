@@ -112,7 +112,7 @@ class TestDrawStrategyRefusesEveryMemberOfTheGroup:
 
         results = _draw_batch(strategy, [MinimalPerson()])
 
-        assert results[0].strategy_type == "categorical_sampler"
+        assert results[0].refused_by == "Strategy 'categorical_sampler'"
 
     def test_every_slot_is_filled(self):
         """A surviving `None` is an absence, which is precisely what a Refusal

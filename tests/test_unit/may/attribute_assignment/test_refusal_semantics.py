@@ -247,6 +247,44 @@ class TestRefusalDoesNotAbandonTheVenue:
         assert assigner.stats['refusals'] == 3
 
 
+class TestTheEngineCanRefuseWithoutAStrategy:
+    """Some refusals are reached before any strategy exists — no rule, no
+    structure, no role. They are verdicts on named people all the same, so they
+    carry a decider and a reason like any other."""
+
+    def test_the_engine_records_its_own_refusal_per_person(self, geo_unit):
+        assigner = AttributeAssigner(MinimalConfig(attribute_name="ethnicity"),
+                                     SimpleDataManager())
+        person = _make_people(1, geo_unit)[0]
+
+        assigner._refuse_person(person, "no rule for this venue type")
+
+        assert assigner.stats['refusals'] == 1
+
+    def test_an_engine_refusal_names_the_attribute_that_declined(self, geo_unit):
+        """There is no strategy to attribute the verdict to, so the message must
+        not claim one."""
+        assigner = AttributeAssigner(MinimalConfig(attribute_name="ethnicity"),
+                                     SimpleDataManager())
+        person = _make_people(1, geo_unit)[0]
+        recorded = []
+        assigner._record_refusal = recorded.append
+
+        assigner._refuse_person(person, "no rule for this venue type")
+
+        assert recorded[0].person_id == person.id
+        assert recorded[0].reason == "no rule for this venue type"
+        assert "ethnicity" in recorded[0].refused_by
+        assert "Strategy" not in str(recorded[0])
+
+    def test_a_strategy_refusal_still_names_the_strategy(self, geo_unit):
+        refusal = RefusingStrategy()._refuse(_make_people(1, geo_unit)[0],
+                                             "no distribution")
+
+        assert refusal.refused_by == "Strategy 'refusing_test'"
+        assert str(refusal).startswith("Strategy 'refusing_test' could not assign")
+
+
 class TestEngineFaultAborts:
     """A broken engine is not a data verdict and must never be absorbed into
     a counter."""

@@ -315,6 +315,20 @@ class AttributeAssigner:
         self.stats['refusals'] += 1
         logger.warning(str(refusal))
 
+    def _refuse_person(self, person, reason: str):
+        """The engine's own verdict on one person, for the refusals it reaches
+        before any strategy exists: no rule for the venue type, no classifiable
+        household structure, no role, no rule for that (structure, role).
+
+        There is no strategy to attribute these to — that absence is precisely
+        what is being refused — so the attribute names the decider instead. They
+        are counted and logged per person like any other Refusal, so the
+        end-of-attribute raise can send the operator to a cause for each.
+        """
+        self._record_refusal(Refusal(
+            person_id=person.id, reason=reason,
+            refused_by=f"Assignment of '{self.attribute_name}'"))
+
     def _assign_other_residences(self, venues):
         """
         Assign attributes to people in non-household residences (care homes, dorms, etc.).
