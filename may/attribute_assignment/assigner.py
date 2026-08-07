@@ -5,7 +5,7 @@ from collections import defaultdict
 
 from .assignment_config import AttributeAssignmentConfig
 from .data_sources import DataSourceManager
-from .strategies import StrategyFactory
+from .strategies import StrategyFactory, Refusal, AssignmentRefused
 from may.utils.attribute_access import get_person_attribute
 from may.parallel import parallel_map, PopulationSlice, GeoUnitSlice
 
@@ -305,6 +305,18 @@ class AttributeAssigner:
         finally:
             _ACTIVE_ASSIGNMENT_CONTEXT = None
 
+    def _record_refusal(self, refusal):
+        """Count and log one Refusal.
+
+        The single counting path for both shapes a Refusal arrives in: raised by
+        `assign` inside an `AssignmentRefused`, returned by `assign_batch` as a
+        value. Batch and sequential therefore report identical totals on
+        identical input by construction. See
+        docs/adr/0008-a-refusal-is-a-per-person-result-an-engine-fault-is-an-abort.md
+        """
+        self.stats['refusals'] += 1
+        logger.warning(str(refusal))
+
     def _assign_other_residences(self, venues):
         """
         Assign attributes to people in non-household residences (care homes, dorms, etc.).
@@ -331,48 +343,51 @@ class AttributeAssigner:
                     venue_rule = rule
                     break
 
+            # An attribute's scope belongs in its eligibility filters, not in
+            # which venue types happen to have had a rule written for them.
             if not venue_rule:
-                logger.warning(f"No assignment rule found for venue type '{venue.type}', skipping")
+                logger.warning(f"No assignment rule for venue type '{venue.type}': "
+                               f"refusing its {len(members)} members")
+                self.stats['refusals'] += len(members)
                 continue
 
-            # Get the assignment strategy from the rule
+            # Get the assignment strategy from the rule. Outside the per-person
+            # try: a strategy that cannot be constructed is an engine fault, and
+            # no member of this venue could ever be assigned, so there is no
+            # per-person verdict to give.
             assignment_config = venue_rule.get('assignment', {})
+            strategy = self._get_or_create_strategy(assignment_config)
+            venue_assigned = 0
 
-            try:
-                strategy = self._get_or_create_strategy(assignment_config)
-                venue_assigned = 0
+            # Assign each person
+            for person in members:
+                # Skip if already assigned
+                if self.attribute_name in person.properties:
+                    continue
 
-                # Assign each person
-                for person in members:
-                    # Skip if already assigned
-                    if self.attribute_name in person.properties:
-                        continue
+                # Create context for strategy
+                context = {
+                    'attribute_name': self.attribute_name,
+                    'venue_type': venue.type
+                }
 
-                    # Create context for strategy
-                    context = {
-                        'attribute_name': self.attribute_name,
-                        'venue_type': venue.type
-                    }
-
+                # Per person, not per venue: one refused member must not cost
+                # everybody queued behind them their assignment.
+                try:
                     value = strategy.assign(person, venue, context)
+                except AssignmentRefused as refused:
+                    self._record_refusal(refused.refusal)
+                    continue
 
-                    if value is not None:
-                        person.properties[self.attribute_name] = value
-                        self.stats['attribute_distribution'][value] += 1
-                        self.stats['assignments_by_strategy'][f'venue_{venue.type}'] += 1
-                        self.stats['assignments_by_venue_type'][venue.type] += 1
-                        people_assigned += 1
-                        venue_assigned += 1
-                    else:
-                        self.stats['refusals'] += 1
-                        logger.warning(f"Failed to assign {self.attribute_name} to person {person.id} in {venue.type}")
+                person.properties[self.attribute_name] = value
+                self.stats['attribute_distribution'][value] += 1
+                self.stats['assignments_by_strategy'][f'venue_{venue.type}'] += 1
+                self.stats['assignments_by_venue_type'][venue.type] += 1
+                people_assigned += 1
+                venue_assigned += 1
 
-                if venue_assigned > 0:
-                    venues_processed += 1
-
-            except Exception as e:
-                logger.error(f"Error assigning attributes to venue {venue.id} ({venue.type}): {e}")
-                continue
+            if venue_assigned > 0:
+                venues_processed += 1
 
         # Update stats
         self.stats['people_in_other_residences'] = people_assigned
@@ -581,19 +596,17 @@ class AttributeAssigner:
         contexts = [{'attribute_name': self.attribute_name}
                     for _ in eligible_people]
 
-        # A batch fails as a whole; surface it as AttributeAssignmentError.
+        # One verdict per person comes back; anything raised out of here is an
+        # engine fault and aborts unwrapped.
         logger.info(f"  Running batch assignment...")
-        try:
-            results = strategy.assign_batch(eligible_people, households, contexts)
-        except Exception as e:
-            raise AttributeAssignmentError(
-                f"batch assignment of '{self.attribute_name}' failed: {e}"
-            ) from e
+        results = strategy.assign_batch(eligible_people, households, contexts)
 
         # Assign results to people
         logger.info(f"  Applying results to people...")
         for i, (person, value) in enumerate(zip(eligible_people, results)):
-            if value is not None:
+            if isinstance(value, Refusal):
+                self._record_refusal(value)
+            else:
                 # Handle single value or multiple values (dict)
                 if isinstance(value, dict):
                     # Multiple attributes returned
@@ -608,8 +621,6 @@ class AttributeAssigner:
 
                 self.stats['assignments_by_strategy'][strategy.strategy_type] += 1
                 self.stats['assigned_people'] += 1
-            else:
-                self.stats['refusals'] += 1
 
             # Log progress
             if (i + 1) % progress_interval == 0 or (i + 1) == total:
@@ -652,27 +663,25 @@ class AttributeAssigner:
             household = self._get_person_residence_venue(person)
             context = {'attribute_name': self.attribute_name, 'debug': is_sample}
 
+            # Only a Refusal is caught: anything else is an engine fault and
+            # must not be absorbed into a counter.
             try:
                 value = strategy.assign(person, household, context)
-
-                if value is not None:
-                    # Handle single value or multiple values (dict)
-                    if isinstance(value, dict):
-                        for attr_name, attr_value in value.items():
-                            person.properties[attr_name] = attr_value
-                            if attr_name == self.attribute_name:
-                                self.stats['attribute_distribution'][str(attr_value)] += 1
-                    else:
-                        person.properties[self.attribute_name] = value
-                        self.stats['attribute_distribution'][str(value)] += 1
-
-                    self.stats['assignments_by_strategy'][strategy.strategy_type] += 1
-                    self.stats['assigned_people'] += 1
+            except AssignmentRefused as refused:
+                self._record_refusal(refused.refusal)
+            else:
+                # Handle single value or multiple values (dict)
+                if isinstance(value, dict):
+                    for attr_name, attr_value in value.items():
+                        person.properties[attr_name] = attr_value
+                        if attr_name == self.attribute_name:
+                            self.stats['attribute_distribution'][str(attr_value)] += 1
                 else:
-                    self.stats['refusals'] += 1
-            except Exception as e:
-                logger.error(f"Exception assigning {self.attribute_name} to person {person.id}: {e}")
-                self.stats['refusals'] += 1
+                    person.properties[self.attribute_name] = value
+                    self.stats['attribute_distribution'][str(value)] += 1
+
+                self.stats['assignments_by_strategy'][strategy.strategy_type] += 1
+                self.stats['assigned_people'] += 1
 
             if is_sample:
                 result = person.properties.get(self.attribute_name, "NOT_ASSIGNED")
@@ -798,36 +807,31 @@ class AttributeAssigner:
                 self.stats['refusals'] += 1
                 continue
 
-            # 3c. Create and execute strategy
+            # 3c. Create and execute strategy. Only a Refusal is caught:
+            # anything else is an engine fault and aborts unwrapped.
+            strategy = self._get_or_create_strategy(rule.assignment)
             try:
-                strategy = self._get_or_create_strategy(rule.assignment)
                 value = strategy.assign(person, household, context)
+            except AssignmentRefused as refused:
+                self._record_refusal(refused.refusal)
+            else:
+                # Assign attribute to person's properties dict
+                person.properties[self.attribute_name] = value
 
-                if value is not None:
-                    # Assign attribute to person's properties dict
-                    person.properties[self.attribute_name] = value
+                # Update statistics
+                self.stats['assignments_by_role'][role] += 1
+                self.stats['assignments_by_strategy'][strategy.strategy_type] += 1
+                self.stats['assigned_people'] += 1
 
-                    # Update statistics
-                    self.stats['assignments_by_role'][role] += 1
-                    self.stats['assignments_by_strategy'][strategy.strategy_type] += 1
-                    self.stats['assigned_people'] += 1
+                # Track distribution, using str() for unhashable types (e.g. lists)
+                dist_key = str(value) if isinstance(value, (list, dict)) else value
+                self.stats['attribute_distribution'][dist_key] += 1
 
-                    # Track distribution, using str() for unhashable types (e.g. lists)
-                    dist_key = str(value) if isinstance(value, (list, dict)) else value
-                    self.stats['attribute_distribution'][dist_key] += 1
-
-                    if self.verbose:
-                        logger.debug(f"    ✓ Assigned: {self.attribute_name}={value} "
-                                   f"(role={role}, strategy={strategy.strategy_type})")
-                    else:
-                        logger.debug(f"  {person}: {self.attribute_name}={value} (role={role})")
+                if self.verbose:
+                    logger.debug(f"    ✓ Assigned: {self.attribute_name}={value} "
+                               f"(role={role}, strategy={strategy.strategy_type})")
                 else:
-                    logger.warning(f"  Strategy returned None for {person} (role={role})")
-                    self.stats['refusals'] += 1
-
-            except Exception as e:
-                logger.error(f"  Error assigning to {person}: {e}")
-                self.stats['refusals'] += 1
+                    logger.debug(f"  {person}: {self.attribute_name}={value} (role={role})")
 
         if self.verbose:
             logger.debug(f"{'=' * 80}\n")

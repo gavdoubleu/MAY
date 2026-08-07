@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 
 from may.attribute_assignment.assigner import AttributeAssigner, AttributeAssignmentError
-from may.attribute_assignment.strategies import AssignmentStrategy
+from may.attribute_assignment.strategies import AssignmentStrategy, Refusal
 
 from tests.test_unit.may.attribute_assignment.test_assigner import (
     MinimalConfig,
@@ -48,10 +48,12 @@ def geo_unit():
 
 class RefusingStrategy(AssignmentStrategy):
     """Assigns `value`, except to the people whose position is in `refuse_at`,
-    who are refused through the shared `_fail` primitive.
+    who are refused through the shared `_refuse` primitive.
 
     Defines both `assign` and `assign_batch` off one refusal rule, so the two
     paths are being asked the identical question about the identical people.
+    Only the delivery differs, as the ADR has it: `assign_batch` returns a
+    verdict per person, `assign` holds one person and raises.
     """
 
     def __init__(self, refuse_at=(), value="W"):
@@ -61,11 +63,14 @@ class RefusingStrategy(AssignmentStrategy):
 
     def _verdict(self, index, person):
         if index in self.refuse_at:
-            return self._fail(person, "test refusal: no distribution for this person")
+            return self._refuse(person, "test refusal: no distribution for this person")
         return self.value
 
     def assign(self, person, household, context):
-        return self._verdict(self._seen(person), person)
+        verdict = self._verdict(self._seen(person), person)
+        if isinstance(verdict, Refusal):
+            raise verdict.as_error()
+        return verdict
 
     def assign_batch(self, people, households, contexts):
         return [self._verdict(index, person)

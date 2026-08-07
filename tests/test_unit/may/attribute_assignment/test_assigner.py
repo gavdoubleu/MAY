@@ -664,10 +664,11 @@ class TestAssignOtherResidences:
         assert person1.properties['ethnicity'] == 'W'
         assert person2.properties['ethnicity'] == 'A'
 
-    def test_missing_source_leaves_residents_unassigned(self):
-        """A probabilistic rule against an unregistered source produces no
-        distribution, so the strategy fails for that resident and leaves them
-        unassigned."""
+    def test_missing_source_aborts_the_venue_run(self):
+        """An unregistered data source is an engine fault, not a verdict on a
+        resident: nothing has been decided about them, the engine is simply
+        misconfigured. It aborts unwrapped rather than being absorbed into the
+        refusal counter, which the venue-wide `except Exception` used to do."""
         config = MinimalConfig(
             attribute_name="ethnicity",
             venue_assignment_rules=[
@@ -675,15 +676,15 @@ class TestAssignOtherResidences:
                  'assignment': {'strategy': 'probabilistic', 'data_source': 'missing_source'}}
             ],
         )
-        dm = SimpleDataManager(sources={})  # lookup misses → no distribution
+        dm = SimpleDataManager(sources={})  # the source is not registered
         assigner = AttributeAssigner(config, dm)
 
         geo = MinimalGeoUnit("E00001234")
         person = MinimalPerson(geographical_unit=geo)
         venue = MinimalVenue(venue_type="care_home", members=[person], geographical_unit=geo)
 
-        result = assigner._assign_other_residences([venue])
-        assert result == 0
+        with pytest.raises(KeyError, match="missing_source"):
+            assigner._assign_other_residences([venue])
         assert 'ethnicity' not in person.properties
 
     def test_probabilistic_venue_assignment_assigns(self):
@@ -814,14 +815,17 @@ class TestBatchVsSequentialEquivalence:
             assert p.properties['workplace_location'] == 'LOC_B'
             assert p.properties['work_mode'] == 'OFFICE'
 
-    def test_batch_none_results_counted_as_unassigned(self):
+    def test_batch_refusals_counted_as_refusals(self):
+        """`None` is no longer a verdict: a batch declines a person by handing
+        back a Refusal in their slot, and the call site counts it."""
         from may.attribute_assignment.strategies import AssignmentStrategy
 
-        class NoneStrategy(AssignmentStrategy):
+        class RefusingBatchStrategy(AssignmentStrategy):
             def __init__(self):
-                self.strategy_type = "none_test"
+                self.strategy_type = "refusing_test"
             def assign_batch(self, people, households, contexts):
-                return [None] * len(people)
+                return [self._refuse(person, "no distribution for this person")
+                        for person in people]
 
         geo = MinimalGeoUnit("E00001234")
         dm = SimpleDataManager()
@@ -829,34 +833,47 @@ class TestBatchVsSequentialEquivalence:
         assigner = AttributeAssigner(config, dm)
 
         people = self._make_people(5, geo)
-        strategy = NoneStrategy()
-        assigner._assign_all_people_batch(people, strategy)
+        assigner._assign_all_people_batch(people, RefusingBatchStrategy())
 
         assert assigner.stats['refusals'] == 5
         assert assigner.stats['assigned_people'] == 0
+        assert all('test_attr' not in person.properties for person in people)
 
-    def test_sequential_exception_counted_as_unassigned(self):
-        """If strategy raises, person should be counted as unassigned."""
+    def test_sequential_refusal_counted_but_engine_fault_aborts(self):
+        """The sequential site counts a Refusal and lets everything else past:
+        an undeclared exception is a broken engine, not a verdict, and must not
+        be absorbed into the same counter."""
         from may.attribute_assignment.strategies import AssignmentStrategy
 
-        class FailingStrategy(AssignmentStrategy):
+        class RefusingStrategy(AssignmentStrategy):
             def __init__(self):
-                self.strategy_type = "failing_test"
+                self.strategy_type = "refusing_test"
             def assign(self, person, household, context):
-                raise RuntimeError("Strategy failed")
+                self._fail(person, "no distribution for this person")
+
+        class BrokenStrategy(AssignmentStrategy):
+            def __init__(self):
+                self.strategy_type = "broken_test"
+            def assign(self, person, household, context):
+                raise RuntimeError("the engine is broken")
 
         geo = MinimalGeoUnit("E00001234")
         dm = SimpleDataManager()
         config = MinimalConfig(attribute_name="test_attr")
-        assigner = AttributeAssigner(config, dm)
 
-        people = self._make_people(3, geo)
-        strategy = FailingStrategy()
+        refused = AttributeAssigner(config, dm)
         np.random.seed(42)
-        assigner._assign_all_people_sequential(people, strategy)
+        refused._assign_all_people_sequential(self._make_people(3, geo),
+                                              RefusingStrategy())
+        assert refused.stats['refusals'] == 3
+        assert refused.stats['assigned_people'] == 0
 
-        assert assigner.stats['refusals'] == 3
-        assert assigner.stats['assigned_people'] == 0
+        aborted = AttributeAssigner(config, dm)
+        np.random.seed(42)
+        with pytest.raises(RuntimeError, match="the engine is broken"):
+            aborted._assign_all_people_sequential(self._make_people(3, geo),
+                                                  BrokenStrategy())
+        assert aborted.stats['refusals'] == 0
 
 
 # Statistics tracking Tests
