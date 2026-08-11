@@ -26,6 +26,7 @@ from may.attribute_assignment.data_sources import (
     OriginDestinationMatrixSource,
     GUSamplerSource,
     DataSourceManager,
+    AllZeroDistributionError,
     _ordered_key_columns,
     _require_declared_columns,
     MissingDeclaredColumns,
@@ -154,6 +155,20 @@ class TestNormalizeProbabilities:
         probs = {"W": 0.0, "A": 0.0, "B": 0.0}
         with pytest.raises(ValueError, match="All-zero"):
             self._normalize(probs)
+
+    def test_all_zeros_raises_all_zero_distribution_error(self):
+        """Raised type is the dedicated subclass, so a caller further up can
+        catch this specific case without string-matching the message."""
+        with pytest.raises(AllZeroDistributionError):
+            self._normalize({"W": 0.0, "A": 0.0})
+
+    def test_all_zeros_names_the_key_when_given_a_label(self):
+        """A caller that knows which row it looked up (e.g. an SGU code) can
+        have that row named in the failure, rather than just a key count."""
+        source = GeoDistributionSource("test", {"files": [], "fallback": {}})
+        with pytest.raises(ValueError, match="key S00150454"):
+            source._normalize_probabilities({"W": 0.0, "A": 0.0},
+                                            key_label="key S00150454")
 
     def test_single_entry(self):
         probs = {"W": 5.0}
@@ -1234,6 +1249,21 @@ class TestMultiKeyLookupSource:
         )
         person = MinimalPerson(geographical_unit=sgu)
         assert "cvd" in source.lookup(person)
+
+    def test_all_zero_row_names_the_resolved_key(self):
+        """A row with no worker signal at all (e.g. the 4 UK SGUs where the
+        raked commute split writes zeros through) fails naming the key that
+        resolved to it, not just a key count."""
+        source = self._make_source(
+            lookup_dict={("S00150454",): {"from_home": 0.0, "travels": 0.0}},
+            key_columns_config={
+                "sgu": {"attribute": "sgu_code", "type": "direct"},
+            },
+            value_columns={"from_home": "from_home", "travels": "travels"},
+        )
+        person = MinimalPerson(properties={"sgu_code": "S00150454"})
+        with pytest.raises(AllZeroDistributionError, match="S00150454"):
+            source.lookup(person)
 
     def test_direct_keys_on_person_value(self):
         """A direct lookup keys on the person's attribute value."""

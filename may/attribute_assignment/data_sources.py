@@ -61,12 +61,16 @@ class DataSource:
         """
         raise NotImplementedError("Subclasses must implement lookup()")
 
-    def _normalize_probabilities(self, probs: Dict[str, float]) -> Dict[str, float]:
+    def _normalize_probabilities(self, probs: Dict[str, float],
+                                 key_label: Optional[str] = None) -> Dict[str, float]:
         """
         Normalize probabilities to ensure they sum to 1.0.
 
         Args:
             probs: Dictionary of probabilities
+            key_label: Optional description of the row this came from (e.g. a
+                resolved lookup key), named in an all-zero failure so an
+                operator isn't left with just a key count.
 
         Returns:
             Normalized probabilities that sum to 1.0
@@ -99,10 +103,23 @@ class DataSource:
         elif total > 0:
             return {k: v / total for k, v in probs.items()}
         else:
-            raise ValueError(
-                f"All-zero probability distribution in source '{self.name}' "
+            location = f" for {key_label}" if key_label else ""
+            raise AllZeroDistributionError(
+                f"All-zero probability distribution in source '{self.name}'{location} "
                 f"({len(probs)} keys). No fallbacks. Fix the data."
             )
+
+
+class AllZeroDistributionError(ValueError):
+    """A looked-up distribution's weights are all zero — the row exists but
+    carries no signal at all (e.g. an SGU where a raked commute split writes
+    zeros through rather than guessing).
+
+    A plain `ValueError` subclass, so unguarded callers still fail loud
+    unchanged; distinct so a caller that wants to treat "no signal" as a
+    per-person refusal rather than an engine abort — `DrawStrategy`, via
+    `MultiKeyLookupSource.lookup` — can catch it specifically.
+    """
 
 
 class MissingDeclaredColumns(Exception):
@@ -716,7 +733,7 @@ class MultiKeyLookupSource(DataSource):
             logger.debug(f"    [LOOKUP] ✓ Found data: {list(result.keys())[:3]}...")
 
         # Normalize the result (convert counts to probabilities)
-        result = self._normalize_probabilities(result)
+        result = self._normalize_probabilities(result, key_label=f"key {lookup_key}")
 
         # Cache the normalized result
         self._lookup_cache[lookup_key] = result

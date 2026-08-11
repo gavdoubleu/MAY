@@ -92,11 +92,11 @@ data_sources:
           from_home: "from_home"
           travels: "travels"
 
-# No fallback. An SGU where both columns are zero has no worker signal at all
-# (neither home workers nor travellers) and fails loud naming the SGU. Four such
-# output areas exist UK-wide, all in Scotland. Raking cannot
-# invent a split for them, so the build script writes the zeros through rather
-# than guessing.
+# No invented split. An SGU where both columns are zero has no worker signal at
+# all (neither home workers nor travellers): `commutes` is refused, by name, for
+# each employed person resident there, rather than the run aborting. Four such
+# output areas exist UK-wide, all in Scotland. Raking cannot invent a split for
+# them, so the build script writes the zeros through rather than guessing.
 
 assignment_rules:
   person:

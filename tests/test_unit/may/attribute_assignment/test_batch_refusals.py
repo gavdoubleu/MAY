@@ -17,7 +17,9 @@ See docs/adr/0008-a-refusal-is-a-per-person-result-an-engine-fault-is-an-abort.m
 """
 import pytest
 
+from may.attribute_assignment.data_sources import AllZeroDistributionError
 from may.attribute_assignment.strategies import (
+    AssignmentRefused,
     CategoricalSamplerStrategy,
     CommutingLikelihoodStrategy,
     ConstantStrategy,
@@ -32,6 +34,24 @@ from tests.test_unit.may.attribute_assignment.test_strategies_extended import (
     ODMatrixSource,
     SimpleDataManager,
 )
+
+
+class AllZeroSource:
+    """A source whose row has no worker signal at all — e.g. a residence SGU
+    where the raked commute split writes zeros through rather than guessing.
+    Named people raise; everyone else draws normally."""
+
+    def __init__(self, zero_signal_person_ids, otherwise=None, reason="no worker signal"):
+        self._zero_signal_person_ids = set(zero_signal_person_ids)
+        self._otherwise = otherwise or {"X": 1.0}
+        self._reason = reason
+
+    def lookup(self, person, household=None, context=None):
+        if person.id in self._zero_signal_person_ids:
+            raise AllZeroDistributionError(
+                f"Source 'test': {self._reason} for key {person.id}."
+            )
+        return self._otherwise
 
 
 class PerPersonSource:
@@ -113,6 +133,33 @@ class TestDrawStrategyRefusesEveryMemberOfTheGroup:
         results = _draw_batch(strategy, [MinimalPerson()])
 
         assert results[0].refused_by == "Strategy 'categorical_sampler'"
+
+    def test_a_zero_signal_key_refuses_only_that_person_in_a_batch(self):
+        """`AllZeroDistributionError` from the source is a data gap, not an
+        engine fault: it costs the affected person their draw, not the run."""
+        assignable = [MinimalPerson() for _ in range(2)]
+        starved = MinimalPerson()
+        strategy = _draw_strategy(AllZeroSource(
+            zero_signal_person_ids={starved.id}))
+
+        results = _draw_batch(strategy, [assignable[0], starved, assignable[1]])
+
+        assert results[0] == "X"
+        assert results[2] == "X"
+        assert isinstance(results[1], Refusal)
+        assert results[1].person_id == starved.id
+        assert "no worker signal" in results[1].reason
+
+    def test_a_zero_signal_key_refuses_on_the_single_assign_path_too(self):
+        starved = MinimalPerson()
+        strategy = _draw_strategy(AllZeroSource(
+            zero_signal_person_ids={starved.id}))
+
+        with pytest.raises(AssignmentRefused) as excinfo:
+            strategy.assign(starved, MinimalVenue(), {"attribute_name": "sector"})
+
+        assert excinfo.value.refusal.person_id == starved.id
+        assert "no worker signal" in excinfo.value.refusal.reason
 
     def test_every_slot_is_filled(self):
         """A surviving `None` is an absence, which is precisely what a Refusal

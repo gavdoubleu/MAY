@@ -3,6 +3,8 @@ import numpy as np
 from dataclasses import dataclass
 from typing import Dict, List, Any, Optional, Tuple, Union
 
+from may.attribute_assignment.data_sources import AllZeroDistributionError
+
 logger = logging.getLogger("may.attribute_assignment.strategies")
 
 
@@ -397,7 +399,10 @@ class DrawStrategy(AssignmentStrategy):
 
     def assign(self, person, household, context: Dict[str, Any]) -> Any:
         """Draw one value from the source's distribution for this person."""
-        probs = self._source().lookup(person, household, context)
+        try:
+            probs = self._source().lookup(person, household, context)
+        except AllZeroDistributionError as exc:
+            return self._fail(person, str(exc))
         sampled = self._weighted_draw(probs, person)
         logger.debug(f"{self.strategy_type}: {sampled} for {person.id}")
         return sampled
@@ -412,19 +417,26 @@ class DrawStrategy(AssignmentStrategy):
         Returns one verdict per person: a drawn value or a `Refusal`. A group
         is a sampling optimisation, not a unit of judgement — an unusable
         distribution refuses every member of the group by name, not the one
-        member the draw happened to be attributed to.
+        member the draw happened to be attributed to. A key with no signal at
+        all (`AllZeroDistributionError`, e.g. an SGU where a raked commute
+        split writes zeros through) refuses only the person whose key it was,
+        rather than aborting the whole batch.
         """
         from collections import defaultdict
 
         source = self._source()
         groups = defaultdict(list)
+        results = [None] * len(people_list)
         for i, (person, household, context) in enumerate(
             zip(people_list, households_list, contexts_list)
         ):
-            probs = source.lookup(person, household, context)
+            try:
+                probs = source.lookup(person, household, context)
+            except AllZeroDistributionError as exc:
+                results[i] = self._refuse(person, str(exc))
+                continue
             groups[tuple(sorted(probs.items()))].append((i, person, probs))
 
-        results = [None] * len(people_list)
         for members in groups.values():
             _, person0, probs = members[0]
             try:
