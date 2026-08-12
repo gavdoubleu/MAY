@@ -1,6 +1,6 @@
 # Economic Activity Assignment for UK 2021/22
 #
-# Splits the working-age population by residence LGU, sex and age band into
+# Splits the working-age population by residence SGU, sex and age band into
 # three states from the census economic-activity tables:
 #
 #   employed    in employment (employee or self-employed), incl. FT students
@@ -12,9 +12,15 @@
 # physical workplace to every 18-64 adult, oversubscribing companies ~2.5x
 # against real job supply.
 #
-# Sources: one file per nation, all harmonised to LGU x sex x age band and
-# residence-based: EW (ONS RM024), SCT (NRS UV601a), NI (NISRA). Together they
-# cover all 374 UK local authorities; all three are loaded below.
+# Sources: originally one file per nation harmonised to LGU x sex x age band
+# and residence-based: EW (ONS RM024), SCT (NRS UV601a), NI (NISRA), covering
+# all 374 UK local authorities. Drawing at LGU level was blind to output area,
+# while `commutes` (the very next step) draws at SGU level — the two
+# disagreed about which OAs have workers at all, which crashed create_world.py
+# on 4 all-Scotland SGUs with zero worker signal in either SGU-level commute
+# source. data/scripts/build_economic_activity_by_sgu.py reshapes the LGU
+# table down to SGU using the commute signal, so `economic_activity` now
+# agrees with `commutes` about where the workers are.
 #
 # Assignment Level: person
 
@@ -61,19 +67,26 @@ categories:
     numerical: {min: 50, max: 64}
 
 data_sources:
-  economic_activity_by_lad_sex_age:
+  economic_activity_by_sgu_sex_age:
     type: "csv_lookup"
     format: "multi_key"
-    description: "Economic-activity counts by residence LGU, sex and age band"
+    description: "Economic-activity counts by residence SGU, sex and age band"
 
+    # Built by data/scripts/build_economic_activity_by_sgu.py from the LGU
+    # table below, commute_split_by_sgu_prepandemic.csv (the shaping signal;
+    # same file commutes_assignment.yaml loads) and SGU population by single
+    # year of age. Raked so it sums exactly back to
+    # economic_activity_by_sgu_sex_age.csv per (LGU, sex, age band); an SGU
+    # with zero commute signal (from_home + travels == 0) gets employed = 0
+    # here, so it never draws "employed" in the first place.
     files:
-      - path: "${data_root}/activities/work/economic_activity_by_lad_sex_age.csv"
+      - path: "${data_root}/activities/work/economic_activity_by_sgu_sex_age.csv"
 
         key_columns:
-          LGU_name:
+          sgu:
             attribute: "geographical_unit"
             type: "ancestor_lookup"
-            level: "LGU"
+            level: "SGU"
             property: "name"
 
           Sex:
@@ -88,20 +101,21 @@ data_sources:
           unemployed: "unemployed"
           inactive: "inactive"
 
-# No fallback. Every (LGU, sex, age band) cell is populated (374 LGUs x 2 x 4,
-# zero gaps vs hierarchy) so a miss means the geography and table have diverged.
+# No fallback. Every (SGU, sex, age band) cell is populated (same SGU
+# coverage as commutes_assignment.yaml's travel_to_work_split) so a miss
+# means the geography and table have diverged.
 
 assignment_rules:
   person:
-    description: "Sample economic activity from the LGU/sex/age distribution"
+    description: "Sample economic activity from the SGU/sex/age distribution"
 
     rules:
-      - description: "Probabilistic economic activity by LGU, sex and age band"
+      - description: "Probabilistic economic activity by SGU, sex and age band"
         priority: 1
 
         assignment:
           strategy: "categorical_sampler"
-          data_source: "economic_activity_by_lad_sex_age"
+          data_source: "economic_activity_by_sgu_sex_age"
 
 settings:
   logging:
