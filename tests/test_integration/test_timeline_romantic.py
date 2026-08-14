@@ -123,7 +123,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _load_msoa_marginals():
-    path = REPO_ROOT / "data/population/sexual_orientation/EW_orientation_by_mgu.csv"
+    path = REPO_ROOT / "data/population/sexual_orientation/orientation_by_mgu.csv"
     by_code = {}
     with path.open() as f:
         for row in csv.DictReader(f):
@@ -153,7 +153,7 @@ def test_romantic_distributor_handles_75plus_via_extrapolation():
         REPO_ROOT / "data/population/sexual_orientation/orientation_prevalence_synthetic.csv"
     )
     cfg["data_sources"]["geo_distribution"]["path"] = str(
-        REPO_ROOT / "data/population/sexual_orientation/EW_orientation_by_mgu.csv"
+        REPO_ROOT / "data/population/sexual_orientation/orientation_by_mgu.csv"
     )
 
     people = [

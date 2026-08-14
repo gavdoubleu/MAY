@@ -37,14 +37,11 @@ max_age: 120
 ```yaml
 data_sources:
   prevalence_path: "data/population/sexual_orientation/orientation_prevalence_synthetic.csv"
-  msoa_marginal_path:
-    - "data/population/sexual_orientation/EW_orientation_by_mgu.csv"
-    - "data/population/sexual_orientation/SCT_orientation_by_mgu.csv"
-    - "data/population/sexual_orientation/NI_orientation_by_mgu.csv"
+  msoa_marginal_path: "data/population/sexual_orientation/orientation_by_mgu.csv"
   geo_level: "MGU"
 ```
 
-When present, the engine uses raked probabilities: national prevalence by sex × age is combined with per-area orientation marginals to produce `P(orientation | sex, age, area)`. `prevalence_path` points to the national-level file; `msoa_marginal_path` to one per-area file or a list of them to stack (here one per UK nation); `geo_level` names the geography level at which area codes in that file are expressed.
+When present, the engine uses raked probabilities: national prevalence by sex × age is combined with per-area orientation marginals to produce `P(orientation | sex, age, area)`. `prevalence_path` points to the national-level file; `msoa_marginal_path` to one per-area file or a list of them to stack (here the single merged UK-wide file); `geo_level` names the geography level at which area codes in that file are expressed.
 
 !!! warning "The shipped national prevalence file is synthetic"
 
