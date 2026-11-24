@@ -5,7 +5,12 @@ from typing import Optional, Tuple
 from .geographical_unit import GeographicalUnit
 from may.preflight.report import PreflightReport, not_list_message, not_mapping_message
 from may.utils import path_resolver as pr
-from may.utils.stacked_input import as_path_list, load_stacked_csv
+from may.utils.stacked_input import (
+    as_path_list,
+    check_path_spec,
+    load_stacked_csv,
+    resolve_path_spec,
+)
 from may.utils.yaml_loader import unreadable_file_message
 
 logger = logging.getLogger("geography")
@@ -30,24 +35,8 @@ class GeographyConfig:
     filters: Optional[dict]
 
 
-def _resolve_spec(spec):
-    """Apply ${...} templating to a path or each path in a list."""
-    if isinstance(spec, list):
-        return [pr.resolve(path) for path in spec]
-    return pr.resolve(spec)
-
-
-def _is_path(value) -> bool:
+def _is_name(value) -> bool:
     return isinstance(value, str) and bool(value)
-
-
-def _check_path_spec(report: PreflightReport, key: str, spec) -> None:
-    """Problem unless `spec` is a path or a non-empty list of paths."""
-    if _is_path(spec):
-        return
-    if isinstance(spec, list) and spec and all(_is_path(path) for path in spec):
-        return
-    report.problem(key, f"must be a path or non-empty list of paths; got {spec!r}")
 
 
 def _parse_data_dir(block: dict, report: PreflightReport) -> Optional[str]:
@@ -65,7 +54,7 @@ def _parse_levels(block: dict, report: PreflightReport) -> Optional[list]:
     if not levels:
         report.problem("levels", "not set")
         return None
-    if not isinstance(levels, list) or not all(_is_path(level) for level in levels):
+    if not isinstance(levels, list) or not all(_is_name(level) for level in levels):
         report.problem("levels", f"must be a list of level names; got {levels!r}")
         return None
     duplicates = sorted({level for level in levels if levels.count(level) > 1})
@@ -86,7 +75,7 @@ def _parse_coord_files(block: dict, levels, report: PreflightReport) -> dict:
         key = f"coord_files.{level}"
         if levels is not None and level not in levels:
             report.problem(key, f"not a configured level; levels are {levels}")
-        _check_path_spec(report, key, spec)
+        check_path_spec(report, key, spec)
     return coord_files
 
 
@@ -218,7 +207,7 @@ class Geography:
         if hierarchy_file is None or hierarchy_file == "":
             report.problem("hierarchy_file", "not set")
         else:
-            _check_path_spec(report, "hierarchy_file", hierarchy_file)
+            check_path_spec(report, "hierarchy_file", hierarchy_file)
         coord_files = _parse_coord_files(block, levels, report)
         load_all = block.get("load_all", False)
         if not isinstance(load_all, bool):
@@ -232,8 +221,8 @@ class Geography:
         geography_config = GeographyConfig(
             data_dir=data_dir,
             levels=levels,
-            hierarchy_file=_resolve_spec(hierarchy_file),
-            coord_files={level: _resolve_spec(spec) for level, spec in coord_files.items()},
+            hierarchy_file=resolve_path_spec(hierarchy_file),
+            coord_files={level: resolve_path_spec(spec) for level, spec in coord_files.items()},
             filters=filters,
         )
         return geography_config, report

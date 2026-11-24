@@ -14,6 +14,9 @@ import os
 
 import pandas as pd
 
+from may.preflight.report import PreflightReport
+from may.utils import path_resolver as pr
+
 logger = logging.getLogger("stacked_input")
 
 COLUMN_POLICIES = ("strict", "union_zero_fill")
@@ -42,6 +45,26 @@ def as_path_list(spec, label):
         f"{label}: expected a path or a list of paths, got "
         f"{type(spec).__name__} ({spec!r})."
     )
+
+
+def _is_path(value) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def check_path_spec(report: PreflightReport, key: str, spec) -> None:
+    """Problem in `report` unless `spec` is a path or a non-empty list of paths."""
+    if _is_path(spec):
+        return
+    if isinstance(spec, list) and spec and all(_is_path(path) for path in spec):
+        return
+    report.problem(key, f"must be a path or non-empty list of paths; got {spec!r}")
+
+
+def resolve_path_spec(spec):
+    """Apply ${...} templating to a path or each path in a list."""
+    if isinstance(spec, list):
+        return [pr.resolve(path) for path in spec]
+    return pr.resolve(spec)
 
 
 def load_stacked_csv(

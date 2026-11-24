@@ -68,7 +68,7 @@ class PreflightReport:
         return merged
 
     def under(self, prefix: str, sep: str = ": ") -> "PreflightReport":
-        """New report with every key prefixed: `f"{prefix}{sep}{key}"`."""
+        """New report with every key prefixed: `f"{prefix}{sep}{key}"`; an empty key becomes `prefix`."""
         return PreflightReport(
             problems=[self._prefixed(finding, prefix, sep) for finding in self.problems],
             warnings=[self._prefixed(finding, prefix, sep) for finding in self.warnings],
@@ -76,7 +76,8 @@ class PreflightReport:
 
     @staticmethod
     def _prefixed(finding: Finding, prefix: str, sep: str) -> Finding:
-        return Finding(f"{prefix}{sep}{finding.key}", finding.message)
+        key = f"{prefix}{sep}{finding.key}" if finding.key else prefix
+        return Finding(key, finding.message)
 
     def _body(self) -> str:
         sections = []

@@ -368,6 +368,7 @@ class TestLoadBatchExplicitFromCsv:
         pm.load_batch_explicit_from_csv(
             data_dir=str(tmp_path),
             column_mapping={'age': 'Age', 'sex': 'Sex'},
+            level='MGU',
         )
         assert len(pm.people) == 2
         assert {p.geographical_unit.name for p in pm.people} == {'S1', 'S2'}
@@ -385,6 +386,7 @@ class TestLoadBatchExplicitFromCsv:
         pm.load_batch_explicit_from_csv(
             data_dir=str(tmp_path),
             column_mapping={'age': 'Age', 'sex': 'Sex'},
+            level='MGU',
         )
         assert len(pm.people) == 1
         assert pm.people[0].geographical_unit.name == 'S1'
@@ -404,6 +406,7 @@ class TestLoadBatchExplicitFromCsv:
         pm.load_batch_explicit_from_csv(
             data_dir=str(tmp_path),
             column_mapping={'age': 'Age', 'sex': 'Sex'},
+            level='MGU',
         )
         ids = sorted(p.id for p in pm.people)
         assert ids == [0, 1]

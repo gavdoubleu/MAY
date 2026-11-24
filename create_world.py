@@ -51,48 +51,6 @@ def set_random_seed(seed=999):
 set_random_seed(0)
 
 
-VALID_POPULATION_TYPES = {"matrix", "explicit", "explicit_batch"}
-
-
-def setup_population(config, geo):
-    """Build the PopulationManager, failing loud on bad config or missing data.
-    ``data_dir`` is resolved once and used by
-    every mode; ``type`` is validated against the closed set rather than
-    silently dispatching to matrix. Raises PopulationError on any miss."""
-    pop_config = config.get("population", {})
-    data_dir = pr.resolve(pop_config.get("data_dir", "data/population"))
-    population = PopulationManager(geography=geo, data_dir=data_dir)
-
-    pop_type = pop_config.get("type", "matrix")
-    if pop_type not in VALID_POPULATION_TYPES:
-        raise PopulationError(
-            f"Unknown population.type {pop_type!r}; expected one of "
-            f"{sorted(VALID_POPULATION_TYPES)}."
-        )
-
-    column_mapping = pop_config.get("column_mapping", {})
-    if pop_type == "explicit_batch":
-        population.load_batch_explicit_from_csv(
-            data_dir=data_dir, column_mapping=column_mapping
-        )
-    elif pop_type == "explicit":
-        filename = pop_config.get("filename")
-        if not filename:
-            raise PopulationError(
-                "population.type 'explicit' requires a 'filename' in configuration."
-            )
-        population.load_explicit_from_csv(
-            filename=filename, column_mapping=column_mapping
-        )
-    else:  # matrix
-        male_file = pop_config.get("demographics_male_file", "demographics_male.csv")
-        female_file = pop_config.get("demographics_female_file", "demographics_female.csv")
-        population.load_demographics_from_csv(male_file, female_file)
-        population.generate_population()
-
-    return population
-
-
 def parse_args(argv=None):
     """Parse the CLI. Shared with the entry point below, which needs to know
     whether cProfile was asked for before the build starts."""
@@ -188,7 +146,7 @@ def main(args=None):
     logger.info("Loading population...")
     with bp.stage("population_load", "pipeline"):
         try:
-            population = setup_population(config, geo)
+            population = PopulationManager.from_config(config.get("population") or {}, geo)
         except PopulationError as e:
             logger.error(f"Population loading failed: {e}")
             sys.exit(1)

@@ -83,12 +83,13 @@ population:
 population:
   type: "explicit_batch"
   data_dir: "1911_data/population"
+  level: MGU   # one <unit>_pop.csv per unit of this geography level
   column_mapping:
     age: "Age"
     sex: "Sex"
 ```
 
-`column_mapping` maps engine attribute names to CSV column names. Any additional columns listed are loaded as per-person attributes. `filename` is required for `type: "explicit"` and ignored for `type: "explicit_batch"`.
+`column_mapping` maps engine attribute names to CSV column names. Any additional columns listed are loaded as per-person attributes. `filename` is required for `type: "explicit"` and ignored for `type: "explicit_batch"`. `level` is required for `type: "explicit_batch"`: one `<unit>_pop.csv` is read per unit of that geography level.
 
 ---
 

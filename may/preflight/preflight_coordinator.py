@@ -8,6 +8,7 @@ import yaml
 from may import timeline
 from may.geography.geography import Geography
 from may.geography.venue_manager import VenueConfig, VenueManager
+from may.population.population import PopulationManager
 from may.preflight.context import PreflightContext
 from may.preflight.report import PreflightError, PreflightReport, not_mapping_message
 from may.residence.household_distributor import HouseholdDistributor
@@ -25,6 +26,7 @@ def check_world_config(config: dict) -> PreflightReport:
     block_report = PreflightReport()
     geography_block = _mapping_block(config, "geography", block_report)
     venues_block = _mapping_block(config, "venues", block_report)
+    population_block = _mapping_block(config, "population", block_report)
     serialization_block = _mapping_block(config, "serialization", block_report)
     households_block = (
         _mapping_block(config, "households", block_report)
@@ -38,6 +40,10 @@ def check_world_config(config: dict) -> PreflightReport:
     if geography_block is not None:
         geography_config, geography_report = Geography.parse_config(geography_block)
         report = PreflightReport.merge(report, geography_report.under("geography", sep="."))
+    geo_levels = frozenset(geography_config.levels) if geography_config is not None else None
+    if population_block is not None:
+        population_report = PopulationManager.preflight(population_block, geo_levels)
+        report = PreflightReport.merge(report, population_report.under("population", sep="."))
     if venues_block is not None:
         venue_config, venue_report = VenueManager.parse_config(venues_block)
         report = PreflightReport.merge(report, venue_report.under("venues", sep="."))
@@ -56,7 +62,7 @@ def check_world_config(config: dict) -> PreflightReport:
             report, _venue_property_gap_report(*loaded_schema, venue_config)
         )
     context = PreflightContext(
-        geo_levels=frozenset(geography_config.levels) if geography_config is not None else None,
+        geo_levels=geo_levels,
         households=household_config,
         households_block_present=bool(config.get("households")),
     )

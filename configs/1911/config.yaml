@@ -15,6 +15,7 @@ venues:
 population:
   type: "explicit_batch"
   data_dir: "1911_data/population"
+  level: MGU   # one <unit>_pop.csv per unit of this geography level
   column_mapping:
     age: Age
     sex: Sex

@@ -42,7 +42,11 @@ def test_population_manager_explicit_batch_load(loaded_geography):
         "geo_unit": "location"
     }
     
-    pm.load_batch_explicit_from_csv(data_dir="tests/test_data/micro_world/population/batch", column_mapping=column_mapping)
+    pm.load_batch_explicit_from_csv(
+        data_dir="tests/test_data/micro_world/population/batch",
+        column_mapping=column_mapping,
+        level="MGU",
+    )
 
     # From MGU_01_pop.csv we have 2 people, from MGU_02_pop.csv we have 2 people
     assert len(pm.people) == 4
@@ -83,3 +87,20 @@ def test_population_manager_matrix_load(loaded_geography):
     stats = pm.get_statistics()
     assert stats["sex_distribution"]["male"] == 5
     assert stats["sex_distribution"]["female"] == 5
+
+
+def test_batch_load_partitions_by_the_named_level(tmp_path):
+    """Files are named by units of `level`, not by whatever sits at levels[1]."""
+    (tmp_path / "hierarchy.csv").write_text("SGU,MGU,LGU\nS1,M1,L1\nS2,M2,L1\n")
+    geography = Geography(data_dir=str(tmp_path), levels=["SGU", "MGU", "LGU"], hierarchy_file="hierarchy.csv")
+    geography.load_from_csv()
+    batch_dir = tmp_path / "batch"
+    batch_dir.mkdir()
+    (batch_dir / "L1_pop.csv").write_text("age,sex,location\n30,f,S1\n40,m,S2\n")
+    population = PopulationManager(geography=geography, data_dir=str(batch_dir))
+    population.load_batch_explicit_from_csv(
+        data_dir=str(batch_dir),
+        column_mapping={"age": "age", "sex": "sex", "geo_unit": "location"},
+        level="LGU",
+    )
+    assert sorted(person.age for person in population.people) == [30, 40]
