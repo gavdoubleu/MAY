@@ -3,7 +3,6 @@
 
 # import yaml
 
-# from MAY.config_loader import setup_geography
 # from MAY.geography import VenueManager
 # from MAY.world import World
 

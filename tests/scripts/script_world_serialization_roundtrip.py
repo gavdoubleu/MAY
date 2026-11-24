@@ -20,8 +20,7 @@ import numpy as np
 import numba as nb
 from pathlib import Path
 
-from may.config_loader import setup_geography
-from may.geography import VenueManager
+from may.geography import Geography, VenueManager
 from may.population import PopulationManager
 from may.world import World, setup_households
 
@@ -72,8 +71,7 @@ def create_world(config_path):
         config = yaml.safe_load(f)
 
     # Setup geography
-    geo, _ = setup_geography(config=config)
-    geo.load_from_csv()
+    geo = Geography.from_config(config.get("geography") or {})
     logger.info(f"Geography loaded: {len(geo.get_all_units())} units")
 
     # Load venues

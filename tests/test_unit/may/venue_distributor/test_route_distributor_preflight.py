@@ -186,3 +186,11 @@ def test_from_config_builds_a_valid_file(tmp_path):
     distributor = RouteDistributor.from_config(write(tmp_path, VALID), {})
 
     assert distributor.leg_venue_type == "bus_line"
+
+
+@pytest.mark.parametrize("text, key", [
+    (VALID.replace("corridor_level: LGU", "corridor_level: [LGU]"), "pool_rule.corridor_level"),
+    (VALID.replace("  level: MGU\ndestination", "  level: {name: MGU}\ndestination"), "origin_source.level"),
+], ids=["corridor_level", "source_level"])
+def test_a_geo_level_that_is_not_a_name_is_a_problem(tmp_path, text, key):
+    assert keys(preflight(write(tmp_path, text), KNOWN_GEOGRAPHY).problems) == [key]

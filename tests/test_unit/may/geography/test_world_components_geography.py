@@ -1,11 +1,9 @@
 import pytest
-from may.config_loader import setup_geography
 from may.geography import Geography
 
-def test_setup_geography_and_loading():
+def test_from_config_builds_and_loads():
     """
-    Test that setup_geography correctly initializes a Geography
-    and load_from_csv() correctly builds the region hierarchy from the micro-world data.
+    Test that Geography.from_config initialises a Geography and builds the region hierarchy from the micro-world data.
     """
     # Create a dummy config dict
     config = {
@@ -16,16 +14,10 @@ def test_setup_geography_and_loading():
         }
     }
     
-    # 1. Test setup_geography
-    # We pass the config to setup_geography
-    geo, options = setup_geography(config=config)
-    
-    assert isinstance(geo, Geography), "setup_geography must return a Geography instance"
+    geo = Geography.from_config(config["geography"])
+
+    assert isinstance(geo, Geography), "from_config must return a Geography instance"
     assert geo.data_dir == "tests/test_data/micro_world/geography", "Geography data_dir not correctly set from config"
-    
-    # 2. Test load_from_csv
-    # This should read the tests/test_data/micro_world/geography/hierarchy.csv file we created
-    geo.load_from_csv()
     
     # Verify the units were loaded correctly
     all_units = geo.get_all_units()

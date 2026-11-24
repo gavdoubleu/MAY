@@ -120,3 +120,12 @@ def test_from_config_builds_a_valid_file(tmp_path):
     distributor = ResidentLinkedDistributor.from_config(write(tmp_path, VALID), {})
 
     assert distributor.target_venue_type == "care_home"
+
+
+@pytest.mark.parametrize("value", ["[MGU]", "{name: MGU}"], ids=["list", "mapping"])
+def test_a_geography_level_that_is_not_a_name_is_a_problem(tmp_path, value):
+    context = PreflightContext(geo_levels=frozenset({"SGU", "MGU"}))
+
+    report = preflight(write(tmp_path, VALID + f"geography_level: {value}\n"), context)
+
+    assert keys(report.problems) == ["geography_level"]

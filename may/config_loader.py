@@ -4,8 +4,6 @@ Configuration and command-line argument handling for MAY.
 
 import os
 import logging
-from may.geography import Geography
-from may.utils import path_resolver as pr
 from may.utils.yaml_loader import load_yaml
 
 logger = logging.getLogger("config_loader")
@@ -29,99 +27,3 @@ def load_config(config_path="config.yaml"):
 
     logger.info(f"Loaded configuration from {config_path}")
     return config
-
-
-def build_filters(config):
-    """
-    Build the geographical filter from config.
-
-    A run either loads all units or filters to one level's codes, both declared
-    under `geography:` in the config. Levels are referenced by their config label
-    (no hardcoded SGU/MGU/LGU), so any level naming works.
-
-    Args:
-        config: Configuration dictionary
-
-    Returns:
-        Filter dictionary with 'level' and 'codes' keys, or None if no filter
-    """
-    geo_config = config.get("geography", {})
-
-    if geo_config.get("load_all", False):
-        return None
-
-    filter_config = geo_config.get("filter", {})
-    if not filter_config or not filter_config.get("level"):
-        return None
-
-    level = filter_config["level"]
-    codes = []
-
-    # Load codes from file if specified
-    if filter_config.get("file"):
-        codes = list(Geography.load_codes_from_file(filter_config["file"]))
-    # Otherwise use inline codes
-    elif filter_config.get("codes"):
-        codes = filter_config["codes"]
-
-    # Only return filter if we have codes
-    if codes:
-        return {"level": level, "codes": codes}
-
-    return None
-
-
-def setup_geography(config=None):
-    """
-    Set up geography from config.
-
-    Args:
-        config: Configuration dict (if None, loads the default config file)
-
-    Returns:
-        Tuple of (Geography object, filters dict)
-    """
-    if config is None:
-        config = load_config()
-
-    # Build filters from config
-    filters = build_filters(config)
-
-    if filters:
-        logger.info(
-            f"Using filter: {filters['level']} with {len(filters['codes'])} codes"
-        )
-    else:
-        logger.info("Loading all geographical units (no filters)")
-
-    # Get data directory and levels from config
-    geo_config = config.get("geography", {})
-    data_dir = pr.resolve(geo_config.get("data_dir", "data/geography"))
-    levels = geo_config.get("levels")  # required; Geography fails loud if absent
-
-    # File keys are explicit: hierarchy_file is a path or list of paths,
-    # coord_files maps level label -> path or list of paths. Both accept
-    # ${...} templating; relative paths resolve against data_dir.
-    hierarchy_file = _resolve_spec(geo_config.get("hierarchy_file"))
-    coord_files = {
-        level: _resolve_spec(spec)
-        for level, spec in (geo_config.get("coord_files") or {}).items()
-    }
-
-    # Create Geography object
-    geo = Geography(
-        data_dir=data_dir,
-        filters=filters,
-        levels=levels,
-        hierarchy_file=hierarchy_file,
-        coord_files=coord_files,
-    )
-
-    return geo, filters
-
-
-def _resolve_spec(spec):
-    """Apply ${...} templating to a path or each path in a list."""
-    if isinstance(spec, list):
-        return [pr.resolve(p) for p in spec]
-    return pr.resolve(spec) if spec else spec

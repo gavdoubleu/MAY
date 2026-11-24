@@ -30,6 +30,7 @@ import numpy as np
 import pandas as pd
 
 from .base_distributor import BaseDistributor, check_value, resolve_data_path
+from may.preflight.context import check_geo_level
 from may.preflight.report import not_mapping_message
 from may.utils.attribute_access import get_attribute
 
@@ -65,14 +66,14 @@ class RouteDistributor(BaseDistributor):
                 report.problem(key, not_mapping_message(source))
                 continue
             check_value(f"{key}.type", source.get("type", "ancestor"), SOURCE_TYPES, report)
-            cls._check_geo_level(f"{key}.level", source.get("level"), context, report)
+            check_geo_level(f"{key}.level", source.get("level"), context, report)
         pool_rule = config.get("pool_rule") or None
         if pool_rule is not None:
             if "legs_table" in config:
                 report.problem("legs_table", "set beside pool_rule, which replaces it; remove one")
             pool_rule = cls._section(config, "pool_rule", report)
             cls._check_numbers("pool_rule", pool_rule, POOL_RULE_NUMBERS, report)
-            cls._check_geo_level("pool_rule.corridor_level", pool_rule.get("corridor_level"), context, report)
+            check_geo_level("pool_rule.corridor_level", pool_rule.get("corridor_level"), context, report)
         else:
             legs_table = config.get("legs_table", DEFAULT_LEGS_TABLE)
             if not isinstance(legs_table, str):

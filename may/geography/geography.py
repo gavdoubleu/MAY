@@ -1,8 +1,146 @@
 import logging
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
 from .geographical_unit import GeographicalUnit
+from may.preflight.report import PreflightReport, not_list_message, not_mapping_message
+from may.utils import path_resolver as pr
 from may.utils.stacked_input import as_path_list, load_stacked_csv
+from may.utils.yaml_loader import unreadable_file_message
 
 logger = logging.getLogger("geography")
+
+DEFAULT_DATA_DIR = "data/geography"
+
+
+class GeographyError(Exception):
+    """Raised when the `geography` config block is invalid. Mirrors HouseholdError."""
+
+
+@dataclass(frozen=True)
+class GeographyConfig:
+    """Parsed `geography` config block; checked by `Geography.parse_config`.
+
+    Paths are `${...}`-resolved. `filters` is `{"level", "codes"}`, or `None` to load all."""
+
+    data_dir: str
+    levels: list
+    hierarchy_file: object
+    coord_files: dict
+    filters: Optional[dict]
+
+
+def _resolve_spec(spec):
+    """Apply ${...} templating to a path or each path in a list."""
+    if isinstance(spec, list):
+        return [pr.resolve(path) for path in spec]
+    return pr.resolve(spec)
+
+
+def _is_path(value) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _check_path_spec(report: PreflightReport, key: str, spec) -> None:
+    """Problem unless `spec` is a path or a non-empty list of paths."""
+    if _is_path(spec):
+        return
+    if isinstance(spec, list) and spec and all(_is_path(path) for path in spec):
+        return
+    report.problem(key, f"must be a path or non-empty list of paths; got {spec!r}")
+
+
+def _parse_data_dir(block: dict, report: PreflightReport) -> Optional[str]:
+    """Resolved data dir; a blank key falls back to the default. `None` if not a path."""
+    data_dir = block.get("data_dir")
+    if data_dir is not None and not isinstance(data_dir, str):
+        report.problem("data_dir", f"must be a path; got {data_dir!r}")
+        return None
+    return pr.resolve(data_dir or DEFAULT_DATA_DIR)
+
+
+def _parse_levels(block: dict, report: PreflightReport) -> Optional[list]:
+    """The level labels, or `None` with a problem; checks needing levels then skip."""
+    levels = block.get("levels")
+    if not levels:
+        report.problem("levels", "not set")
+        return None
+    if not isinstance(levels, list) or not all(_is_path(level) for level in levels):
+        report.problem("levels", f"must be a list of level names; got {levels!r}")
+        return None
+    duplicates = sorted({level for level in levels if levels.count(level) > 1})
+    if duplicates:
+        report.problem("levels", f"duplicate level names: {duplicates}")
+        return None
+    return levels
+
+
+def _parse_coord_files(block: dict, levels, report: PreflightReport) -> dict:
+    coord_files = block.get("coord_files")
+    if coord_files is None:
+        return {}
+    if not isinstance(coord_files, dict):
+        report.problem("coord_files", not_mapping_message(coord_files))
+        return {}
+    for level, spec in coord_files.items():
+        key = f"coord_files.{level}"
+        if levels is not None and level not in levels:
+            report.problem(key, f"not a configured level; levels are {levels}")
+        _check_path_spec(report, key, spec)
+    return coord_files
+
+
+def _parse_filter(filter_block, levels, data_dir, report: PreflightReport) -> Optional[dict]:
+    """`{"level", "codes"}`, or `None` to load all units (with any warning why)."""
+    if filter_block is None:
+        return None
+    if not isinstance(filter_block, dict):
+        report.problem("filter", not_mapping_message(filter_block))
+        return None
+    level = filter_block.get("level")
+    if level is not None and levels is not None and level not in levels:
+        report.problem(
+            "filter.level", f"{level!r} is not a configured level; levels are {levels}"
+        )
+    inline_codes = filter_block.get("codes")
+    if inline_codes is not None and not isinstance(inline_codes, list):
+        report.problem("filter.codes", not_list_message(inline_codes))
+        return None
+    codes_file = filter_block.get("file")
+    if codes_file and inline_codes:
+        report.warning("filter.codes", "ignored; filter.file is set")
+    if codes_file:
+        codes = _read_filter_file(codes_file, data_dir, report)
+    else:
+        # YAML reads numeric codes as numbers; unit names are strings.
+        codes = [str(code) for code in inline_codes or []]
+    if not level:
+        if codes_file or inline_codes:
+            report.warning("filter.level", "not set; filter ignored, loads all units")
+        return None
+    if codes is None:
+        return None
+    if not codes:
+        report.warning("filter", "level set but no codes; loads all units")
+        return None
+    return {"level": level, "codes": codes}
+
+
+def _read_filter_file(codes_file, data_dir, report: PreflightReport) -> Optional[list]:
+    """Sorted codes in the filter file, found in the working dir then `data_dir`."""
+    if not isinstance(codes_file, str):
+        report.problem("filter.file", f"must be a path; got {codes_file!r}")
+        return None
+    try:
+        found_path = pr.find_config_file(codes_file, data_dir)
+    except pr.ConfigFileNotFoundError as error:
+        report.problem("filter.file", str(error))
+        return None
+    try:
+        return sorted(Geography.load_codes_from_file(found_path))
+    except (OSError, UnicodeDecodeError) as error:
+        report.problem("filter.file", unreadable_file_message(found_path, error))
+        return None
 
 
 class Geography:
@@ -63,29 +201,67 @@ class Geography:
 
     @staticmethod
     def load_codes_from_file(file_path):
-        """
-        Load codes from a text file.
-        Ignores empty lines and lines starting with #.
+        """Set of codes in a text file, one per line; blank and `#` lines skipped.
 
-        Args:
-            file_path: Path to the filter file
+        Pure: raises `OSError` / `UnicodeDecodeError` for the caller to report."""
+        with open(file_path, "r", encoding="utf-8-sig") as codes_file:
+            stripped_lines = (line.strip() for line in codes_file)
+            return {line for line in stripped_lines if line and not line.startswith("#")}
 
-        Returns:
-            Set of codes
-        """
-        codes = set()
-        try:
-            with open(file_path, "r", encoding="utf-8-sig") as f:
-                for line in f:
-                    line = line.strip()
-                    # Skip empty lines and comments
-                    if line and not line.startswith("#"):
-                        codes.add(line)
-            logger.info(f"Loaded {len(codes)} codes from {file_path}")
-        except FileNotFoundError:
-            logger.error(f"Filter file not found: {file_path}")
-            raise
-        return codes
+    @staticmethod
+    def parse_config(block: dict) -> Tuple[Optional[GeographyConfig], PreflightReport]:
+        """Parse a `geography` config block. Config is `None` if any problem."""
+        report = PreflightReport()
+        data_dir = _parse_data_dir(block, report)
+        levels = _parse_levels(block, report)
+        hierarchy_file = block.get("hierarchy_file")
+        if hierarchy_file is None or hierarchy_file == "":
+            report.problem("hierarchy_file", "not set")
+        else:
+            _check_path_spec(report, "hierarchy_file", hierarchy_file)
+        coord_files = _parse_coord_files(block, levels, report)
+        load_all = block.get("load_all", False)
+        if not isinstance(load_all, bool):
+            report.problem("load_all", f"must be true or false; got {load_all!r}")
+        # `load_all: true` ignores the filter, silently, so it is not checked.
+        filters = None
+        if load_all is not True:
+            filters = _parse_filter(block.get("filter"), levels, data_dir, report)
+        if report.has_problems:
+            return None, report
+        geography_config = GeographyConfig(
+            data_dir=data_dir,
+            levels=levels,
+            hierarchy_file=_resolve_spec(hierarchy_file),
+            coord_files={level: _resolve_spec(spec) for level, spec in coord_files.items()},
+            filters=filters,
+        )
+        return geography_config, report
+
+    @staticmethod
+    def preflight(block: dict) -> PreflightReport:
+        """Check a `geography` config block without loading geography data."""
+        _, report = Geography.parse_config(block)
+        return report
+
+    @classmethod
+    def from_config(cls, block: dict) -> "Geography":
+        """Build and load from a `geography` block; `GeographyError` on any problem."""
+        geography_config, report = cls.parse_config(block)
+        report.raise_if_problems(
+            GeographyError, f"Geography config has {len(report.problems)} problem(s):"
+        )
+        for finding in report.warnings:
+            logger.info(f"Geography config warning: {finding.key}: {finding.message}")
+        geography = cls(
+            data_dir=geography_config.data_dir,
+            levels=geography_config.levels,
+            filters=geography_config.filters,
+            hierarchy_file=geography_config.hierarchy_file,
+            coord_files=geography_config.coord_files,
+        )
+        geography.load_from_csv()
+        return geography
 
     def load_from_csv(self):
         """
@@ -149,11 +325,25 @@ class Geography:
                 )
                 raise ValueError(f"Invalid filter level: {filter_level}")
 
-            filter_col = filter_level
-
-            # Filter the hierarchy to only include rows with these names
+            # Codes are text (from YAML or a file); pandas may read the column
+            # as numbers, so match on its text form.
+            filter_codes = {str(code) for code in filter_names}
+            column_as_text = hierarchy_df[filter_level].astype(str)
             original_size = len(hierarchy_df)
-            hierarchy_df = hierarchy_df[hierarchy_df[filter_col].isin(filter_names)]
+            hierarchy_df = hierarchy_df[column_as_text.isin(filter_codes)]
+
+            unmatched_codes = sorted(filter_codes - set(column_as_text))
+            if len(unmatched_codes) == len(filter_codes):
+                raise ValueError(
+                    f"Geography filter matched no {filter_level} units; codes "
+                    f"{unmatched_codes[:5]} are not in the hierarchy's "
+                    f"{filter_level} column, e.g. {list(column_as_text.unique()[:5])}."
+                )
+            if unmatched_codes:
+                logger.warning(
+                    f"{len(unmatched_codes)} of {len(filter_codes)} {filter_level} "
+                    f"filter codes match no unit: {unmatched_codes[:5]}"
+                )
 
             logger.info(
                 f"Applied {filter_level} filter: {len(filter_names)} names specified, "

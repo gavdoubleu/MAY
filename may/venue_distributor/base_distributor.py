@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Tuple, Any
 from scipy.spatial import cKDTree
 import logging
 from may.preflight.config_file import load_config_mapping
-from may.preflight.context import PreflightContext
+from may.preflight.context import PreflightContext, check_geo_level
 from may.preflight.report import PreflightReport, not_list_message, not_mapping_message
 from may.utils import path_resolver as pr
 from may.utils.attribute_access import _compile_attribute, get_attribute
@@ -115,7 +115,7 @@ class BaseDistributor:
         """Checks every distributor shares; subclasses extend with their own schema."""
         venue_selection = cls._section(config, "venue_selection", report)
         for key in ("venue_geo_level", "batch_geo_level"):
-            cls._check_geo_level(f"venue_selection.{key}", venue_selection.get(key), context, report)
+            check_geo_level(f"venue_selection.{key}", venue_selection.get(key), context, report)
         eligibility = cls._section(config, "eligibility", report)
         cls._check_filters("eligibility.global_filters", eligibility.get("global_filters"), report)
         cls._check_filters(
@@ -171,14 +171,6 @@ class BaseDistributor:
             report.problem(key, not_mapping_message(section))
             return {}
         return section
-
-    @staticmethod
-    def _check_geo_level(key, geo_level, context, report):
-        """A geo level, when set, must be one the geography defines (skipped while unknown)."""
-        if geo_level is None or context.geo_levels is None:
-            return
-        if geo_level not in context.geo_levels:
-            report.problem(key, f"unknown geo level {geo_level!r}; expected one of {sorted(context.geo_levels)}")
 
     @staticmethod
     def _check_venue_type(key, venue_type, report):

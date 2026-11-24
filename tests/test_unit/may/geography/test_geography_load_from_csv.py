@@ -11,7 +11,6 @@ import os
 
 import pytest
 
-from may.config_loader import setup_geography
 from may.geography import Geography
 
 
@@ -275,23 +274,20 @@ def test_geography_equality_against_non_geography_is_false():
     assert (geo == 123) is False
 
 
-def test_setup_geography_passes_levels_filter_and_files_through(four_level_geo_dir):
-    """setup_geography passes levels, filter, and the explicit file keys through."""
-    config = {
-        "geography": {
-            "data_dir": four_level_geo_dir,
-            "levels": LEVELS_4,
-            "hierarchy_file": "hierarchy.csv",
-            "coord_files": {"SGU": "coord_sgu.csv", "MGU": "coord_mgu.csv"},
-            "filter": {"level": "LGU", "codes": ["L_keep1", "L_keep2"]},
-        }
+def test_from_config_passes_levels_filter_and_files_through(four_level_geo_dir):
+    """from_config passes levels, filter, and the explicit file keys through."""
+    block = {
+        "data_dir": str(four_level_geo_dir),
+        "levels": LEVELS_4,
+        "hierarchy_file": "hierarchy.csv",
+        "coord_files": {"SGU": "coord_sgu.csv", "MGU": "coord_mgu.csv"},
+        "filter": {"level": "LGU", "codes": ["L_keep1", "L_keep2"]},
     }
 
-    geo, filters = setup_geography(config=config)
+    geo = Geography.from_config(block)
     assert geo.levels == LEVELS_4
-    assert filters == {"level": "LGU", "codes": ["L_keep1", "L_keep2"]}
+    assert geo.filters == {"level": "LGU", "codes": ["L_keep1", "L_keep2"]}
 
-    geo.load_from_csv()
     assert len(geo.get_units_by_level("LGU")) == 2
     assert len(geo.get_units_by_level("XLGU")) == 1
     sgu = next(iter(geo.get_units_by_level("SGU").values()))

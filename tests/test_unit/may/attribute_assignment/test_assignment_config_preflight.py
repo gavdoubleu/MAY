@@ -422,6 +422,14 @@ def test_an_unknown_geographical_unit_column_level_is_a_problem(tmp_path):
     ]
 
 
+@pytest.mark.parametrize("value", [["LGU"], {"name": "LGU"}], ids=["list", "mapping"])
+def test_a_geo_level_that_is_not_a_name_is_a_problem(tmp_path, value):
+    config = valid_config(tmp_path)
+    geo_file(config)["key_columns"]["sgu"]["level"] = value
+
+    assert keys(preflight(tmp_path, config).problems) == ["data_sources.geo.files[1].key_columns.sgu.level"]
+
+
 def test_geo_levels_are_not_checked_while_unknown(tmp_path):
     config = valid_config(tmp_path)
     geo_file(config)["destination_level"] = "LAD"

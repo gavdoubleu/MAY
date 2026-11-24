@@ -44,13 +44,13 @@ def test_set_random_seed_consistency():
     np_val_3 = np.random.random()
     assert np_val_1 != np_val_3, "Different seeds produced the same random number"
 
-@patch('create_world.setup_geography')
-def test_main_cli_arg_parsing(mock_setup_geography):
+@patch('create_world.Geography')
+def test_main_cli_arg_parsing(mock_geography_class):
     """
     Test that main() correctly parses CLI arguments and attempts to open the correct config.
     We test up until the config open logic (lines 60-79).
     """
-    # We patch setup_geography but we actually expect it to fail reading
+    # We patch Geography but we actually expect it to fail reading
     # if the config does not exist, so let's use a real, minimal file
     test_config_path = "tests/test_data/micro_world/test_micro_config.yaml"
     
@@ -72,9 +72,8 @@ def test_main_cli_arg_parsing(mock_setup_geography):
         with patch('builtins.open') as mock_open:
             # We mock yaml reading to return an empty dict
             with patch('yaml.safe_load', return_value={}):
-                # It will then throw an error or exit because setup_geography won't work properly
+                # It will then throw an error or exit because Geography.from_config won't work properly
                 # with an empty dictionary but we only care that it got here
-                mock_setup_geography.return_value = (MagicMock(), None)
                 
                 # Mock world and venues so it does not crash when moving forward
                 with patch('create_world.VenueManager'), patch('create_world.run_preflight'):
@@ -124,6 +123,8 @@ def test_batch_data_dir_is_resolved_once_for_every_mode():
 
 
 CONSTANT_ATTRIBUTE = Path(__file__).parents[3] / "test_data" / "preflight" / "constant_attribute.yaml"
+# Passes the geography preflight; files are not opened there.
+VALID_GEOGRAPHY_YAML = "geography:\n  levels: [SGU, MGU]\n  hierarchy_file: hierarchy.csv\n"
 VALID_TIMELINE_YAML = (
     f"timeline:\n  enabled: true\n  steps:\n    - type: attribute\n      config: {CONSTANT_ATTRIBUTE}\n"
 )
@@ -138,14 +139,14 @@ def test_main_hands_the_world_and_its_config_to_run_timeline(tmp_path):
     config_path = tmp_path / "config.yaml"
     (tmp_path / "venues_config.yaml").write_text("venue_types: {}\n", encoding="utf-8")
     config_path.write_text(
-        f"venues:\n  data_dir: {tmp_path}\n"
+        VALID_GEOGRAPHY_YAML + f"venues:\n  data_dir: {tmp_path}\n"
         f"serialization:\n  enabled: false\n  output_dir: {tmp_path}\n"
         + VALID_TIMELINE_YAML,
         encoding="utf-8",
     )
     old = pr._resolver
     try:
-        with patch("create_world.setup_geography", return_value=(MagicMock(), None)), \
+        with patch("create_world.Geography"), \
                 patch("create_world.VenueManager"), \
                 patch("create_world.PopulationManager"), \
                 patch("create_world.World") as world_class, \
@@ -166,13 +167,13 @@ def test_main_exits_when_the_timeline_fails(tmp_path):
     config_path = tmp_path / "config.yaml"
     (tmp_path / "venues_config.yaml").write_text("venue_types: {}\n", encoding="utf-8")
     config_path.write_text(
-        f"venues:\n  data_dir: {tmp_path}\nserialization:\n  enabled: false\n  output_dir: {tmp_path}\n"
+        VALID_GEOGRAPHY_YAML + f"venues:\n  data_dir: {tmp_path}\nserialization:\n  enabled: false\n  output_dir: {tmp_path}\n"
         + VALID_TIMELINE_YAML,
         encoding="utf-8",
     )
     old = pr._resolver
     try:
-        with patch("create_world.setup_geography", return_value=(MagicMock(), None)), \
+        with patch("create_world.Geography"), \
                 patch("create_world.VenueManager"), \
                 patch("create_world.PopulationManager"), \
                 patch("create_world.World"), \
@@ -202,7 +203,7 @@ def write_world_config(tmp_path, venues_yaml="venue_types: {}\n", timeline_yaml=
     )
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        f"venues:\n  data_dir: {venues_dir}\n  config_file: venues.yaml\n"
+        VALID_GEOGRAPHY_YAML + f"venues:\n  data_dir: {venues_dir}\n  config_file: venues.yaml\n"
         f"serialization:\n  enabled: true\n  config_file: {schema_path}\n"
         f"  output_dir: {tmp_path / 'output'}\n" + timeline_yaml,
         encoding="utf-8",
@@ -232,7 +233,7 @@ def run_main(config_path, *extra_args):
 def test_venue_config_only_under_data_dir_with_serialisation_loads_venues(tmp_path):
     """Regression: the schema-gap check must not reopen the venue YAML relative to the cwd."""
     config_path = write_world_config(tmp_path, COMPANY_VENUES)
-    with patch("create_world.setup_geography", return_value=(MagicMock(), None)), \
+    with patch("create_world.Geography"), \
             patch("create_world.PopulationManager"), \
             patch("create_world.World") as world_class, \
             patch("create_world.run_timeline", side_effect=TimelineReached):
@@ -244,26 +245,26 @@ def test_venue_config_only_under_data_dir_with_serialisation_loads_venues(tmp_pa
 
 def test_config_problem_exits_before_geography_loads(tmp_path):
     config_path = write_world_config(tmp_path, BROKEN_VENUES)
-    with patch("create_world.setup_geography") as setup_geography:
+    with patch("create_world.Geography") as geography_class:
         with pytest.raises(SystemExit) as excinfo:
             run_main(config_path)
     assert excinfo.value.code == 1
-    setup_geography.assert_not_called()
+    geography_class.from_config.assert_not_called()
 
 
 def test_preflight_only_clean_config_stops_before_the_build(tmp_path):
     config_path = write_world_config(tmp_path)
-    with patch("create_world.setup_geography") as setup_geography:
+    with patch("create_world.Geography") as geography_class:
         assert run_main(config_path, "--preflight-only") is None
-    setup_geography.assert_not_called()
+    geography_class.from_config.assert_not_called()
     assert not (tmp_path / "output").exists()
 
 
 def test_preflight_only_warnings_alone_exit_cleanly(tmp_path):
     config_path = write_world_config(tmp_path, WARNING_VENUES)
-    with patch("create_world.setup_geography") as setup_geography:
+    with patch("create_world.Geography") as geography_class:
         assert run_main(config_path, "--preflight-only") is None
-    setup_geography.assert_not_called()
+    geography_class.from_config.assert_not_called()
 
 
 def test_preflight_only_problems_exit_with_one(tmp_path):
@@ -285,8 +286,8 @@ def test_preflight_only_reports_venue_and_timeline_problems_together(tmp_path, c
 
 def test_timeline_problem_exits_before_geography_loads(tmp_path):
     config_path = write_world_config(tmp_path, timeline_yaml="timeline:\n  enabled: false\n")
-    with patch("create_world.setup_geography") as setup_geography:
+    with patch("create_world.Geography") as geography_class:
         with pytest.raises(SystemExit) as excinfo:
             run_main(config_path)
     assert excinfo.value.code == 1
-    setup_geography.assert_not_called()
+    geography_class.from_config.assert_not_called()

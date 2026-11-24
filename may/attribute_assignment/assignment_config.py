@@ -20,7 +20,7 @@ from may.attribute_assignment.strategies import (
     validate_assignment_config,
 )
 from may.preflight.config_file import load_config_mapping
-from may.preflight.context import PreflightContext
+from may.preflight.context import PreflightContext, check_geo_level
 from may.preflight.report import PreflightReport, not_list_message, not_mapping_message
 from may.utils import path_resolver as pr
 from may.utils.yaml_loader import load_yaml
@@ -1138,15 +1138,7 @@ def _check_data_file(key, file_config, context, report):
             if isinstance(column_config, dict):
                 level_keys.append((f"key_columns.{column}.level", column_config.get("level")))
     for level_key, level in level_keys:
-        _check_geo_level(f"{key}.{level_key}", level, context, report)
-
-
-def _check_geo_level(key, geo_level, context, report):
-    """A geo level, when set, must be one the geography defines (skipped while unknown)."""
-    if geo_level is None or context.geo_levels is None:
-        return
-    if geo_level not in context.geo_levels:
-        report.problem(key, f"unknown geo level {geo_level!r}; expected one of {sorted(context.geo_levels)}")
+        check_geo_level(f"{key}.{level_key}", level, context, report)
 
 
 def _check_assignment_rules(assignment_rules, source_names, report):

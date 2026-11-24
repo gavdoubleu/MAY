@@ -117,7 +117,6 @@ def minimal_world():
     from may.world import World
     from may.geography import VenueManager
     from may.population import PopulationManager
-    from may.config_loader import setup_geography
     
     from may.geography import GeographicalUnit
     from may.geography import Venue

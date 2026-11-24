@@ -6,8 +6,7 @@ import sys
 import numpy as np
 import numba as nb
 import yaml
-from may.config_loader import setup_geography
-from may.geography import VenueManager, VenueError
+from may.geography import Geography, GeographyError, VenueManager, VenueError
 from may.population import PopulationManager, PopulationError
 from may.world import World
 from may.social_networks import SocialNetworkBuilder
@@ -166,10 +165,11 @@ def main(args=None):
 
     # Setup geography from config and command-line arguments
     with bp.stage("geography_load", "pipeline"):
-        geo, _ = setup_geography(config=config)
-
-        # Load the geography data
-        geo.load_from_csv()
+        try:
+            geo = Geography.from_config(config.get("geography") or {})
+        except GeographyError as e:
+            logger.error(f"Geography loading failed: {e}")
+            sys.exit(1)
         bp.bind(geography=geo)
 
     # Load venues

@@ -27,12 +27,15 @@ def keys(findings):
 # Passes the timeline preflight, so tests of other blocks see only their own findings.
 CONSTANT_ATTRIBUTE = Path(__file__).parents[3] / "test_data" / "preflight" / "constant_attribute.yaml"
 VALID_TIMELINE = {"enabled": True, "steps": [{"type": "attribute", "config": str(CONSTANT_ATTRIBUTE)}]}
+# Passes the geography preflight; files are not opened there.
+VALID_GEOGRAPHY = {"levels": ["SGU", "MGU"], "hierarchy_file": "hierarchy.csv"}
 
 
 def test_venue_problems_are_prefixed_with_venues(venues_dir):
     config = {
         "venues": {"data_dir": str(venues_dir), "config_file": "missing.yaml"},
         "serialization": {"enabled": False},
+        "geography": VALID_GEOGRAPHY,
         "timeline": VALID_TIMELINE,
     }
     report = check_world_config(config)
@@ -41,7 +44,7 @@ def test_venue_problems_are_prefixed_with_venues(venues_dir):
 
 def test_absent_venues_block_checks_the_defaults(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    report = check_world_config({"serialization": {"enabled": False}, "timeline": VALID_TIMELINE})
+    report = check_world_config({"geography": VALID_GEOGRAPHY, "serialization": {"enabled": False}, "timeline": VALID_TIMELINE})
     assert keys(report.problems) == ["venues.config_file"]
     assert "venues_config.yaml" in report.problems[0].message
     assert "data/venues" in report.problems[0].message
@@ -54,6 +57,7 @@ def world_config(venues_dir, venues_yaml, serialization_path, serialization_yaml
     return {
         "venues": {"data_dir": str(venues_dir), "config_file": "venues.yaml"},
         "serialization": {"enabled": True, "config_file": str(serialization_path)},
+        "geography": VALID_GEOGRAPHY,
         "timeline": VALID_TIMELINE,
     }
 
@@ -184,6 +188,7 @@ def test_unreadable_schema_is_problem_even_when_venues_are_broken(venues_dir, tm
     config = {
         "venues": {"data_dir": str(venues_dir), "config_file": "missing.yaml"},
         "serialization": {"enabled": True, "config_file": str(tmp_path / "missing.yaml")},
+        "geography": VALID_GEOGRAPHY,
         "timeline": VALID_TIMELINE,
     }
     report = check_world_config(config)
@@ -208,6 +213,7 @@ def test_run_preflight_raises_on_problems_after_logging(venues_dir, caplog):
     config = {
         "venues": {"data_dir": str(venues_dir), "config_file": "missing.yaml"},
         "serialization": {"enabled": False},
+        "geography": VALID_GEOGRAPHY,
         "timeline": VALID_TIMELINE,
     }
     with caplog.at_level(logging.INFO, logger="preflight"):
@@ -240,6 +246,7 @@ def households_config(venues_dir, households_block, timeline=RESIDENCE_TIMELINE)
         "venues": {"data_dir": str(venues_dir), "config_file": "venues.yaml"},
         "serialization": {"enabled": False},
         "households": households_block,
+        "geography": VALID_GEOGRAPHY,
         "timeline": timeline,
     }
 
@@ -334,6 +341,7 @@ def child_creator_config(venues_dir, tmp_path, venues_yaml, parent_venue_type):
     return {
         "venues": {"data_dir": str(venues_dir), "config_file": "venues.yaml"},
         "serialization": {"enabled": False},
+        "geography": VALID_GEOGRAPHY,
         "timeline": {
             "enabled": True,
             "steps": [{"type": "child_creator", "config": str(creator_path)}],
@@ -436,3 +444,79 @@ def test_missing_residence_step_file_is_problem(venues_dir, tmp_path):
     (households_dir / "step_strategy.yaml").unlink()
     report = check_world_config(config)
     assert keys(report.problems) == ["timeline.steps[1] (step_strategy.yaml): config"]
+
+
+def geography_config(tmp_path, geography_block, distributor_yaml="venue_type: school\nactivity_map_key: primary_activity\n"):
+    """A config whose only possible findings come from geography and one distributor step."""
+    venues_dir = tmp_path / "venues"
+    venues_dir.mkdir()
+    (venues_dir / "venues.yaml").write_text("venue_types: {}\n")
+    distributor_path = tmp_path / "distributor.yaml"
+    distributor_path.write_text(distributor_yaml)
+    return {
+        "geography": geography_block,
+        "venues": {"data_dir": str(venues_dir), "config_file": "venues.yaml"},
+        "serialization": {"enabled": False},
+        "timeline": {"enabled": True, "steps": [{"type": "distributor", "config": str(distributor_path)}]},
+    }, distributor_path
+
+
+@pytest.mark.parametrize("geography_block", [None, {}], ids=["absent", "empty"])
+def test_geography_is_always_checked(tmp_path, geography_block):
+    config, _ = geography_config(tmp_path, geography_block)
+    report = check_world_config(config)
+    assert keys(report.problems) == ["geography.levels", "geography.hierarchy_file"]
+
+
+def test_geography_problems_are_prefixed_with_geography(tmp_path):
+    config, _ = geography_config(tmp_path, {**VALID_GEOGRAPHY, "load_all": "yes"})
+    report = check_world_config(config)
+    assert keys(report.problems) == ["geography.load_all"]
+
+
+def test_geography_warnings_are_prefixed_with_geography(tmp_path):
+    config, _ = geography_config(tmp_path, {**VALID_GEOGRAPHY, "filter": {"codes": ["A"]}})
+    report = check_world_config(config)
+    assert report.problems == []
+    assert keys(report.warnings) == ["geography.filter.level"]
+
+
+def test_geography_not_mapping_is_problem(tmp_path):
+    config, _ = geography_config(tmp_path, ["SGU"])
+    report = check_world_config(config)
+    assert [(finding.key, finding.message) for finding in report.problems] == [
+        ("geography", "must be a mapping; got sequence (list)")
+    ]
+
+
+UNKNOWN_LEVEL_DISTRIBUTOR = (
+    "venue_type: school\nactivity_map_key: primary_activity\n"
+    "venue_selection:\n  venue_geo_level: LSOA\n"
+)
+
+
+def test_step_naming_unknown_geo_level_is_problem(tmp_path):
+    config, distributor_path = geography_config(tmp_path, VALID_GEOGRAPHY, UNKNOWN_LEVEL_DISTRIBUTOR)
+    report = check_world_config(config)
+    assert keys(report.problems) == [
+        f"timeline.steps[1] ({distributor_path}): venue_selection.venue_geo_level"
+    ]
+    assert "['MGU', 'SGU']" in report.problems[0].message
+
+
+def test_step_naming_known_geo_level_passes(tmp_path):
+    known_level = UNKNOWN_LEVEL_DISTRIBUTOR.replace("LSOA", "MGU")
+    config, _ = geography_config(tmp_path, VALID_GEOGRAPHY, known_level)
+    report = check_world_config(config)
+    assert report.problems == []
+
+
+@pytest.mark.parametrize(
+    "geography_block",
+    [["SGU"], {"hierarchy_file": "hierarchy.csv"}, {**VALID_GEOGRAPHY, "load_all": "yes"}],
+    ids=["not_mapping", "no_levels", "other_problem"],
+)
+def test_bad_geography_skips_geo_level_checks(tmp_path, geography_block):
+    config, _ = geography_config(tmp_path, geography_block, UNKNOWN_LEVEL_DISTRIBUTOR)
+    report = check_world_config(config)
+    assert all(key.startswith("geography") for key in keys(report.problems))

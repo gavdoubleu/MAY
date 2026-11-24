@@ -274,3 +274,13 @@ def test_from_config_builds_a_valid_file(tmp_path):
     distributor = VenueDistributor.from_config(write(tmp_path, VALID), {})
 
     assert distributor.venue_type == "school"
+
+
+@pytest.mark.parametrize("key", ["venue_geo_level", "batch_geo_level"])
+@pytest.mark.parametrize("value", ["[MGU]", "{name: MGU}"], ids=["list", "mapping"])
+def test_a_geo_level_that_is_not_a_name_is_a_problem(tmp_path, key, value):
+    context = PreflightContext(geo_levels=frozenset({"SGU", "MGU"}))
+
+    report = preflight(write(tmp_path, VALID + f"venue_selection:\n  {key}: {value}\n"), context)
+
+    assert keys(report.problems) == [f"venue_selection.{key}"]

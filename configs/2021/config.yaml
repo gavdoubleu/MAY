@@ -34,10 +34,9 @@ geography:
     SGU: EW_coord_sgu.csv
     MGU: EW_coord_mgu.csv
 
-  # Define hierarchy levels (smallest to largest)
-  # If not specified, defaults to ["SGU", "MGU", "LGU"]
+  # Define hierarchy levels (smallest to largest). Required; no default.
   # Examples:
-  #   - ["SGU", "MGU", "LGU"]           # 3 levels (default)
+  #   - ["SGU", "MGU", "LGU"]           # 3 levels
   #   - ["SGU", "MGU", "LGU", "XLGU"]   # 4 levels
   #   - ["Block", "Tract", "County"]    # Custom names
   # These are generic size labels (Small/Medium/Large/eXtra-Large Geographical

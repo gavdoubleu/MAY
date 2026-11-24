@@ -6,6 +6,7 @@ from typing import Optional
 import yaml
 
 from may import timeline
+from may.geography.geography import Geography
 from may.geography.venue_manager import VenueConfig, VenueManager
 from may.preflight.context import PreflightContext
 from may.preflight.report import PreflightError, PreflightReport, not_mapping_message
@@ -22,6 +23,7 @@ SERIALIZATION_CONFIG_FILE_KEY = "serialization.config_file"
 def check_world_config(config: dict) -> PreflightReport:
     """Check a whole world config without loading data. Pure: no logging, no raising."""
     block_report = PreflightReport()
+    geography_block = _mapping_block(config, "geography", block_report)
     venues_block = _mapping_block(config, "venues", block_report)
     serialization_block = _mapping_block(config, "serialization", block_report)
     households_block = (
@@ -29,9 +31,13 @@ def check_world_config(config: dict) -> PreflightReport:
         if _has_residence_step(config)
         else None
     )
+    geography_config = None
     venue_config = None
     household_config = None
     report = block_report
+    if geography_block is not None:
+        geography_config, geography_report = Geography.parse_config(geography_block)
+        report = PreflightReport.merge(report, geography_report.under("geography", sep="."))
     if venues_block is not None:
         venue_config, venue_report = VenueManager.parse_config(venues_block)
         report = PreflightReport.merge(report, venue_report.under("venues", sep="."))
@@ -50,6 +56,7 @@ def check_world_config(config: dict) -> PreflightReport:
             report, _venue_property_gap_report(*loaded_schema, venue_config)
         )
     context = PreflightContext(
+        geo_levels=frozenset(geography_config.levels) if geography_config is not None else None,
         households=household_config,
         households_block_present=bool(config.get("households")),
     )
