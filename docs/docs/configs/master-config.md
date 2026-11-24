@@ -127,6 +127,8 @@ Three allocation modes are selected by which optional files are set:
 | Household-only multi-round | Set `rounds_file`; set `strategy_file: null` |
 | Single-pass (simple) | Set both `strategy_file` and `rounds_file` to `null` |
 
+**Which strategy file runs.** The `residence_allocation` timeline step's `config:` wins. `strategy_file` is only the fallback for direct `setup_households` callers. When both are set and name different files, preflight warns naming both keys and the step's file is used. A `strategy_file` that cannot be found is a problem even when a step overrides it. Either path is found with the usual lookup: as written (absolute, or relative to the working directory), then under `data_dir`. There is no default path.
+
 ---
 ---
 

@@ -24,11 +24,18 @@ from typing import Dict, List, Optional
 from may.utils.attribute_access import get_attribute
 from may.utils.age_bands import parse_age_band
 
-from .base_distributor import BaseDistributor
+from .base_distributor import BaseDistributor, check_value
 from may.population import Subset
 from may.utils import path_resolver as pr
+from pathlib import Path
+from may.preflight.report import not_list_message, not_mapping_message
 
 logger = logging.getLogger(__name__)
+
+CONSIDER_BY = ("count", "geo_unit")
+# `allocation.strategy` applies only with `consider_by: geo_unit`.
+GEO_UNIT_STRATEGIES = ("random", "closest_balanced")
+PARTICIPATION_MATCH_TYPES = ("exact", "age_range", "numerical_range")
 
 def _parse_numerical_band(label):
     """Parse a numerical band such as "1.5-3.0". None if unparseable."""
@@ -52,6 +59,66 @@ class MultiVenueDistributor(BaseDistributor):
     - Configurable age filtering
     - Distance-based venue selection with spatial indexing
     """
+
+    @classmethod
+    def _check_config(cls, config, config_path, context, report):
+        super()._check_config(config, config_path, context, report)
+        if not config.get("activity_map_key"):
+            report.problem("activity_map_key", "not set; there is no default")
+        venue_types = config.get("venue_types")
+        if not venue_types:
+            report.problem("venue_types", "not set; list the venue types to assign")
+            venue_types = []
+        elif not isinstance(venue_types, list):
+            report.problem("venue_types", not_list_message(venue_types))
+            venue_types = []
+        for position, venue_type in enumerate(venue_types, start=1):
+            cls._check_venue_type(f"venue_types[{position}]", venue_type, report)
+        venue_selection = cls._section(config, "venue_selection", report)
+        consider_by = venue_selection.get("consider_by", "count")
+        check_value("venue_selection.consider_by", consider_by, CONSIDER_BY, report)
+        strategy = cls._section(config, "allocation", report).get("strategy")
+        if consider_by == "geo_unit" and strategy not in GEO_UNIT_STRATEGIES:
+            report.problem("allocation.strategy", (
+                f"consider_by 'geo_unit' needs a strategy, one of {list(GEO_UNIT_STRATEGIES)}; got {strategy!r}"
+            ))
+        elif consider_by == "count" and strategy is not None:
+            report.problem("allocation.strategy", (
+                "applies only when venue_selection.consider_by is 'geo_unit'; remove it or change consider_by"
+            ))
+        venue_type_config = cls._section(config, "venue_type_config", report)
+        for venue_type, type_config in venue_type_config.items():
+            key = f"venue_type_config.{venue_type}"
+            if venue_type not in venue_types:
+                report.problem(key, f"{venue_type!r} is not in venue_types, so this config is never used")
+            elif not isinstance(type_config, dict):
+                report.problem(key, not_mapping_message(type_config))
+            elif "participation_filter" in type_config:
+                cls._check_participation_filter(
+                    f"{key}.participation_filter", type_config["participation_filter"], report
+                )
+
+    @classmethod
+    def _check_participation_filter(cls, key, participation_filter, report):
+        """The participation CSV exists (not opened), its rows match known ways and a column is named."""
+        if not isinstance(participation_filter, dict):
+            report.problem(key, not_mapping_message(participation_filter))
+            return
+        data_file = participation_filter.get("data_file")
+        if not data_file:
+            report.problem(f"{key}.data_file", "not set; give the participation CSV path")
+        elif not isinstance(data_file, str):
+            report.problem(f"{key}.data_file", f"must be a file path; got {data_file!r}")
+        elif not Path(pr.resolve(data_file)).exists():
+            report.problem(f"{key}.data_file", f"file not found: {data_file}")
+        probability_column = participation_filter.get("probability_column")
+        if not isinstance(probability_column, dict) or not (
+            "column_template" in probability_column or "column_name" in probability_column
+        ):
+            report.problem(f"{key}.probability_column", "needs 'column_template' or 'column_name'")
+        for position, row_filter in cls._mappings(f"{key}.row_filters", participation_filter.get("row_filters"), report):
+            check_value(f"{key}.row_filters[{position}].match_type",
+                        row_filter.get("match_type", "exact"), PARTICIPATION_MATCH_TYPES, report)
 
     def __init__(self, config_path: str = None, config_dict: dict = None):
         """

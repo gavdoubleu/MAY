@@ -41,6 +41,8 @@ class HouseholdError(Exception):
 
 
 REQUIRED_KEYS = ("data_dir", "config_file", "data_file")
+# Keys read as one file or directory path; `data_file` may also be a list of files.
+PATH_KEYS = ("data_dir", "config_file", "rules_file", "strategy_file")
 CATEGORY_KEYS = ("name", "symbol", "attribute", "type")
 CATEGORY_TYPES = ("numerical", "categorical")
 
@@ -51,6 +53,8 @@ class HouseholdConfig:
 
     ``rules_path`` is ``None`` when `rules_file` is unset (relationship rules
     disabled). ``data_file`` is carried as written; its lookup is the loader's.
+    ``strategy_path`` is the found `strategy_file`, ``None`` when unset; it is only
+    checked to exist, since the timeline step's file wins when both are set.
     """
 
     data_dir: str
@@ -59,6 +63,7 @@ class HouseholdConfig:
     rules_path: Optional[str]
     data_file: Any
     column_policy: str
+    strategy_path: Optional[str] = None
 
 
 def _find_and_load_yaml(report: PreflightReport, key: str, path: str, data_dir):
@@ -247,6 +252,14 @@ class HouseholdDistributor:
         for key in REQUIRED_KEYS:
             if not block.get(key):
                 report.problem(key, "not set; there is no default")
+        bad_path_keys = [
+            key for key in PATH_KEYS
+            if block.get(key) is not None and not isinstance(block.get(key), str)
+        ]
+        for key in bad_path_keys:
+            report.problem(key, f"must be a path; got {block[key]!r}")
+        if bad_path_keys:
+            return None, report
         data_dir = pr.resolve(block["data_dir"]) if block.get("data_dir") else None
 
         config_path = config = None
@@ -273,6 +286,15 @@ class HouseholdDistributor:
                 else:
                     rules_path = found_path
 
+        # A dead pointer is a problem even when a timeline step overrides it, so it
+        # is never left in a config to mislead the next reader.
+        strategy_path = None
+        if block.get("strategy_file"):
+            try:
+                strategy_path = pr.find_config_file(block["strategy_file"], data_dir)
+            except pr.ConfigFileNotFoundError as error:
+                report.problem("strategy_file", str(error))
+
         if report.has_problems:
             return None, report
         household_config = HouseholdConfig(
@@ -282,6 +304,7 @@ class HouseholdDistributor:
             rules_path=rules_path,
             data_file=block["data_file"],
             column_policy=block.get("column_policy", "strict"),
+            strategy_path=strategy_path,
         )
         return household_config, report
 

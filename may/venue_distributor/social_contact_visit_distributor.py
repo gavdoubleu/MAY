@@ -11,9 +11,16 @@ The activity allows disease modeling to track visits to contacts' homes.
 import logging
 from pathlib import Path
 from typing import Dict, Any
+from may.preflight.config_file import load_config_mapping
+from may.preflight.report import PreflightReport
 from may.utils.yaml_loader import load_yaml
 
+from .base_distributor import BaseDistributor, DistributorConfigError
+
 logger = logging.getLogger(__name__)
+
+# The conditions `_check_eligibility` applies; a filter with none of them passes everyone.
+FILTER_CONDITIONS = ("values", "min", "max")
 
 
 class SocialContactVisitDistributor:
@@ -27,6 +34,48 @@ class SocialContactVisitDistributor:
     This creates a derived activity where venues are determined by relationships,
     not by direct venue allocation.
     """
+
+    @staticmethod
+    def parse_config(config_path, context=None):
+        """Parse a social contact visit YAML into its config mapping, or `None` if any problem."""
+        report = PreflightReport()
+        config = load_config_mapping(config_path, report)
+        if config is None:
+            return None, report
+        # Outside the `BaseDistributor` hierarchy, but its section and list readers fit as-is.
+        source = BaseDistributor._section(config, "source", report)
+        if "property_key" in source and not source["property_key"]:
+            report.problem("source.property_key", "empty; name the person property holding contact ids")
+        max_contacts = config.get("max_contacts")
+        if max_contacts is not None and (
+            isinstance(max_contacts, bool) or not isinstance(max_contacts, int) or max_contacts < 1
+        ):
+            report.problem("max_contacts", f"must be a whole number, 1 or more; got {max_contacts!r}")
+        eligibility = BaseDistributor._section(config, "eligibility", report)
+        key = "eligibility.global_filters"
+        for position, rule in BaseDistributor._mappings(key, eligibility.get("global_filters"), report):
+            if not rule.get("attribute"):
+                report.problem(f"{key}[{position}].attribute", "not set")
+            elif not any(condition in rule for condition in FILTER_CONDITIONS):
+                report.problem(f"{key}[{position}]", (
+                    f"sets none of {list(FILTER_CONDITIONS)}, so it filters nobody out"
+                ))
+        if report.has_problems:
+            return None, report
+        return config, report
+
+    @classmethod
+    def preflight(cls, config_path, context):
+        """Check a social contact visit YAML without building anything."""
+        _, report = cls.parse_config(config_path, context)
+        return report
+
+    @classmethod
+    def from_config(cls, config_path, world_config=None):
+        """Build from a social contact visit YAML; `DistributorConfigError` on any problem."""
+        _, report = cls.parse_config(config_path)
+        report.raise_if_problems(DistributorConfigError, f"Distributor config {config_path} cannot be used.")
+        return cls(config_path)
 
     def __init__(self, config_file: str = None, config_dict: Dict = None):
         """

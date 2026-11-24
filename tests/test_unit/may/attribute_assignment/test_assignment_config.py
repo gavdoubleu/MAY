@@ -845,8 +845,6 @@ class _RawOnly:
     _parse_required_attributes = AttributeAssignmentConfig._parse_required_attributes
     _parse_attributes = AttributeAssignmentConfig._parse_attributes
     _parse_assignment_rules = AttributeAssignmentConfig._parse_assignment_rules
-    _validate_role_dependencies = AttributeAssignmentConfig._validate_role_dependencies
-    _raise_on_dependency_cycle = AttributeAssignmentConfig._raise_on_dependency_cycle
 
 
 class TestExtractRoleDependencies:

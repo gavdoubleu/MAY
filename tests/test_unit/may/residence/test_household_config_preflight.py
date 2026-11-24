@@ -55,6 +55,14 @@ def warning_lines(report):
     return [(finding.key, finding.message) for finding in report.warnings]
 
 
+@pytest.mark.parametrize("key", ["data_dir", "config_file", "rules_file", "strategy_file"])
+@pytest.mark.parametrize("value", [["a.yaml"], {"path": "a.yaml"}], ids=["list", "mapping"])
+def test_a_path_that_is_a_list_or_mapping_is_problem(write_block, key, value):
+    household_config, report = HouseholdDistributor.parse_config(write_block(**{key: value}))
+    assert household_config is None
+    assert [finding.key for finding in report.problems] == [key]
+
+
 def test_clean_block_is_parsed(write_block):
     household_config, report = HouseholdDistributor.parse_config(write_block())
     assert not report.problems and not report.warnings
@@ -394,4 +402,25 @@ def test_non_utf8_file_is_problem(write_block, working_dir):
     assert household_config is None
     assert problem_lines(report) == [
         ("config_file", "households.yaml could not be read: not UTF-8 text")
+    ]
+
+
+def test_strategy_file_unset_is_carried_as_none(write_block):
+    household_config, report = HouseholdDistributor.parse_config(write_block())
+    assert household_config.strategy_path is None
+
+
+def test_strategy_file_found_under_data_dir_is_carried(write_block, working_dir):
+    (working_dir / "data" / "strategy.yaml").write_text("steps: []\n")
+    household_config, report = HouseholdDistributor.parse_config(
+        write_block(strategy_file="strategy.yaml")
+    )
+    assert not report.problems
+    assert household_config.strategy_path == "data/strategy.yaml"
+
+
+def test_dead_strategy_file_is_problem(write_block):
+    _, report = HouseholdDistributor.parse_config(write_block(strategy_file="gone.yaml"))
+    assert problem_lines(report) == [
+        ("strategy_file", "not found; tried gone.yaml, data/gone.yaml")
     ]

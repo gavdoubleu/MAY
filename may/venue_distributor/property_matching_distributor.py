@@ -14,6 +14,22 @@ class PropertyMatchingDistributor(BaseDistributor):
     - Link people to specific workplaces using a 'company_id' property.
     """
 
+    REQUIRED_KEYS = ("mapping_key", "venue_property", "activity_name")
+
+    @classmethod
+    def _check_config(cls, config, config_path, context, report):
+        super()._check_config(config, config_path, context, report)
+        for key in cls.REQUIRED_KEYS:
+            if not config.get(key):
+                report.problem(key, "not set; there is no default")
+        # Unset means 'household', which a residence block, not the venues config, may supply.
+        target_venue_type = config.get("target_venue_type")
+        if isinstance(target_venue_type, list):
+            for position, venue_type in enumerate(target_venue_type, start=1):
+                cls._check_venue_type(f"target_venue_type[{position}]", venue_type, report)
+        elif target_venue_type is not None:
+            cls._check_venue_type("target_venue_type", target_venue_type, report)
+
     def __init__(self, config_file: str = None, config_dict: Dict = None):
         super().__init__(config_file, config_dict)
 
@@ -25,8 +41,7 @@ class PropertyMatchingDistributor(BaseDistributor):
             self.target_venue_types = list(target_type)
 
         # Required configuration; fail loud on missing keys
-        required_keys = ["mapping_key", "venue_property", "activity_name"]
-        missing_keys = [key for key in required_keys if key not in self.config]
+        missing_keys = [key for key in self.REQUIRED_KEYS if key not in self.config]
         if missing_keys:
             raise ValueError(
                 f"PropertyMatchingDistributor missing required config keys: {missing_keys}"

@@ -2,6 +2,8 @@ import logging
 import numpy as np
 from typing import Dict, List, Any, Optional
 
+from may.preflight.report import PreflightReport, not_list_message, not_mapping_message
+
 logger = logging.getLogger("may.attribute_assignment.strategies")
 
 
@@ -155,76 +157,93 @@ def _classify_then(then: Any) -> str:
 
 
 def validate_assignment_config(
-    config: Dict[str, Any], where: str = "assignment"
+    config: Dict[str, Any], report: PreflightReport, key: str = "assignment"
 ) -> None:
     """
-    Reject assignment config keys no strategy reads.
+    Report assignment config keys no strategy reads, and malformed logic blocks.
 
-    Raises:
-        ValueError: naming the unknown keys, the strategy, and the allowed
-            set, so a stale key (e.g. `context`) breaks the build at load time.
+    Findings go to `report` under `key`; logic entries are counted from 1. A stale
+    key (e.g. `context`) is a problem naming the strategy and its allowed keys.
     """
     if not isinstance(config, dict):
-        raise ValueError(
-            f"{where}: assignment must be a mapping, got {type(config).__name__}"
-        )
+        report.problem(key, not_mapping_message(config))
+        return
 
     strategy_type = config.get("strategy")
     if not strategy_type:
-        raise ValueError(f"{where}: assignment has no 'strategy' field")
+        report.problem(f"{key}.strategy", "not set; the assignment has no 'strategy' field")
+        return
 
-    allowed = STRATEGY_ALLOWED_KEYS.get(strategy_type)
+    allowed = STRATEGY_ALLOWED_KEYS.get(strategy_type) if isinstance(strategy_type, str) else None
     if allowed is None:
-        raise ValueError(
-            f"{where}: unknown strategy '{strategy_type}' "
-            f"(known: {sorted(STRATEGY_ALLOWED_KEYS)})"
-        )
+        report.problem(f"{key}.strategy", (
+            f"unknown strategy {strategy_type!r}; expected one of {sorted(STRATEGY_ALLOWED_KEYS)}"
+        ))
+        return
 
-    unknown = set(config) - allowed
-    if unknown:
-        raise ValueError(
-            f"{where}: strategy '{strategy_type}' does not read key(s) "
-            f"{sorted(unknown)} — allowed keys are {sorted(allowed)}. "
-            f"Remove them (dead config) or fix the typo."
-        )
+    for unread in sorted(set(config) - allowed):
+        report.problem(f"{key}.{unread}", (
+            f"strategy {strategy_type!r} does not read key {unread!r}; allowed keys are "
+            f"{sorted(allowed)}. Remove it (dead config) or fix the typo."
+        ))
 
     if strategy_type == "probabilistic_conditions":
         method = config.get("selection_method")
         if method is None:
-            raise ValueError(
-                f"{where}: strategy 'probabilistic_conditions' requires "
-                f"'selection_method' — declare one of "
-                f"{sorted(_CONDITION_SELECTION_METHODS)} (no implicit default)."
-            )
-        if method not in _CONDITION_SELECTION_METHODS:
-            raise ValueError(
-                f"{where}: unknown selection_method '{method}' "
-                f"(known: {sorted(_CONDITION_SELECTION_METHODS)})."
-            )
+            report.problem(f"{key}.selection_method", (
+                f"strategy 'probabilistic_conditions' requires 'selection_method'; declare one "
+                f"of {sorted(_CONDITION_SELECTION_METHODS)} (no implicit default)"
+            ))
+        elif not isinstance(method, str) or method not in _CONDITION_SELECTION_METHODS:
+            report.problem(f"{key}.selection_method", (
+                f"unknown selection_method {method!r}; expected one of "
+                f"{sorted(_CONDITION_SELECTION_METHODS)}"
+            ))
 
+    logic = config.get("logic") or []
+    if not isinstance(logic, list):
+        report.problem(f"{key}.logic", not_list_message(logic))
+        return
     is_logic_strategy = strategy_type in _LOGIC_STRATEGIES
-    for i, entry in enumerate(config.get("logic") or []):
-        entry = entry or {}
-        unknown = set(entry) - _LOGIC_ENTRY_KEYS
+    for position, entry in enumerate(logic, start=1):
+        _check_logic_entry(f"{key}.logic[{position}]", entry, is_logic_strategy, report)
+
+
+def _check_logic_entry(key, entry, is_logic_strategy, report):
+    """One `logic` entry: known keys, and for inheritance a `when`/`then` the engine reads."""
+    if not isinstance(entry, dict):
+        report.problem(key, not_mapping_message(entry))
+        return
+    unknown = set(entry) - _LOGIC_ENTRY_KEYS
+    if unknown:
+        report.problem(key, f"unknown key(s) {sorted(unknown)}; allowed: {sorted(_LOGIC_ENTRY_KEYS)}")
+    then = entry.get("then")
+    then_keys_known = True
+    if isinstance(then, dict):
+        unknown = set(then) - _THEN_BLOCK_KEYS
         if unknown:
-            raise ValueError(
-                f"{where}.logic[{i}]: unknown key(s) {sorted(unknown)} — "
-                f"allowed: {sorted(_LOGIC_ENTRY_KEYS)}"
-            )
-        then = entry.get("then")
-        if isinstance(then, dict):
-            unknown = set(then) - _THEN_BLOCK_KEYS
-            if unknown:
-                raise ValueError(
-                    f"{where}.logic[{i}].then: unknown key(s) {sorted(unknown)} — "
-                    f"allowed: {sorted(_THEN_BLOCK_KEYS)}"
-                )
-        if is_logic_strategy:
-            try:
-                _classify_when(entry.get("when"))
-                _classify_then(then)
-            except ValueError as exc:
-                raise ValueError(f"{where}.logic[{i}]: {exc}") from exc
+            then_keys_known = False
+            report.problem(f"{key}.then", (
+                f"unknown key(s) {sorted(unknown)}; allowed: {sorted(_THEN_BLOCK_KEYS)}"
+            ))
+    if not is_logic_strategy:
+        return
+    try:
+        _classify_when(entry.get("when"))
+    except ValueError as error:
+        report.problem(f"{key}.when", str(error))
+    if then_keys_known:
+        try:
+            _classify_then(then)
+        except ValueError as error:
+            report.problem(f"{key}.then", str(error))
+
+
+def raise_on_invalid_assignment(config: Dict[str, Any], where: str = "assignment") -> None:
+    """`validate_assignment_config` for code that builds from the config: `ValueError` on any problem."""
+    report = PreflightReport()
+    validate_assignment_config(config, report, where)
+    report.raise_if_problems(ValueError, f"{where}: the assignment config cannot be used.")
 
 
 class AssignmentStrategy:
@@ -1382,7 +1401,7 @@ _STRATEGIES = {
 
 def create_strategy(config: Dict[str, Any], data_manager) -> AssignmentStrategy:
     """Validate and instantiate one of the built-in assignment strategies."""
-    validate_assignment_config(config)
+    raise_on_invalid_assignment(config)
     try:
         strategy_class = _STRATEGIES[config["strategy"]]
     except KeyError:

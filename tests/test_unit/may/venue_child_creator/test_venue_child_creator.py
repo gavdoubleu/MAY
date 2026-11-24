@@ -242,9 +242,9 @@ class TestInit:
             VenueChildCreator("school", "classroom", distribution_strategy="evne")
 
 
-# Tests: from_yaml
+# Tests: from_config (problems are covered in test_venue_child_creator_preflight.py)
 
-class TestFromYaml:
+class TestFromConfig:
 
     def test_loads_required_fields(self, tmp_path):
         yaml_file = tmp_path / "test.yaml"
@@ -252,7 +252,7 @@ class TestFromYaml:
             "parent_venue_type: school\n"
             "child_venue_type: classroom\n"
         )
-        creator = VenueChildCreator.from_yaml(str(yaml_file))
+        creator = VenueChildCreator.from_config(str(yaml_file), {})
         assert creator.parent_venue_type == "school"
         assert creator.child_venue_type == "classroom"
         assert creator.child_max_size == 30  # default
@@ -280,7 +280,7 @@ class TestFromYaml:
             "    type: numerical\n"
             "    min: 18\n"
         )
-        creator = VenueChildCreator.from_yaml(str(yaml_file))
+        creator = VenueChildCreator.from_config(str(yaml_file), {})
         assert creator.group_by_attribute == "age"
         assert creator.child_max_size == 25
         assert creator.distribution_strategy == "fill"
@@ -297,7 +297,7 @@ class TestFromYaml:
             "child_venue_type: land\n"
             "exclude_subset_keys: [\"guest\"]\n"
         )
-        creator = VenueChildCreator.from_yaml(str(yaml_file))
+        creator = VenueChildCreator.from_config(str(yaml_file), {})
         assert creator.exclude_subset_keys == ["guest"]
         assert creator.include_subset_keys is None
 
@@ -1405,32 +1405,6 @@ class TestDistributionInvariants:
         for child in school.children:
             count = sum(len(s.members) for s in child.subsets.values())
             assert count > 0, f"Child {child.name} has 0 members"
-
-
-# Tests: from_yaml error handling
-
-class TestFromYamlErrorHandling:
-
-    def test_missing_parent_venue_type_raises(self, tmp_path):
-        """from_yaml with no parent_venue_type should raise KeyError."""
-        yaml_file = tmp_path / "bad.yaml"
-        yaml_file.write_text("child_venue_type: classroom\n")
-        with pytest.raises(KeyError):
-            VenueChildCreator.from_yaml(str(yaml_file))
-
-    def test_missing_child_venue_type_raises(self, tmp_path):
-        """from_yaml with no child_venue_type should raise KeyError."""
-        yaml_file = tmp_path / "bad.yaml"
-        yaml_file.write_text("parent_venue_type: school\n")
-        with pytest.raises(KeyError):
-            VenueChildCreator.from_yaml(str(yaml_file))
-
-    def test_empty_yaml_raises(self, tmp_path):
-        """from_yaml with completely empty YAML raises KeyError or TypeError."""
-        yaml_file = tmp_path / "empty.yaml"
-        yaml_file.write_text("")
-        with pytest.raises((KeyError, TypeError, AttributeError)):
-            VenueChildCreator.from_yaml(str(yaml_file))
 
 
 # Tests: attribute_mapping type-mismatch

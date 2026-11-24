@@ -3,20 +3,12 @@ import numpy as np
 from typing import Dict, List, Any, Optional
 from collections import defaultdict
 
-from .assignment_config import AttributeAssignmentConfig
+from .assignment_config import AttributeAssignmentConfig, AttributeAssignmentError
 from .data_sources import DataSourceManager
 from .strategies import create_strategy
 from may.utils.attribute_access import get_attribute
 
 logger = logging.getLogger("may.attribute_assignment.assigner")
-
-
-class AttributeAssignmentError(Exception):
-    """Raised when assignment can't complete on the given data/config. Mirrors
-    PopulationError/VenueError/HouseholdError: every eligible person is assigned
-    on complete data, or the build fails loud. A person left unassigned for any
-    reason (strategy failure, unclassifiable residence, no matching role, no
-    value) aborts the run."""
 
 
 def assign_attributes(

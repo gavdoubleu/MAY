@@ -1,16 +1,18 @@
-"""The build timeline: which step types exist, how each is resolved, and running them in order."""
+"""The build timeline: which step types exist, checking a timeline, and running its steps in order."""
 import logging
 import os
 from dataclasses import dataclass
-from typing import Callable
+from types import SimpleNamespace
+from typing import Any
 
-from may.attribute_assignment import AttributeAssignmentError
+from may.attribute_assignment import AttributeAssignmentConfig, AttributeAssignmentError
+from may.preflight.report import PreflightReport, not_list_message, not_mapping_message
+from may.residence.allocation_strategy import AllocationStrategy
 from may.residence.household_distributor import HouseholdError
 from may.utils import build_profile as bp
 from may.utils import path_resolver as pr
-from may.venue_child_creator import VenueChildCreator
-from may.venue_distributor import distributor_from_yaml
-from may.world import setup_households
+from may.venue_child_creator import VenueChildCreator, VenueChildCreatorError
+from may.venue_distributor import DistributorConfigError, distributor_from_yaml, distributor_preflight
 
 logger = logging.getLogger(__name__)
 
@@ -21,73 +23,136 @@ class TimelineError(Exception):
 
 @dataclass(frozen=True)
 class TimelineStep:
-    """What the timeline needs to run one step type.
+    """What the timeline needs to check and run one step type.
 
-    ``expected_errors`` are failures the entry point reports in its own words, so
-    they are logged without a traceback. ``config_hint`` is appended to the
-    missing-``config:`` message where the step name does not say what to point at."""
-    handler: Callable
+    ``step_class`` has ``preflight(config_path, context) -> PreflightReport`` and
+    ``from_config(config_path, world_config)``; ``run`` names the method of the built
+    object that runs the step on the world. ``expected_errors`` are failures the entry
+    point reports in its own words, so they are logged without a traceback.
+    ``config_hint`` is appended to the missing-``config:`` message where the step name
+    does not say what to point at."""
+    step_class: Any
+    run: str
     expected_errors: tuple = ()
     config_hint: str = ""
 
 
-def _allocate_residences(world, config_path, world_config):
-    """Run the allocation strategy at ``config_path``; attributes assigned by
-    earlier steps are visible to it."""
-    world.household_distributor = setup_households(
-        world.geography, world.population, world.venues, world_config,
-        strategy_file=config_path,
-    )
-
-
-def _assign_attributes(world, config_path, world_config):
-    world.assign_attributes(config_path)
-
-
-def _run_distributor(world, config_path, world_config):
-    distributor_from_yaml(config_path).allocate(world)
-
-
-def _create_venue_children(world, config_path, world_config):
-    VenueChildCreator.from_yaml(config_path).create_children(world)
+# The distributor step dispatches on `distributor_type`, so its owner is a pair of
+# module functions rather than one class.
+_DISTRIBUTOR = SimpleNamespace(preflight=distributor_preflight, from_config=distributor_from_yaml)
 
 
 TIMELINE_STEPS = {
     "residence_allocation": TimelineStep(
-        handler=_allocate_residences,
+        step_class=AllocationStrategy,
+        run="allocate",
         expected_errors=(HouseholdError,),
         config_hint=" (e.g. configs/<scenario>/households/allocation_strategy.yaml)",
     ),
     "attribute": TimelineStep(
-        handler=_assign_attributes,
+        step_class=AttributeAssignmentConfig,
+        run="assign_attributes",
         expected_errors=(AttributeAssignmentError,),
     ),
-    "distributor": TimelineStep(handler=_run_distributor),
-    "child_creator": TimelineStep(handler=_create_venue_children),
+    "distributor": TimelineStep(
+        step_class=_DISTRIBUTOR,
+        run="allocate",
+        expected_errors=(DistributorConfigError,),
+    ),
+    "child_creator": TimelineStep(
+        step_class=VenueChildCreator,
+        run="create_children",
+        expected_errors=(VenueChildCreatorError,),
+    ),
 }
 
 
-def require_config_path(owner, block, hint=""):
-    """Resolve a `config:` pointer, refusing to invent one that is not written.
-
-    A default here points every scenario at one scenario's file, and the loader then
-    reports a missing file the author never named."""
-    if not block.get("config"):
-        raise ValueError(f"{owner} must set `config:` to a YAML file{hint}.")
-    return pr.resolve(block["config"])
+@dataclass(frozen=True)
+class _ParsedStep:
+    prefix: str
+    step_type: str
+    config_path: str
 
 
-def resolve_timeline_step(step):
-    """Validate one timeline step, returning its type and resolved config path."""
-    step_type = step.get("type")
-    if step_type not in TIMELINE_STEPS:
-        raise ValueError(
-            f"Unknown timeline step type {step_type!r}; expected one of "
-            f"{sorted(TIMELINE_STEPS)}."
-        )
-    return step_type, require_config_path(
-        f"A `{step_type}` timeline step", step, TIMELINE_STEPS[step_type].config_hint
-    )
+def _parse_timeline(timeline_block, households_block_present):
+    """The runnable steps of a timeline block, with a report of its structure problems.
+
+    The one owner of the timeline's structure checks: `preflight` reports them and
+    `run_timeline` raises on them."""
+    report = PreflightReport()
+    if timeline_block is None:
+        report.problem("timeline", (
+            "not set; every config must define `timeline.enabled: true` with "
+            "`timeline.steps`, including a `residence_allocation` step when "
+            "households are enabled"
+        ))
+        return [], report
+    if not isinstance(timeline_block, dict):
+        report.problem("timeline", not_mapping_message(timeline_block))
+        return [], report
+    if not timeline_block.get("enabled", False):
+        report.problem("timeline.enabled", "must be true; every config builds its world through the timeline")
+    raw_steps = timeline_block.get("steps")
+    if raw_steps is None:
+        report.problem("timeline.steps", "not set; list at least one step")
+        return [], report
+    if not isinstance(raw_steps, list):
+        report.problem("timeline.steps", not_list_message(raw_steps))
+        return [], report
+    if not raw_steps:
+        report.problem("timeline.steps", "is empty; list at least one step")
+
+    steps = []
+    for position, raw_step in enumerate(raw_steps, start=1):
+        parsed_step = _parse_step(position, raw_step, report)
+        if parsed_step is not None:
+            steps.append(parsed_step)
+
+    # A households: block only wires data for the residence_allocation step, so
+    # a block with no step is almost always a mistake.
+    step_types = [step.get("type") for step in raw_steps if isinstance(step, dict)]
+    if households_block_present and "residence_allocation" not in step_types:
+        report.warning("households", (
+            "configured but the timeline has no 'residence_allocation' step; "
+            "households will NOT be allocated"
+        ))
+    return steps, report
+
+
+def _parse_step(position, raw_step, report):
+    """One step, or `None` with its problems in `report`."""
+    position_key = f"timeline.steps[{position}]"
+    if not isinstance(raw_step, dict):
+        report.problem(position_key, f"must be a mapping with `type:` and `config:`; got {raw_step!r}")
+        return None
+    config_file = raw_step.get("config")
+    if not isinstance(config_file, str):
+        config_file = None
+    prefix = f"{position_key} ({config_file})" if config_file else position_key
+    step_type = raw_step.get("type")
+    known_type = isinstance(step_type, str) and step_type in TIMELINE_STEPS
+    if not known_type:
+        report.problem(f"{prefix}: type", (
+            f"unknown step type {step_type!r}; expected one of {sorted(TIMELINE_STEPS)}"
+        ))
+    if not config_file:
+        hint = TIMELINE_STEPS[step_type].config_hint if known_type else ""
+        report.problem(f"{position_key}: config", f"must be set to a YAML file{hint}")
+    if not (known_type and config_file):
+        return None
+    return _ParsedStep(prefix, step_type, pr.resolve(config_file))
+
+
+def preflight(timeline_block, context):
+    """Check a timeline block and every step's config, without building anything.
+
+    Step findings are keyed `timeline.steps[N] (<file>): <key>`, N counted from 1."""
+    steps, report = _parse_timeline(timeline_block, context.households_block_present)
+    step_reports = [
+        TIMELINE_STEPS[step.step_type].step_class.preflight(step.config_path, context).under(step.prefix)
+        for step in steps
+    ]
+    return PreflightReport.merge(report, *step_reports)
 
 
 def step_label(step_type, step_config):
@@ -99,56 +164,41 @@ def step_label(step_type, step_config):
 
 
 def run_timeline(world, world_config):
-    """Run the world config's timeline steps in the order they are written."""
-    # A blank `timeline:` key loads as None.
-    timeline_config = world_config.get("timeline") or {}
-    if not (timeline_config.get("enabled", False) and timeline_config.get("steps")):
-        # Every scenario drives all events through the timeline, including an
-        # explicit `residence_allocation` step for households.
-        raise ValueError(
-            "No enabled timeline with steps found. The legacy "
-            "attributes/venue_pipeline path has been removed — every config "
-            "must define `timeline.enabled: true` with `timeline.steps`, "
-            "including an explicit `residence_allocation` step when "
-            "households are enabled."
-        )
+    """Run the world config's timeline steps in the order they are written.
+
+    Raises `TimelineError` on the same structure problems `preflight` reports, so a
+    build that skipped preflight still stops with the same named problem."""
+    steps, report = _parse_timeline(
+        world_config.get("timeline"), bool(world_config.get("households"))
+    )
+    for warning in report.warnings:
+        logger.warning(f"{warning.key}: {warning.message}")
+    try:
+        report.raise_if_problems(TimelineError, "The timeline cannot run.")
+    except TimelineError as error:
+        logger.error(str(error))
+        raise
 
     logger.info("")
     logger.info("=" * 60)
     logger.info("SIMULATION TIMELINE")
     logger.info("=" * 60)
 
-    # A households: block only wires data for the residence_allocation step, so
-    # a block with no step is almost always a mistake. Raw types are read here so
-    # an unknown type is still reported by resolution, below.
-    for position, step in enumerate(timeline_config["steps"], start=1):
-        if not isinstance(step, dict):
-            raise ValueError(
-                f"Timeline step {position} must be a mapping with `type:` and "
-                f"`config:`; got {step!r}."
-            )
-    step_types = [step.get("type") for step in timeline_config["steps"]]
-    if world_config.get("households") and "residence_allocation" not in step_types:
-        logger.warning(
-            "a households: block is configured but the timeline has no "
-            "'residence_allocation' step — households will NOT be allocated."
-        )
-
-    for step in timeline_config["steps"]:
-        step_type, config_path = resolve_timeline_step(step)
+    for step in steps:
         # Steps of one type are told apart by their config file, since a
         # timeline runs a dozen distributors through the same code path.
-        with bp.stage(step_label(step_type, config_path), step_type, detail=config_path):
+        with bp.stage(step_label(step.step_type, step.config_path), step.step_type, detail=step.config_path):
             logger.info("")
-            logger.info(f"[{step_type.replace('_', ' ').upper()}] {config_path}")
-            _run_step(TIMELINE_STEPS[step_type], step_type, config_path, world, world_config)
+            logger.info(f"[{step.step_type.replace('_', ' ').upper()}] {step.config_path}")
+            _run_step(TIMELINE_STEPS[step.step_type], step.step_type, step.config_path, world, world_config)
 
 
 def _run_step(entry, step_type, config_path, world, world_config):
-    """Run one step, raising `TimelineError` on failure. An expected error
+    """Build and run one step, raising `TimelineError` on failure. An expected error
     already says what went wrong, so only an unexpected one carries a traceback."""
     try:
-        entry.handler(world, config_path, world_config)
+        built_step = entry.step_class.from_config(config_path, world_config)
+        getattr(built_step, entry.run)(world)
     except entry.expected_errors as error:
         message = f"Timeline step {step_type!r} failed for {config_path}: {error}"
         logger.error(message)

@@ -14,11 +14,77 @@ import logging
 import math
 from collections import defaultdict
 
+from may.preflight.config_file import load_config_mapping
+from may.preflight.report import PreflightReport, not_list_message, not_mapping_message
 from may.utils.attribute_access import get_attribute
-from may.utils import path_resolver as pr
-from may.utils.yaml_loader import load_yaml
 
 logger = logging.getLogger("venue_child_creator")
+
+DISTRIBUTION_STRATEGIES = ("even", "fill")
+MEMBER_FILTER_TYPES = ("numerical", "categorical")
+REQUIRED_KEYS = ("parent_venue_type", "child_venue_type")
+# Constructor keyword -> default when the YAML leaves the key out. The constructor
+# turns `None` into a fresh empty container.
+OPTIONAL_KEYS = {
+    "group_by_attribute": None,
+    "child_max_size": 30,
+    "child_properties": None,
+    "distribution_strategy": "even",
+    "balance_by": None,
+    "attribute_mapping": None,
+    "activity_map_key": None,
+    "subset_key": None,
+    "replace_parent_activity": True,
+    "remove_from_parent": False,
+    "member_filters": None,
+    "exclude_subset_keys": None,
+    "include_subset_keys": None,
+}
+
+
+class VenueChildCreatorError(Exception):
+    """A child creator config cannot be built; the message lists every problem."""
+
+
+def _check_member_filters(member_filters, report):
+    if not isinstance(member_filters, list):
+        report.problem("member_filters", not_list_message(member_filters))
+        return
+    for position, member_filter in enumerate(member_filters, start=1):
+        filter_key = f"member_filters[{position}]"
+        if not isinstance(member_filter, dict):
+            report.problem(filter_key, not_mapping_message(member_filter))
+            continue
+        if not member_filter.get("attribute"):
+            report.problem(f"{filter_key}.attribute", "not set")
+        filter_type = member_filter.get("type", "numerical")
+        if filter_type not in MEMBER_FILTER_TYPES:
+            report.problem(f"{filter_key}.type", (
+                f"unknown filter type {filter_type!r}; expected one of {list(MEMBER_FILTER_TYPES)}"
+            ))
+
+
+def _check_settings(settings, report):
+    """Value checks on the constructor settings; venue types are checked by the caller."""
+    for key in REQUIRED_KEYS:
+        value = settings[key]
+        if value is None or value == "":
+            report.problem(key, "not set; there is no default")
+        elif not isinstance(value, str):
+            report.problem(key, f"must be a venue type name; got {value!r}")
+    strategy = settings["distribution_strategy"]
+    if strategy not in DISTRIBUTION_STRATEGIES:
+        report.problem("distribution_strategy", (
+            f"unknown strategy {strategy!r}; expected one of {list(DISTRIBUTION_STRATEGIES)}"
+        ))
+    max_size = settings["child_max_size"]
+    # bool is an int subclass, so `true` would otherwise pass as 1.
+    if isinstance(max_size, bool) or not isinstance(max_size, int) or max_size < 1:
+        report.problem("child_max_size", f"must be a whole number of at least 1; got {max_size!r}")
+    if settings["member_filters"] is not None:
+        _check_member_filters(settings["member_filters"], report)
+    if settings["exclude_subset_keys"] is not None and settings["include_subset_keys"] is not None:
+        report.problem("include_subset_keys", "cannot be set together with exclude_subset_keys")
 
 
 class VenueChildCreator:
@@ -107,14 +173,14 @@ class VenueChildCreator:
         self.exclude_subset_keys = exclude_subset_keys
         self.include_subset_keys = include_subset_keys
 
-        if distribution_strategy not in ("even", "fill"):
+        if distribution_strategy not in DISTRIBUTION_STRATEGIES:
             raise ValueError(
                 f"Unknown distribution_strategy '{distribution_strategy}'. "
                 f"Valid values: 'even', 'fill'."
             )
         for f in self.member_filters:
             ftype = f.get("type", "numerical")
-            if ftype not in ("numerical", "categorical"):
+            if ftype not in MEMBER_FILTER_TYPES:
                 raise ValueError(
                     f"Unknown member_filter type '{ftype}' for attribute "
                     f"'{f.get('attribute')}'. Valid types: 'numerical', 'categorical'."
@@ -127,50 +193,35 @@ class VenueChildCreator:
             "people_filtered_out": 0,
         }
 
+    @staticmethod
+    def parse_config(config_path):
+        """Parse a child creator YAML into constructor settings, or `None` if any problem."""
+        report = PreflightReport()
+        config = load_config_mapping(config_path, report)
+        if config is None:
+            return None, report
+        settings = {key: config.get(key) for key in REQUIRED_KEYS}
+        settings.update({key: config.get(key, default) for key, default in OPTIONAL_KEYS.items()})
+        _check_settings(settings, report)
+        if report.has_problems:
+            return None, report
+        return settings, report
+
+    @staticmethod
+    def preflight(config_path, context):
+        """Check a child creator YAML without building anything."""
+        _, report = VenueChildCreator.parse_config(config_path)
+        return report
+
     @classmethod
-    def from_yaml(cls, yaml_file):
-        """
-        Load VenueChildCreator configuration from YAML file.
-
-        Example YAML:
-        ```yaml
-        parent_venue_type: school
-        child_venue_type: classroom
-        group_by_attribute: age
-        child_max_size: 30
-        child_properties:
-          capacity: 30
-        distribution_strategy: even
-        ```
-
-        Args:
-            yaml_file: Path to YAML configuration file
-
-        Returns:
-            VenueChildCreator instance
-        """
-        yaml_file = pr.resolve(str(yaml_file))
-        logger.info(f"Loading VenueChildCreator config from {yaml_file}")
-
-        config = load_yaml(yaml_file)
-
-        instance = cls(
-            parent_venue_type=config["parent_venue_type"],
-            child_venue_type=config["child_venue_type"],
-            group_by_attribute=config.get("group_by_attribute"),
-            child_max_size=config.get("child_max_size", 30),
-            child_properties=config.get("child_properties", {}),
-            distribution_strategy=config.get("distribution_strategy", "even"),
-            balance_by=config.get("balance_by"),
-            attribute_mapping=config.get("attribute_mapping", {}),
-            activity_map_key=config.get("activity_map_key"),
-            subset_key=config.get("subset_key"),
-            replace_parent_activity=config.get("replace_parent_activity", True),
-            remove_from_parent=config.get("remove_from_parent", False),
-            member_filters=config.get("member_filters", []),
-            exclude_subset_keys=config.get("exclude_subset_keys"),
-            include_subset_keys=config.get("include_subset_keys"),
+    def from_config(cls, config_path, world_config):
+        """Build from a child creator YAML; `VenueChildCreatorError` on any problem."""
+        logger.info(f"Loading VenueChildCreator config from {config_path}")
+        settings, report = cls.parse_config(config_path)
+        report.raise_if_problems(
+            VenueChildCreatorError, f"Child creator config {config_path} cannot be used."
         )
+        instance = cls(**settings)
 
         logger.info(
             f"  Parent type: {instance.parent_venue_type} → Child type: {instance.child_venue_type}"

@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 
 import pytest
 
@@ -23,10 +24,16 @@ def keys(findings):
     return [finding.key for finding in findings]
 
 
+# Passes the timeline preflight, so tests of other blocks see only their own findings.
+CONSTANT_ATTRIBUTE = Path(__file__).parents[3] / "test_data" / "preflight" / "constant_attribute.yaml"
+VALID_TIMELINE = {"enabled": True, "steps": [{"type": "attribute", "config": str(CONSTANT_ATTRIBUTE)}]}
+
+
 def test_venue_problems_are_prefixed_with_venues(venues_dir):
     config = {
         "venues": {"data_dir": str(venues_dir), "config_file": "missing.yaml"},
         "serialization": {"enabled": False},
+        "timeline": VALID_TIMELINE,
     }
     report = check_world_config(config)
     assert keys(report.problems) == ["venues.config_file"]
@@ -34,7 +41,7 @@ def test_venue_problems_are_prefixed_with_venues(venues_dir):
 
 def test_absent_venues_block_checks_the_defaults(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    report = check_world_config({"serialization": {"enabled": False}})
+    report = check_world_config({"serialization": {"enabled": False}, "timeline": VALID_TIMELINE})
     assert keys(report.problems) == ["venues.config_file"]
     assert "venues_config.yaml" in report.problems[0].message
     assert "data/venues" in report.problems[0].message
@@ -47,6 +54,7 @@ def world_config(venues_dir, venues_yaml, serialization_path, serialization_yaml
     return {
         "venues": {"data_dir": str(venues_dir), "config_file": "venues.yaml"},
         "serialization": {"enabled": True, "config_file": str(serialization_path)},
+        "timeline": VALID_TIMELINE,
     }
 
 
@@ -176,6 +184,7 @@ def test_unreadable_schema_is_problem_even_when_venues_are_broken(venues_dir, tm
     config = {
         "venues": {"data_dir": str(venues_dir), "config_file": "missing.yaml"},
         "serialization": {"enabled": True, "config_file": str(tmp_path / "missing.yaml")},
+        "timeline": VALID_TIMELINE,
     }
     report = check_world_config(config)
     assert keys(report.problems) == ["venues.config_file", "serialization.config_file"]
@@ -199,6 +208,7 @@ def test_run_preflight_raises_on_problems_after_logging(venues_dir, caplog):
     config = {
         "venues": {"data_dir": str(venues_dir), "config_file": "missing.yaml"},
         "serialization": {"enabled": False},
+        "timeline": VALID_TIMELINE,
     }
     with caplog.at_level(logging.INFO, logger="preflight"):
         with pytest.raises(PreflightError) as raised:
@@ -218,7 +228,10 @@ def test_run_preflight_returns_report_on_warnings_only(venues_dir, tmp_path, cap
     assert caplog.records[0].getMessage() == report.format()
 
 
-RESIDENCE_TIMELINE = {"steps": [{"type": "residence_allocation"}]}
+RESIDENCE_TIMELINE = {
+    "enabled": True,
+    "steps": [{"type": "residence_allocation", "config": "allocation_strategy.yaml"}],
+}
 
 
 def households_config(venues_dir, households_block, timeline=RESIDENCE_TIMELINE):
@@ -247,8 +260,7 @@ def test_household_problems_are_prefixed_with_households(venues_dir):
 def test_households_not_checked_without_residence_step(venues_dir, timeline):
     config = households_config(venues_dir, "not a mapping", timeline=timeline)
     report = check_world_config(config)
-    assert report.problems == []
-    assert report.warnings == []
+    assert "households" not in keys(report.problems)
 
 
 def test_households_not_mapping_is_problem(venues_dir):
@@ -273,9 +285,9 @@ def test_malformed_timeline_is_problem_and_skips_households(
 ):
     config = households_config(venues_dir, "not a mapping", timeline=timeline)
     report = check_world_config(config)
-    assert [(finding.key, finding.message) for finding in report.problems] == [
-        (expected_key, expected_message)
-    ]
+    findings = [(finding.key, finding.message) for finding in report.problems]
+    assert findings.count((expected_key, expected_message)) == 1
+    assert "households" not in keys(report.problems)
 
 
 @pytest.mark.parametrize("schema_yaml", ["", "# nothing\n", "{}\n"], ids=["empty", "comment", "empty_mapping"])
@@ -309,3 +321,118 @@ def test_non_utf8_schema_is_problem(venues_dir, tmp_path):
     assert [(finding.key, finding.message) for finding in report.problems] == [
         ("serialization.config_file", f"{serialization_path} could not be read: not UTF-8 text")
     ]
+
+
+SCHOOL_VENUES = "venue_types:\n  school:\n    filename: schools.csv\n"
+
+
+def child_creator_config(venues_dir, tmp_path, venues_yaml, parent_venue_type):
+    (venues_dir / "venues.yaml").write_text(venues_yaml)
+    (venues_dir / "schools.csv").write_text("geo_unit\nA\n")
+    creator_path = tmp_path / "classrooms.yaml"
+    creator_path.write_text(f"parent_venue_type: {parent_venue_type}\nchild_venue_type: classroom\n")
+    return {
+        "venues": {"data_dir": str(venues_dir), "config_file": "venues.yaml"},
+        "serialization": {"enabled": False},
+        "timeline": {
+            "enabled": True,
+            "steps": [{"type": "child_creator", "config": str(creator_path)}],
+        },
+    }, creator_path
+
+
+def test_timeline_step_problem_is_reported_with_step_prefix(venues_dir, tmp_path):
+    config, creator_path = child_creator_config(venues_dir, tmp_path, SCHOOL_VENUES, "school")
+    creator_path.write_text("parent_venue_type: school\n")
+    report = check_world_config(config)
+    assert keys(report.problems) == [f"timeline.steps[1] ({creator_path}): child_venue_type"]
+
+
+def test_valid_child_creator_step_passes(venues_dir, tmp_path):
+    config, _ = child_creator_config(venues_dir, tmp_path, SCHOOL_VENUES, "school")
+    report = check_world_config(config)
+    assert report.problems == []
+
+
+def test_venue_type_not_in_venues_config_is_accepted(venues_dir, tmp_path):
+    """Steps create venue types at runtime, so the timeline accepts any name."""
+    disabled_school = "venue_types:\n  school:\n    enabled: false\n    filename: schools.csv\n"
+    config, _ = child_creator_config(venues_dir, tmp_path, disabled_school, "made_at_runtime")
+    report = check_world_config(config)
+    assert report.problems == []
+
+
+def test_broken_venues_and_broken_step_are_both_reported(venues_dir, tmp_path):
+    config, creator_path = child_creator_config(venues_dir, tmp_path, SCHOOL_VENUES, "school")
+    config["venues"]["config_file"] = "missing.yaml"
+    creator_path.write_text("parent_venue_type: school\n")
+    report = check_world_config(config)
+    assert keys(report.problems) == [
+        "venues.config_file",
+        f"timeline.steps[1] ({creator_path}): child_venue_type",
+    ]
+
+
+def test_absent_timeline_is_problem(venues_dir, tmp_path):
+    config, _ = child_creator_config(venues_dir, tmp_path, SCHOOL_VENUES, "school")
+    del config["timeline"]
+    report = check_world_config(config)
+    assert keys(report.problems) == ["timeline"]
+
+
+def test_households_block_without_residence_step_is_warning(venues_dir, tmp_path):
+    config, _ = child_creator_config(venues_dir, tmp_path, SCHOOL_VENUES, "school")
+    config["households"] = {"data_dir": "h"}
+    report = check_world_config(config)
+    assert report.problems == []
+    assert keys(report.warnings) == ["households"]
+
+
+STRATEGY = "steps:\n  - {name: everyone, type: household}\n"
+
+
+def residence_config(venues_dir, tmp_path, **households_overrides):
+    """A config whose households block and residence step both pass preflight."""
+    households_dir = tmp_path / "households"
+    households_dir.mkdir()
+    (households_dir / "households.yaml").write_text(
+        "categories:\n  - {name: Adults, symbol: A, attribute: age, type: numerical,"
+        " numerical: {min: 18, max: null}}\n"
+    )
+    (households_dir / "rules.yaml").write_text("enabled: true\n")
+    (households_dir / "step_strategy.yaml").write_text(STRATEGY)
+    block = {
+        "data_dir": str(households_dir), "data_file": "h.csv",
+        "config_file": "households.yaml", "rules_file": "rules.yaml",
+        **households_overrides,
+    }
+    timeline = {"enabled": True, "steps": [{"type": "residence_allocation", "config": "step_strategy.yaml"}]}
+    return households_config(venues_dir, block, timeline=timeline), households_dir
+
+
+def test_residence_step_found_under_households_data_dir_passes(venues_dir, tmp_path):
+    config, _ = residence_config(venues_dir, tmp_path)
+    report = check_world_config(config)
+    assert report.problems == [] and report.warnings == []
+
+
+def test_households_strategy_file_naming_another_file_warns_naming_both_keys(venues_dir, tmp_path):
+    config, households_dir = residence_config(venues_dir, tmp_path, strategy_file="other.yaml")
+    (households_dir / "other.yaml").write_text(STRATEGY)
+    report = check_world_config(config)
+    assert report.problems == []
+    assert keys(report.warnings) == ["timeline.steps[1] (step_strategy.yaml): config"]
+    assert "households.strategy_file" in report.warnings[0].message
+
+
+def test_dead_households_strategy_file_is_problem_even_when_a_step_overrides_it(venues_dir, tmp_path):
+    config, _ = residence_config(venues_dir, tmp_path, strategy_file="gone.yaml")
+    report = check_world_config(config)
+    assert keys(report.problems) == ["households.strategy_file"]
+
+
+def test_missing_residence_step_file_is_problem(venues_dir, tmp_path):
+    config, households_dir = residence_config(venues_dir, tmp_path)
+    (households_dir / "step_strategy.yaml").unlink()
+    report = check_world_config(config)
+    assert keys(report.problems) == ["timeline.steps[1] (step_strategy.yaml): config"]

@@ -29,10 +29,17 @@ from typing import Dict, List, Optional, Tuple, Any
 import numpy as np
 import pandas as pd
 
-from .base_distributor import BaseDistributor
+from .base_distributor import BaseDistributor, check_value, resolve_data_path
+from may.preflight.report import not_mapping_message
 from may.utils.attribute_access import get_attribute
 
 logger = logging.getLogger("route_distributor")
+
+DEFAULT_LEGS_TABLE = "data/activities/commute/route_legs.csv"
+# `_derive_key` reads any other type as a bare unit name, so a typo would route silently.
+SOURCE_TYPES = ("ancestor", "property")
+POOL_RULE_NUMBERS = ("speed_kmh", "min_duration_min", "max_duration_min")
+CATCHMENT_NUMBERS = ("max_access_km", "access_speed_kmh")
 
 
 def _slug(name: str) -> str:
@@ -43,6 +50,47 @@ def _slug(name: str) -> str:
 
 class RouteDistributor(BaseDistributor):
     """Generic route-table-driven distributor (see module docstring)."""
+
+    @classmethod
+    def _check_config(cls, config, config_path, context, report):
+        super()._check_config(config, config_path, context, report)
+        cls._check_venue_type(
+            "leg_venue_type", config.get("leg_venue_type", "transport_line"), report
+        )
+        for key in ("origin_source", "destination_source"):
+            source = config.get(key)
+            if source is None:
+                continue
+            if not isinstance(source, dict):
+                report.problem(key, not_mapping_message(source))
+                continue
+            check_value(f"{key}.type", source.get("type", "ancestor"), SOURCE_TYPES, report)
+            cls._check_geo_level(f"{key}.level", source.get("level"), context, report)
+        pool_rule = config.get("pool_rule") or None
+        if pool_rule is not None:
+            if "legs_table" in config:
+                report.problem("legs_table", "set beside pool_rule, which replaces it; remove one")
+            pool_rule = cls._section(config, "pool_rule", report)
+            cls._check_numbers("pool_rule", pool_rule, POOL_RULE_NUMBERS, report)
+            cls._check_geo_level("pool_rule.corridor_level", pool_rule.get("corridor_level"), context, report)
+        else:
+            legs_table = config.get("legs_table", DEFAULT_LEGS_TABLE)
+            if not isinstance(legs_table, str):
+                report.problem("legs_table", f"must be a file path; got {legs_table!r}")
+            elif not Path(resolve_data_path(legs_table, config_path)).exists():
+                report.problem("legs_table", f"file not found: {legs_table}")
+        if config.get("catchment"):
+            cls._check_numbers("catchment", cls._section(config, "catchment", report), CATCHMENT_NUMBERS, report)
+
+    @staticmethod
+    def _check_numbers(key, section, names, report):
+        """Each setting in `names` is required and read as a number."""
+        for name in names:
+            value = section.get(name)
+            if value is None:
+                report.problem(f"{key}.{name}", "not set; there is no default")
+            elif isinstance(value, bool) or not isinstance(value, (int, float)):
+                report.problem(f"{key}.{name}", f"must be a number; got {value!r}")
 
     def __init__(self, config_file: str = None, config_dict: Dict = None):
         super().__init__(config_file, config_dict)
@@ -108,7 +156,7 @@ class RouteDistributor(BaseDistributor):
         self.legs_table_path = None
         if self.pool_rule is None:
             self.legs_table_path = self._resolve_path(
-                c.get("legs_table", "data/activities/commute/route_legs.csv")
+                c.get("legs_table", DEFAULT_LEGS_TABLE)
             )
 
         if self.pool_rule is not None:
@@ -134,19 +182,7 @@ class RouteDistributor(BaseDistributor):
 
     # ---------------------------------------------------------------- helpers
     def _resolve_path(self, p: str) -> str:
-        from may.utils import path_resolver as pr
-
-        resolved = pr.resolve(p)
-        path = Path(resolved)
-        if path.is_absolute() or path.exists():
-            return str(path)
-        # configs/2021/distributors/foo.yaml -> project root = parent.parent.parent
-        if self.config_path is not None:
-            project_root = self.config_path.parent.parent.parent
-            candidate = project_root / resolved
-            if candidate.exists():
-                return str(candidate)
-        return str(path)
+        return resolve_data_path(p, self.config_path)
 
     def _load_legs_table(self) -> Dict[Tuple[str, str, str], List[Dict[str, Any]]]:
         """Load route_legs.csv and index by (origin_mgu, dest_mgu, mode_class)."""

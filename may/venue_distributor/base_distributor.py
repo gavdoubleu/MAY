@@ -5,6 +5,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from scipy.spatial import cKDTree
 import logging
+from may.preflight.config_file import load_config_mapping
+from may.preflight.context import PreflightContext
+from may.preflight.report import PreflightReport, not_list_message, not_mapping_message
 from may.utils import path_resolver as pr
 from may.utils.attribute_access import _compile_attribute, get_attribute
 from may.utils.yaml_loader import load_yaml
@@ -14,6 +17,35 @@ logger = logging.getLogger(__name__)
 # Of those, the ones whose values are already integers and go into an array
 # without a categorical mapping.
 _INTEGER_SLOT_ATTRIBUTES = frozenset({"age", "residence.id"})
+
+
+FILTER_TYPES = ("numerical", "categorical")
+
+
+def check_value(key, value, allowed, report):
+    """A closed-vocabulary value: anything outside `allowed` is a problem naming the valid ones.
+
+    A list or mapping is tested first, as it cannot be looked up in a set."""
+    if isinstance(value, (list, dict)) or value not in allowed:
+        report.problem(key, f"unknown value {value!r}; expected one of {sorted(allowed)}")
+
+
+def resolve_data_path(file_path, config_path):
+    """
+    Resolve portable path tokens (${data_root} etc.), then try the path
+    as-given (CWD-relative) before resolving against the project root, taken
+    as three levels above `config_path` (configs/<year>/distributors/xxx.yaml).
+    """
+    full_path = Path(pr.resolve(file_path))
+    if not full_path.is_absolute() and not full_path.exists() and config_path:
+        candidate = Path(config_path).parent.parent.parent / full_path
+        if candidate.exists():
+            full_path = candidate
+    return str(full_path)
+
+
+class DistributorConfigError(ValueError):
+    """A distributor config cannot be built; the message lists every problem."""
 
 
 class BaseDistributor:
@@ -63,6 +95,112 @@ class BaseDistributor:
         self.population_arrays = {}
         self.person_id_to_index = {}
         self.attribute_mappings = {}  # attr_name -> {value: int_index}
+
+    @classmethod
+    def parse_config(cls, config_path, context=None):
+        """Parse a distributor YAML into its config mapping, or `None` if any problem.
+
+        `context`, when given, holds the venue types and geo levels known to this step."""
+        report = PreflightReport()
+        config = load_config_mapping(config_path, report)
+        if config is None:
+            return None, report
+        cls._check_config(config, config_path, context or PreflightContext(), report)
+        if report.has_problems:
+            return None, report
+        return config, report
+
+    @classmethod
+    def _check_config(cls, config, config_path, context, report):
+        """Checks every distributor shares; subclasses extend with their own schema."""
+        venue_selection = cls._section(config, "venue_selection", report)
+        for key in ("venue_geo_level", "batch_geo_level"):
+            cls._check_geo_level(f"venue_selection.{key}", venue_selection.get(key), context, report)
+        eligibility = cls._section(config, "eligibility", report)
+        cls._check_filters("eligibility.global_filters", eligibility.get("global_filters"), report)
+        cls._check_filters(
+            "eligibility.attributes", eligibility.get("attributes"), report,
+            name_key="name", default_type=None,
+        )
+        priority = eligibility.get("priority_allocation")
+        if isinstance(priority, dict):
+            groups = priority.get("groups")
+            for position, group in cls._mappings("eligibility.priority_allocation.groups", groups, report):
+                cls._check_filters(
+                    f"eligibility.priority_allocation.groups[{position}].filters", group.get("filters"), report
+                )
+        elif priority is not None:
+            report.problem("eligibility.priority_allocation", not_mapping_message(priority))
+
+    @staticmethod
+    def _mappings(key, items, report):
+        """`(position, item)` for each mapping in a list, counted from 1; anything else is a problem."""
+        if items is None:
+            return []
+        if not isinstance(items, list):
+            report.problem(key, not_list_message(items))
+            return []
+        mappings = []
+        for position, item in enumerate(items, start=1):
+            if isinstance(item, dict):
+                mappings.append((position, item))
+            else:
+                report.problem(f"{key}[{position}]", not_mapping_message(item))
+        return mappings
+
+    @classmethod
+    def _check_filters(cls, key, filters, report, name_key="attribute", default_type="numerical"):
+        """Each filter names what it reads and has a `type` the filtering code applies."""
+        for position, rule in cls._mappings(key, filters, report):
+            rule_key = f"{key}[{position}]"
+            if not rule.get(name_key):
+                report.problem(f"{rule_key}.{name_key}", "not set")
+            rule_type = rule.get("type", default_type)
+            if rule_type not in FILTER_TYPES:
+                report.problem(f"{rule_key}.type", (
+                    f"unknown filter type {rule_type!r}; expected one of {list(FILTER_TYPES)}"
+                ))
+
+    @staticmethod
+    def _section(config, key, report):
+        """The mapping under `key`, `{}` when absent; a non-mapping is a problem and reads as `{}`."""
+        section = config.get(key)
+        if section is None:
+            return {}
+        if not isinstance(section, dict):
+            report.problem(key, not_mapping_message(section))
+            return {}
+        return section
+
+    @staticmethod
+    def _check_geo_level(key, geo_level, context, report):
+        """A geo level, when set, must be one the geography defines (skipped while unknown)."""
+        if geo_level is None or context.geo_levels is None:
+            return
+        if geo_level not in context.geo_levels:
+            report.problem(key, f"unknown geo level {geo_level!r}; expected one of {sorted(context.geo_levels)}")
+
+    @staticmethod
+    def _check_venue_type(key, venue_type, report):
+        """A venue type a distributor names: set and a name. Any name is accepted, since
+        steps (residence allocation, routes, child creators, ...) create venue types at runtime."""
+        if venue_type is None or venue_type == "":
+            report.problem(key, "not set; there is no default")
+        elif not isinstance(venue_type, str):
+            report.problem(key, f"must be a venue type name; got {venue_type!r}")
+
+    @classmethod
+    def preflight(cls, config_path, context):
+        """Check a distributor YAML without building anything."""
+        _, report = cls.parse_config(config_path, context)
+        return report
+
+    @classmethod
+    def from_config(cls, config_path, world_config=None):
+        """Build from a distributor YAML; `DistributorConfigError` on any problem."""
+        _, report = cls.parse_config(config_path)
+        report.raise_if_problems(DistributorConfigError, f"Distributor config {config_path} cannot be used.")
+        return cls(config_path)
 
     def _pre_process_filters(self, filters: List[Dict]) -> List[Dict]:
         """Pre-process filters to avoid repeated path parsing."""

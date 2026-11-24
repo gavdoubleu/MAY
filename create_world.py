@@ -15,7 +15,7 @@ from may.preflight.preflight_coordinator import run_preflight
 from may.preflight.report import PreflightError
 from may.utils import path_resolver as pr
 from may.utils import build_profile as bp
-from may.timeline import TimelineError, require_config_path, run_timeline, step_label
+from may.timeline import TimelineError, run_timeline, step_label
 #from debug_scripts.check_multiple_jobs import analyze_multiple_jobs
 
 logger = logging.getLogger("create_world")
@@ -224,7 +224,7 @@ def main(args=None):
         relationship_configs = relationship_config.get("relationships", [])
 
         for rel_config in relationship_configs:
-            config_path = require_config_path(
+            config_path = pr.require_config_path(
                 "Every `relationship_pipeline.relationships` entry", rel_config
             )
 
@@ -250,7 +250,7 @@ def main(args=None):
         logger.info("ROMANTIC RELATIONSHIPS")
         logger.info("=" * 60)
 
-        config_path = require_config_path(
+        config_path = pr.require_config_path(
             "`romantic_relationships.enabled: true`", romantic_config,
             " naming this scenario's romantic-relationships YAML",
         )

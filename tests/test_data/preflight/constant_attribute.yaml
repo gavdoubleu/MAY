@@ -1,0 +1,12 @@
+# Smallest attribute config that passes preflight: one constant attribute, no data files.
+attributes:
+  - name: flag
+step:
+  assignment_level: person
+assignment_rules:
+  person:
+    rules:
+      - role: anyone
+        assignment:
+          strategy: constant
+          value: true

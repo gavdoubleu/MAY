@@ -43,6 +43,16 @@ def resolve(path: str) -> str:
     return _resolver.resolve(path)
 
 
+def require_config_path(owner, block, hint=""):
+    """Resolve a `config:` pointer, refusing to invent one that is not written.
+
+    A default here points every scenario at one scenario's file, and the loader then
+    reports a missing file the author never named."""
+    if not block.get("config"):
+        raise ValueError(f"{owner} must set `config:` to a YAML file{hint}.")
+    return resolve(block["config"])
+
+
 class ConfigFileNotFoundError(FileNotFoundError):
     """Config file not found at any tried location. Message omits the config key; caller adds it."""
 

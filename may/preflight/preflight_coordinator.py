@@ -5,8 +5,10 @@ from typing import Optional
 
 import yaml
 
+from may import timeline
 from may.geography.venue_manager import VenueConfig, VenueManager
-from may.preflight.report import PreflightError, PreflightReport, not_list_message, not_mapping_message
+from may.preflight.context import PreflightContext
+from may.preflight.report import PreflightError, PreflightReport, not_mapping_message
 from may.residence.household_distributor import HouseholdDistributor
 from may.serialization.preflight import venue_property_gaps
 from may.utils import path_resolver as pr
@@ -24,16 +26,17 @@ def check_world_config(config: dict) -> PreflightReport:
     serialization_block = _mapping_block(config, "serialization", block_report)
     households_block = (
         _mapping_block(config, "households", block_report)
-        if _has_residence_step(config, block_report)
+        if _has_residence_step(config)
         else None
     )
     venue_config = None
+    household_config = None
     report = block_report
     if venues_block is not None:
         venue_config, venue_report = VenueManager.parse_config(venues_block)
         report = PreflightReport.merge(report, venue_report.under("venues", sep="."))
     if households_block is not None:
-        _, household_report = HouseholdDistributor.parse_config(households_block)
+        household_config, household_report = HouseholdDistributor.parse_config(households_block)
         report = PreflightReport.merge(
             report, household_report.under("households", sep=".")
         )
@@ -46,7 +49,11 @@ def check_world_config(config: dict) -> PreflightReport:
         report = PreflightReport.merge(
             report, _venue_property_gap_report(*loaded_schema, venue_config)
         )
-    return report
+    context = PreflightContext(
+        households=household_config,
+        households_block_present=bool(config.get("households")),
+    )
+    return PreflightReport.merge(report, timeline.preflight(config.get("timeline"), context))
 
 
 def run_preflight(config: dict) -> PreflightReport:
@@ -58,21 +65,13 @@ def run_preflight(config: dict) -> PreflightReport:
     return report
 
 
-def _has_residence_step(config: dict, report: PreflightReport) -> bool:
+def _has_residence_step(config: dict) -> bool:
     """Whether the timeline allocates residences, the only reader of `households`.
 
-    A malformed `timeline` or `timeline.steps` is a problem in `report`, and `False`.
-    """
-    timeline = _mapping_block(config, "timeline", report)
-    if timeline is None:
-        return False
-    steps = timeline.get("steps")
-    if steps is None:
-        return False
-    if not isinstance(steps, list):
-        report.problem("timeline.steps", not_list_message(steps))
-        return False
-    return any(
+    A malformed timeline is `False`; the timeline preflight reports it."""
+    timeline_block = config.get("timeline")
+    steps = timeline_block.get("steps") if isinstance(timeline_block, dict) else None
+    return isinstance(steps, list) and any(
         isinstance(step, dict) and step.get("type") == "residence_allocation"
         for step in steps
     )

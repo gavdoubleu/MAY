@@ -21,9 +21,9 @@ Usage:
     )
 """
 
-from .assignment_config import AttributeAssignmentConfig
+from .assignment_config import AttributeAssignmentConfig, AttributeAssignmentError
 from .strategies import create_strategy
-from .assigner import AttributeAssigner, AttributeAssignmentError, assign_attributes
+from .assigner import AttributeAssigner, assign_attributes
 
 __all__ = [
     "AttributeAssignmentConfig",

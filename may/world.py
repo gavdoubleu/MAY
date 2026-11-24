@@ -315,7 +315,7 @@ def setup_households(geo, population, venues, config, strategy_file=None):
     # The strategy file comes from the residence_allocation timeline step;
     # fall back to the households block only for direct programmatic callers.
     if strategy_file is None and households_block.get("strategy_file"):
-        strategy_file = pr.resolve(households_block.get("strategy_file"))
+        strategy_file = households_block.get("strategy_file")
 
     if strategy_file:
         # Mode 1: Unified strategy (households + venues in order)

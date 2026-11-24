@@ -1,0 +1,5 @@
+# Smallest allocation strategy that passes preflight: one household build step.
+enabled: true
+steps:
+  - name: everyone
+    type: household

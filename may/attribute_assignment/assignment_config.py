@@ -15,7 +15,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from functools import lru_cache
 from may.residence.composition_pattern import CompositionPattern
-from may.attribute_assignment.strategies import validate_assignment_config
+from may.attribute_assignment.strategies import (
+    raise_on_invalid_assignment,
+    validate_assignment_config,
+)
+from may.preflight.config_file import load_config_mapping
+from may.preflight.context import PreflightContext
+from may.preflight.report import PreflightReport, not_list_message, not_mapping_message
 from may.utils import path_resolver as pr
 from may.utils.yaml_loader import load_yaml
 
@@ -350,6 +356,83 @@ def _extract_role_dependencies(assignment: Dict[str, Any]) -> List[str]:
     return deps
 
 
+def role_dependency_problems(rules) -> List[str]:
+    """
+    Unorderable cross-role references in one structure, as messages.
+
+    `rules` is `(role, dependencies)` pairs, `role` a name or list of names. Every
+    dependency must name a role defined in this structure (else it is a typo), and
+    the role-level dependency graph must be acyclic (else no assignment order can
+    satisfy it). A role defined here that simply has no member in a given household
+    is fine: that is handled quietly at assignment time, not a structural error.
+    """
+    def role_names(role):
+        return [name for name in (role if isinstance(role, list) else [role]) if name is not None]
+
+    defined_roles = set()
+    for role, _ in rules:
+        defined_roles.update(role_names(role))
+
+    problems = []
+    edges = defaultdict(set)
+    for role, dependencies in rules:
+        for dependency in dependencies:
+            if dependency not in defined_roles:
+                problems.append(
+                    f"rule for role {role!r} references undefined role {dependency!r}. "
+                    f"A cross-role reference (inherit_from/partner_role/exclude) must "
+                    f"name a role defined in this structure."
+                )
+                continue
+            for name in role_names(role):
+                if name != dependency:
+                    edges[name].add(dependency)
+
+    cycle = _dependency_cycle(defined_roles, edges)
+    if cycle:
+        problems.append(
+            f"cross-role references form a cycle ({' -> '.join(cycle)}); no assignment "
+            f"order can satisfy them."
+        )
+    return problems
+
+
+def _dependency_cycle(roles: set, edges: Dict[str, set]) -> Optional[List[str]]:
+    """One cycle in the role dependency graph, as a closed path, or `None`."""
+    unvisited, in_progress, finished = 0, 1, 2
+    state = {role: unvisited for role in roles}
+    path: List[str] = []
+
+    def visit(role: str) -> Optional[List[str]]:
+        state[role] = in_progress
+        path.append(role)
+        for dependency in sorted(edges.get(role, ())):
+            if state[dependency] == in_progress:
+                return path[path.index(dependency):] + [dependency]
+            if state[dependency] == unvisited:
+                cycle = visit(dependency)
+                if cycle:
+                    return cycle
+        path.pop()
+        state[role] = finished
+        return None
+
+    for role in sorted(roles):
+        if state[role] == unvisited:
+            cycle = visit(role)
+            if cycle:
+                return cycle
+    return None
+
+
+class AttributeAssignmentError(Exception):
+    """Raised when assignment can't complete on the given data/config. Mirrors
+    PopulationError/VenueError/HouseholdError: every eligible person is assigned
+    on complete data, or the build fails loud. A person left unassigned for any
+    reason (strategy failure, unclassifiable residence, no matching role, no
+    value) aborts the run."""
+
+
 class AttributeAssignmentConfig:
     """
     Configuration loader for attribute assignment.
@@ -565,7 +648,7 @@ class AttributeAssignmentConfig:
             for i, rule_data in enumerate(struct_rules_data.get("rules", [])):
                 assignment_data = rule_data.get("assignment", {})
                 # Fail loudly on keys no strategy reads (dead config / typos).
-                validate_assignment_config(
+                raise_on_invalid_assignment(
                     assignment_data,
                     where=f"{self.config_path.name}: assignment_rules."
                     f"{structure_name}.rules[{i}]",
@@ -590,7 +673,12 @@ class AttributeAssignmentConfig:
 
             # Ordering failures fail loud at load: a reference to an undefined role
             # is a typo, a cycle is genuinely unorderable.
-            self._validate_role_dependencies(structure_name, rules)
+            for message in role_dependency_problems(
+                [(rule.role, rule.dependencies) for rule in rules]
+            ):
+                raise ValueError(
+                    f"{self.config_path.name}: assignment_rules.{structure_name}: {message}"
+                )
 
             structure_rules[structure_name] = StructureAssignmentRules(
                 structure_name=structure_name,
@@ -600,76 +688,11 @@ class AttributeAssignmentConfig:
 
         return structure_rules
 
-    def _validate_role_dependencies(
-        self, structure_name: str, rules: List[AssignmentRule]
-    ) -> None:
-        """
-        Reject unorderable cross-role references in one structure.
-
-        Every dependency derived by `_extract_role_dependencies` must name a role
-        defined in this structure (else it is a typo), and the role-level
-        dependency graph must be acyclic (else no assignment order can satisfy it).
-        A role defined here that simply has no member in a given household is fine
-        — that is handled quietly at assignment time, not a structural error.
-        """
-        defined_roles = set()
-        for rule in rules:
-            roles = rule.role if isinstance(rule.role, list) else [rule.role]
-            defined_roles.update(r for r in roles if r is not None)
-
-        # Build role -> {roles it must follow}, validating each reference exists.
-        edges = defaultdict(set)
-        for rule in rules:
-            roles = rule.role if isinstance(rule.role, list) else [rule.role]
-            for dep in rule.dependencies:
-                if dep not in defined_roles:
-                    raise ValueError(
-                        f"{self.config_path.name}: assignment_rules.{structure_name}: "
-                        f"rule for role {rule.role!r} references undefined role "
-                        f"{dep!r}. A cross-role reference "
-                        f"(inherit_from/partner_role/exclude) must name a role "
-                        f"defined in this structure."
-                    )
-                for role in roles:
-                    if role is not None and role != dep:
-                        edges[role].add(dep)
-
-        self._raise_on_dependency_cycle(structure_name, defined_roles, edges)
-
-    def _raise_on_dependency_cycle(
-        self, structure_name: str, roles: set, edges: Dict[str, set]
-    ) -> None:
-        """Raise if the role dependency graph has a cycle."""
-        WHITE, GRAY, BLACK = 0, 1, 2
-        color = {role: WHITE for role in roles}
-        path: List[str] = []
-
-        def visit(role: str) -> None:
-            color[role] = GRAY
-            path.append(role)
-            for dep in edges.get(role, ()):
-                if color[dep] == GRAY:
-                    cycle = path[path.index(dep) :] + [dep]
-                    raise ValueError(
-                        f"{self.config_path.name}: assignment_rules."
-                        f"{structure_name}: cross-role references form a cycle "
-                        f"({' -> '.join(cycle)}); no assignment order can satisfy "
-                        f"them."
-                    )
-                if color[dep] == WHITE:
-                    visit(dep)
-            path.pop()
-            color[role] = BLACK
-
-        for role in roles:
-            if color[role] == WHITE:
-                visit(role)
-
     def _parse_venue_assignment_rules(self) -> List[Dict[str, Any]]:
         """Parse venue assignment rules."""
         rules = self.raw_config.get("venue_assignment_rules", [])
         for i, rule in enumerate(rules):
-            validate_assignment_config(
+            raise_on_invalid_assignment(
                 (rule or {}).get("assignment", {}),
                 where=f"{self.config_path.name}: venue_assignment_rules[{i}]",
             )
@@ -953,3 +976,264 @@ class AttributeAssignmentConfig:
     def from_yaml(cls, config_path: Path) -> "AttributeAssignmentConfig":
         """Load configuration from YAML file."""
         return cls(config_path)
+
+    @classmethod
+    def parse_config(cls, config_path, context=None):
+        """Parse an attribute YAML into its mapping, or `None` if any problem.
+
+        Data files are checked to exist, never opened. `context`, when given, holds
+        the geo levels known to this step."""
+        report = PreflightReport()
+        config = load_config_mapping(config_path, report)
+        if config is None:
+            return None, report
+        _check_config(config, context or PreflightContext(), report)
+        if report.has_problems:
+            return None, report
+        return config, report
+
+    @classmethod
+    def preflight(cls, config_path, context):
+        """Check an attribute YAML without loading its data."""
+        _, report = cls.parse_config(config_path, context)
+        return report
+
+    @classmethod
+    def from_config(cls, config_path, world_config=None):
+        """Build from an attribute YAML; `AttributeAssignmentError` on any problem."""
+        _, report = cls.parse_config(config_path)
+        report.raise_if_problems(
+            AttributeAssignmentError, f"Attribute config {config_path} cannot be used."
+        )
+        return cls(config_path)
+
+    def assign_attributes(self, world):
+        """Assign this config's attributes to everyone in `world`."""
+        world.assign_attributes(str(self.config_path))
+
+
+ASSIGNMENT_LEVELS = ("person", "person_by_residence")
+DATA_SOURCE_TYPES = ("csv_lookup", "constant")
+# Kept in step with `DataSourceManager._CSV_FORMATS`, which owns the format classes.
+CSV_FORMATS = (
+    "geo_distribution", "diversity", "pair", "multi_key", "origin_destination_matrix", "gu_sampler",
+)
+
+
+def _check_config(config, context, report):
+    """Every check an attribute YAML gets before its data is loaded."""
+    _check_attributes(config, report)
+    step = config.get("step")
+    if step is not None and not isinstance(step, dict):
+        report.problem("step", not_mapping_message(step))
+    elif step:
+        level = step.get("assignment_level", "person_by_residence")
+        if level not in ASSIGNMENT_LEVELS:
+            report.problem("step.assignment_level", (
+                f"unknown value {level!r}; expected one of {list(ASSIGNMENT_LEVELS)}"
+            ))
+    _named_entries("required_attributes", config.get("required_attributes"), report)
+    source_names = _check_data_sources(config.get("data_sources"), context, report)
+    _check_assignment_rules(config.get("assignment_rules"), source_names, report)
+    for position, rule in _mappings("venue_assignment_rules", config.get("venue_assignment_rules"), report):
+        _check_assignment(
+            f"venue_assignment_rules[{position}].assignment", rule.get("assignment", {}), source_names, report
+        )
+
+
+def _check_attributes(config, report):
+    if "attribute" in config:
+        report.problem("attribute", (
+            "the top-level 'attribute:' block is retired. Declare the produced attribute(s) "
+            "as an 'attributes:' list and step config under 'step:'."
+        ))
+    attributes = config.get("attributes")
+    if not attributes or not isinstance(attributes, list):
+        report.problem("attributes", (
+            "needs a list declaring the produced attribute(s), e.g. "
+            "`attributes:\\n  - name: ethnicity`"
+        ))
+        return
+    _named_entries("attributes", attributes, report)
+
+
+def _mappings(key, items, report):
+    """`(position, item)` for each mapping in a list, counted from 1; anything else is a problem."""
+    if items is None:
+        return []
+    if not isinstance(items, list):
+        report.problem(key, not_list_message(items))
+        return []
+    mappings = []
+    for position, item in enumerate(items, start=1):
+        if isinstance(item, dict):
+            mappings.append((position, item))
+        else:
+            report.problem(f"{key}[{position}]", not_mapping_message(item))
+    return mappings
+
+
+def _named_entries(key, items, report):
+    """`_mappings`, each of which must carry a `name`."""
+    entries = _mappings(key, items, report)
+    for position, entry in entries:
+        if not entry.get("name"):
+            report.problem(f"{key}[{position}].name", "not set")
+    return entries
+
+
+def _section(key, section, report):
+    """The mapping under `key`, `{}` when absent; a non-mapping is a problem and reads as `{}`."""
+    if section is None:
+        return {}
+    if not isinstance(section, dict):
+        report.problem(key, not_mapping_message(section))
+        return {}
+    return section
+
+
+def _check_data_sources(data_sources, context, report):
+    """Each source's type, format and files; the declared source names (`None` if unreadable)."""
+    if data_sources is not None and not isinstance(data_sources, dict):
+        report.problem("data_sources", not_mapping_message(data_sources))
+        return None
+    data_sources = data_sources or {}
+    for name, source in data_sources.items():
+        key = f"data_sources.{name}"
+        if not isinstance(source, dict):
+            report.problem(key, not_mapping_message(source))
+            continue
+        source_type = source.get("type", "csv_lookup")
+        if source_type not in DATA_SOURCE_TYPES:
+            report.problem(f"{key}.type", (
+                f"unknown value {source_type!r}; expected one of {list(DATA_SOURCE_TYPES)}"
+            ))
+            continue
+        if source_type == "constant":
+            continue
+        data_format = source.get("format")
+        if data_format not in CSV_FORMATS:
+            report.problem(f"{key}.format", (
+                f"needs an explicit format, one of {sorted(CSV_FORMATS)}; got {data_format!r}"
+            ))
+        for position, file_config in _mappings(f"{key}.files", source.get("files"), report):
+            _check_data_file(f"{key}.files[{position}]", file_config, context, report)
+    return set(data_sources)
+
+
+def _check_data_file(key, file_config, context, report):
+    """A data file exists (not opened) and the geo levels it names are known."""
+    path = file_config.get("path")
+    if not path:
+        report.problem(f"{key}.path", "not set")
+    elif not Path(pr.resolve(str(path))).exists():
+        report.problem(f"{key}.path", f"data file not found: {pr.resolve(str(path))}")
+    level_keys = [("destination_level", file_config.get("destination_level"))]
+    unit_column = file_config.get("geographical_unit_column")
+    if isinstance(unit_column, dict):
+        level_keys.append(("geographical_unit_column.level", unit_column.get("level")))
+    key_columns = file_config.get("key_columns")
+    if isinstance(key_columns, dict):
+        for column, column_config in key_columns.items():
+            if isinstance(column_config, dict):
+                level_keys.append((f"key_columns.{column}.level", column_config.get("level")))
+    for level_key, level in level_keys:
+        _check_geo_level(f"{key}.{level_key}", level, context, report)
+
+
+def _check_geo_level(key, geo_level, context, report):
+    """A geo level, when set, must be one the geography defines (skipped while unknown)."""
+    if geo_level is None or context.geo_levels is None:
+        return
+    if geo_level not in context.geo_levels:
+        report.problem(key, f"unknown geo level {geo_level!r}; expected one of {sorted(context.geo_levels)}")
+
+
+def _check_assignment_rules(assignment_rules, source_names, report):
+    """Each structure's rule assignments, then whether its cross-role references can be ordered."""
+    for structure_name, structure in _section("assignment_rules", assignment_rules, report).items():
+        structure_key = f"assignment_rules.{structure_name}"
+        if not isinstance(structure, dict):
+            report.problem(structure_key, not_mapping_message(structure))
+            continue
+        problems_before = len(report.problems)
+        rules = _mappings(f"{structure_key}.rules", structure.get("rules", []), report)
+        for position, rule in rules:
+            _check_assignment(
+                f"{structure_key}.rules[{position}].assignment", rule.get("assignment", {}), source_names, report
+            )
+            _check_role_references(f"{structure_key}.rules[{position}]", rule, report)
+        # A malformed assignment has no dependable references, so ordering is not
+        # checked on top of it.
+        if len(report.problems) > problems_before:
+            continue
+        role_dependencies = [
+            (rule.get("role"), set(_extract_role_dependencies(rule.get("assignment", {}))))
+            for _, rule in rules
+        ]
+        for message in role_dependency_problems(role_dependencies):
+            report.problem(structure_key, message)
+
+
+def _check_role_name(key, name, report):
+    """A role reference must be a name; a list or mapping cannot be ordered or looked up."""
+    if name is not None and not isinstance(name, str):
+        report.problem(key, f"must be a role name; got {name!r}")
+
+
+def _check_role_references(rule_key, rule, report):
+    """The rule's `role` and every role its assignment reads are names (or a list of names)."""
+    role = rule.get("role")
+    if isinstance(role, list):
+        for position, name in enumerate(role, start=1):
+            _check_role_name(f"{rule_key}.role[{position}]", name, report)
+    else:
+        _check_role_name(f"{rule_key}.role", role, report)
+    assignment = rule.get("assignment")
+    if not isinstance(assignment, dict):
+        return
+    key = f"{rule_key}.assignment"
+    _check_role_name(f"{key}.partner_role", assignment.get("partner_role"), report)
+    inherit_from = assignment.get("inherit_from")
+    if isinstance(inherit_from, dict):
+        _check_role_name(f"{key}.inherit_from.role", inherit_from.get("role"), report)
+        roles = inherit_from.get("roles")
+        if isinstance(roles, list):
+            for position, name in enumerate(roles, start=1):
+                _check_role_name(f"{key}.inherit_from.roles[{position}]", name, report)
+        elif "roles" in inherit_from:
+            report.problem(f"{key}.inherit_from.roles", f"must be a list of role names; got {roles!r}")
+    logic = assignment.get("logic")
+    for position, entry in enumerate(logic if isinstance(logic, list) else [], start=1):
+        then = entry.get("then") if isinstance(entry, dict) else None
+        exclude = then.get("exclude") if isinstance(then, dict) else None
+        if isinstance(exclude, list):
+            for exclude_position, reference in enumerate(exclude, start=1):
+                if not isinstance(reference, str):
+                    report.problem(f"{key}.logic[{position}].then.exclude[{exclude_position}]", (
+                        f"must be a 'role.attribute' reference; got {reference!r}"
+                    ))
+        elif exclude is not None:
+            report.problem(f"{key}.logic[{position}].then.exclude", (
+                f"must be a list of 'role.attribute' references; got {exclude!r}"
+            ))
+
+
+def _check_assignment(key, assignment, source_names, report):
+    """One assignment block, and that each `data_source` it names is declared."""
+    problems_before = len(report.problems)
+    validate_assignment_config(assignment, report, key)
+    if len(report.problems) > problems_before or source_names is None:
+        return
+    named_sources = [(f"{key}.data_source", assignment.get("data_source"))]
+    for position, entry in enumerate(assignment.get("logic") or [], start=1):
+        then = entry.get("then")
+        if isinstance(then, dict):
+            named_sources.append((f"{key}.logic[{position}].then.data_source", then.get("data_source")))
+    for source_key, source_name in named_sources:
+        if source_name is not None and not isinstance(source_name, str):
+            report.problem(source_key, f"must be a data source name; got {source_name!r}")
+        elif source_name is not None and source_name not in source_names:
+            report.problem(source_key, (
+                f"unknown data source {source_name!r}; declared: {sorted(source_names)}"
+            ))

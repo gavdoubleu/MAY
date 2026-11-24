@@ -8,22 +8,170 @@ import csv
 import os
 import logging
 import operator
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 from .venue_allocator import _allocate_to_venue_type
 from .household_distributor import HouseholdError
 from .composition_pattern import CompositionPattern
+from may.preflight.config_file import load_config_mapping
+from may.preflight.report import PreflightReport, not_list_message, not_mapping_message
 from may.utils import path_resolver as pr
-from may.utils.yaml_loader import load_yaml
 from may.utils import build_profile as bp
 
 logger = logging.getLogger("allocation_strategy")
+
+
+STEP_TYPES = (
+    "household",
+    "venue",
+    "household_excess",
+    "household_overflow",
+    "household_promotion",
+)
+
+
+@dataclass(frozen=True)
+class ParsedStrategy:
+    """A checked allocation-strategy YAML: the path it was found at and its mapping."""
+
+    path: str
+    config: Dict
+
+
+class AllocationStrategy:
+    """The `residence_allocation` timeline step: one allocation-strategy YAML.
+
+    The file is found with `find_config_file(path, households.data_dir)`; there is no
+    default path. When `households.strategy_file` names another file, the step's file
+    wins and preflight warns."""
+
+    def __init__(self, strategy_path: str, world_config: dict):
+        self.strategy_path = strategy_path
+        self.world_config = world_config
+
+    @staticmethod
+    def parse_config(config_path, data_dir=None):
+        """Parse a strategy YAML into a `ParsedStrategy`, or `None` if any problem.
+
+        Checks need no household data: the vocabulary-dependent pattern checks run
+        when the strategy executes. The mixture file is checked to exist, never opened."""
+        report = PreflightReport()
+        try:
+            found_path = pr.find_config_file(config_path, data_dir)
+        except pr.ConfigFileNotFoundError as error:
+            report.problem("config", str(error))
+            return None, report
+        config = load_config_mapping(found_path, report)
+        if config is None:
+            return None, report
+        _check_strategy(config, report)
+        if report.has_problems:
+            return None, report
+        return ParsedStrategy(found_path, config), report
+
+    @classmethod
+    def preflight(cls, config_path, context):
+        """Check a strategy YAML. Skipped when the `households` block failed, since
+        its `data_dir` is where the file may live."""
+        household_config = context.households
+        if household_config is None:
+            return PreflightReport()
+        parsed, report = cls.parse_config(config_path, household_config.data_dir)
+        overridden = household_config.strategy_path
+        if parsed is not None and overridden and not _same_file(overridden, parsed.path):
+            report.warning("config", (
+                f"names {parsed.path} but `households.strategy_file` names {overridden}; "
+                "the step's file is used"
+            ))
+        return report
+
+    @classmethod
+    def from_config(cls, config_path, world_config):
+        """Build from a strategy YAML; `HouseholdError` on any problem."""
+        parsed, report = cls.parse_config(config_path, _households_data_dir(world_config))
+        report.raise_if_problems(
+            HouseholdError, f"Allocation strategy {config_path} cannot be used."
+        )
+        return cls(parsed.path, world_config)
+
+    def allocate(self, world):
+        """Set up households and run this strategy; attributes assigned by earlier
+        steps are visible to it."""
+        # Imported here: may.world imports this module.
+        from may.world import setup_households
+
+        world.household_distributor = setup_households(
+            world.geography, world.population, world.venues, self.world_config,
+            strategy_file=self.strategy_path,
+        )
+
+
+def _households_data_dir(world_config):
+    block = (world_config or {}).get("households") or {}
+    return pr.resolve(block["data_dir"]) if block.get("data_dir") else None
+
+
+def _same_file(first, second):
+    return os.path.realpath(first) == os.path.realpath(second)
+
+
+def _check_strategy(config, report):
+    """Every check a strategy YAML gets before household data is loaded. A disabled
+    strategy is never run, so its steps and mixture are not checked."""
+    if not config.get("enabled", True):
+        return
+    steps = config.get("steps")
+    if not steps:
+        report.warning("steps", "no allocation steps; nothing will be allocated")
+        steps = []
+    elif not isinstance(steps, list):
+        report.problem("steps", not_list_message(steps))
+        return
+    for position, step in enumerate(steps, start=1):
+        step_key = f"steps[{position}]"
+        if not isinstance(step, dict):
+            report.problem(step_key, not_mapping_message(step))
+            continue
+        if step.get("type") not in STEP_TYPES:
+            report.problem(
+                f"{step_key}.type",
+                f"unknown step type {step.get('type')!r}; expected one of {list(STEP_TYPES)}",
+            )
+    _check_mixture(config.get("mixture"), steps, report)
+
+
+def _check_mixture(mixture, steps, report):
+    interpretation_steps = [
+        step.get("name", "household") for step in steps
+        if isinstance(step, dict) and step.get("type") == "household"
+        and step.get("interpretation") is not None
+    ]
+    if mixture is None:
+        if interpretation_steps:
+            report.problem("mixture", (
+                f"not set; step(s) {interpretation_steps} use 'interpretation', "
+                "which needs a 'mixture:' block declaring the shares file"
+            ))
+        return
+    if not isinstance(mixture, dict):
+        report.problem("mixture", not_mapping_message(mixture))
+        return
+    if not mixture.get("file"):
+        report.problem("mixture.file", "not set")
+        return
+    if not isinstance(mixture["file"], str):
+        report.problem("mixture.file", f"must be a file path; got {mixture['file']!r}")
+        return
+    path = pr.resolve(mixture["file"])
+    if not os.path.exists(path):
+        report.problem("mixture.file", f"{path} not found")
 
 
 def execute_allocation_strategy(
     population,
     venues,
     household_distributor,
-    strategy_file: str = "data/households/allocation_strategy.yaml",
+    strategy_file: str,
 ):
     """
     Execute a unified allocation strategy from YAML configuration.
@@ -35,25 +183,27 @@ def execute_allocation_strategy(
         population: PopulationManager
         venues: VenueManager
         household_distributor: HouseholdDistributor
-        strategy_file (str, optional): Path to YAML strategy file (relative or absolute). Default is "data/households/allocation_strategy.yaml".
+        strategy_file (str): Path to the YAML strategy file, found with
+            `find_config_file(strategy_file, household_distributor.data_dir)`.
 
     Returns:
         dict: Complete statistics for all steps
 
+    Raises:
+        HouseholdError: the file is missing or fails `AllocationStrategy.parse_config`.
     """
     logger.info("=" * 60)
     logger.info("Executing Unified Allocation Strategy")
     logger.info("=" * 60)
 
-    # Resolve template variables, then fall back to data/ prefix for bare relative paths
-    strategy_file = pr.resolve(strategy_file)
-    if not os.path.isabs(strategy_file):
-        if not os.path.exists(strategy_file):
-            strategy_file = f"data/{strategy_file}"
-
-    # Load strategy configuration
-    logger.info(f"Loading allocation strategy from {strategy_file}")
-    strategy = load_yaml(strategy_file)
+    parsed, report = AllocationStrategy.parse_config(
+        strategy_file, household_distributor.data_dir
+    )
+    report.raise_if_problems(
+        HouseholdError, f"Allocation strategy {strategy_file} cannot be used."
+    )
+    logger.info(f"Loading allocation strategy from {parsed.path}")
+    strategy = parsed.config
 
     # Check if enabled
     if not strategy.get("enabled", True):
@@ -61,7 +211,7 @@ def execute_allocation_strategy(
         return {}
 
     # Get steps
-    steps = strategy.get("steps", [])
+    steps = strategy.get("steps") or []
     if not steps:
         logger.warning("No allocation steps defined in strategy")
         return {}
@@ -84,18 +234,6 @@ def execute_allocation_strategy(
     for step_config in steps:
         step_type = step_config.get("type")
         step_name = step_config.get("name", f"Step {step_number}")
-
-        if step_type not in [
-            "household",
-            "venue",
-            "household_excess",
-            "household_overflow",
-            "household_promotion",
-        ]:
-            logger.warning(
-                f"Unknown step type '{step_type}' for step '{step_name}', skipping"
-            )
-            continue
 
         logger.info("=" * 60)
         logger.info(f"Step {step_number}: {step_name} ({step_type})")

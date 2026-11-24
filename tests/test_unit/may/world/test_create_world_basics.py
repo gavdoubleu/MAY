@@ -1,5 +1,7 @@
+import logging
 import os
 import sys
+from pathlib import Path
 import numpy as np
 import numba as nb
 import pytest
@@ -121,6 +123,12 @@ def test_batch_data_dir_is_resolved_once_for_every_mode():
         pr._resolver = old
 
 
+CONSTANT_ATTRIBUTE = Path(__file__).parents[3] / "test_data" / "preflight" / "constant_attribute.yaml"
+VALID_TIMELINE_YAML = (
+    f"timeline:\n  enabled: true\n  steps:\n    - type: attribute\n      config: {CONSTANT_ATTRIBUTE}\n"
+)
+
+
 class TimelineReached(Exception):
     pass
 
@@ -132,8 +140,7 @@ def test_main_hands_the_world_and_its_config_to_run_timeline(tmp_path):
     config_path.write_text(
         f"venues:\n  data_dir: {tmp_path}\n"
         f"serialization:\n  enabled: false\n  output_dir: {tmp_path}\n"
-        "timeline:\n  enabled: true\n  steps:\n"
-        "    - type: attribute\n      config: age.yaml\n",
+        + VALID_TIMELINE_YAML,
         encoding="utf-8",
     )
     old = pr._resolver
@@ -151,7 +158,7 @@ def test_main_hands_the_world_and_its_config_to_run_timeline(tmp_path):
 
     world, world_config = run_timeline.call_args.args
     assert world is world_class.return_value
-    assert world_config["timeline"]["steps"] == [{"type": "attribute", "config": "age.yaml"}]
+    assert world_config["timeline"]["steps"] == [{"type": "attribute", "config": str(CONSTANT_ATTRIBUTE)}]
 
 
 def test_main_exits_when_the_timeline_fails(tmp_path):
@@ -159,7 +166,8 @@ def test_main_exits_when_the_timeline_fails(tmp_path):
     config_path = tmp_path / "config.yaml"
     (tmp_path / "venues_config.yaml").write_text("venue_types: {}\n", encoding="utf-8")
     config_path.write_text(
-        f"venues:\n  data_dir: {tmp_path}\nserialization:\n  enabled: false\n  output_dir: {tmp_path}\n",
+        f"venues:\n  data_dir: {tmp_path}\nserialization:\n  enabled: false\n  output_dir: {tmp_path}\n"
+        + VALID_TIMELINE_YAML,
         encoding="utf-8",
     )
     old = pr._resolver
@@ -180,7 +188,9 @@ def test_main_exits_when_the_timeline_fails(tmp_path):
     run_timeline.assert_called_once()
 
 
-def write_world_config(tmp_path, venues_yaml="venue_types: {}\n"):
+
+
+def write_world_config(tmp_path, venues_yaml="venue_types: {}\n", timeline_yaml=VALID_TIMELINE_YAML):
     """Config whose venue YAML lives only under venues.data_dir, with serialisation on."""
     venues_dir = tmp_path / "venues"
     venues_dir.mkdir()
@@ -194,7 +204,7 @@ def write_world_config(tmp_path, venues_yaml="venue_types: {}\n"):
     config_path.write_text(
         f"venues:\n  data_dir: {venues_dir}\n  config_file: venues.yaml\n"
         f"serialization:\n  enabled: true\n  config_file: {schema_path}\n"
-        f"  output_dir: {tmp_path / 'output'}\n",
+        f"  output_dir: {tmp_path / 'output'}\n" + timeline_yaml,
         encoding="utf-8",
     )
     return config_path
@@ -261,3 +271,22 @@ def test_preflight_only_problems_exit_with_one(tmp_path):
     with pytest.raises(SystemExit) as excinfo:
         run_main(config_path, "--preflight-only")
     assert excinfo.value.code == 1
+
+
+def test_preflight_only_reports_venue_and_timeline_problems_together(tmp_path, caplog):
+    config_path = write_world_config(tmp_path, BROKEN_VENUES, timeline_yaml="timeline:\n  enabled: false\n")
+    with caplog.at_level(logging.INFO, logger="preflight"):
+        with pytest.raises(SystemExit) as excinfo:
+            run_main(config_path, "--preflight-only")
+    assert excinfo.value.code == 1
+    assert "venue_types.company.enabled" in caplog.text
+    assert "timeline.enabled" in caplog.text
+
+
+def test_timeline_problem_exits_before_geography_loads(tmp_path):
+    config_path = write_world_config(tmp_path, timeline_yaml="timeline:\n  enabled: false\n")
+    with patch("create_world.setup_geography") as setup_geography:
+        with pytest.raises(SystemExit) as excinfo:
+            run_main(config_path)
+    assert excinfo.value.code == 1
+    setup_geography.assert_not_called()

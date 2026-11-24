@@ -56,14 +56,6 @@ class VenueConfig:
     venue_types: dict
     filter_by_geography: Optional[bool]
 
-    @property
-    def enabled_venue_types(self) -> frozenset:
-        return frozenset(
-            venue_type
-            for venue_type, type_config in self.venue_types.items()
-            if type_config.get("enabled", True) is not False
-        )
-
 
 class VenueError(Exception):
     """Raised when venue configuration or data is missing/invalid. Mirrors
@@ -420,6 +412,12 @@ class VenueManager:
     def parse_config(block: dict) -> Tuple[Optional[VenueConfig], PreflightReport]:
         """Parse a `venues` config block and its YAML file. Config is `None` if any problem."""
         report = PreflightReport()
+        for path_key in ("data_dir", "config_file"):
+            path_value = block.get(path_key)
+            if path_value is not None and not isinstance(path_value, str):
+                report.problem(path_key, f"must be a path; got {path_value!r}")
+        if report.has_problems:
+            return None, report
         # A blank key (`data_dir:` with no value) falls back to the default.
         data_dir = pr.resolve(block.get("data_dir") or DEFAULT_DATA_DIR)
         try:

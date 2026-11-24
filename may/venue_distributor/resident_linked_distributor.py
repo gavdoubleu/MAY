@@ -2,10 +2,13 @@ import logging
 import random
 import time
 from typing import Dict, List
-from .base_distributor import BaseDistributor
+from .base_distributor import BaseDistributor, check_value
 from ._allocation import VenueAllocation
 
 logger = logging.getLogger("resident_linked_distributor")
+
+# Any other value links people one by one; a typo would silently do that.
+LINK_LEVELS = ("household", "person")
 
 
 class ResidentLinkedDistributor(BaseDistributor):
@@ -16,6 +19,24 @@ class ResidentLinkedDistributor(BaseDistributor):
 
     This replicates the JUNE 1 care home linking behavior while remaining generic.
     """
+
+    @classmethod
+    def _check_config(cls, config, config_path, context, report):
+        super()._check_config(config, config_path, context, report)
+        cls._check_venue_type(
+            "target_venue_type", config.get("target_venue_type", "care_home"), report
+        )
+        check_value("link_level", config.get("link_level", "household"), LINK_LEVELS, report)
+        multiplier = config.get("multiplier", 1)
+        if isinstance(multiplier, bool) or not isinstance(multiplier, (int, float)) or multiplier < 0:
+            report.problem("multiplier", (
+                f"must be a number of visitor units per resident, 0 or more; got {multiplier!r}"
+            ))
+        cls._check_geo_level("geography_level", config.get("geography_level"), context, report)
+        visitor_eligibility = cls._section(config, "visitor_eligibility", report)
+        cls._check_filters(
+            "visitor_eligibility.global_filters", visitor_eligibility.get("global_filters"), report
+        )
 
     def __init__(self, config_file: str = None, config_dict: Dict = None):
         super().__init__(config_file, config_dict)

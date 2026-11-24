@@ -13,7 +13,7 @@ import pathlib
 
 import pytest
 
-from may.timeline import require_config_path
+from may.utils.path_resolver import require_config_path
 from may.residence.household_distributor import HouseholdError
 from may.world import setup_households
 

@@ -13,10 +13,10 @@ Functions:
     distributor_from_yaml: Factory function to load the appropriate distributor from YAML
 """
 
-from pathlib import Path
-from may.utils import path_resolver as pr
-from may.utils.yaml_loader import load_yaml
+from may.preflight.config_file import load_config_mapping
+from may.preflight.report import PreflightReport
 
+from .base_distributor import DistributorConfigError
 from .venue_distributor import VenueDistributor
 from .multi_venue_distributor import MultiVenueDistributor
 from .social_contact_visit_distributor import SocialContactVisitDistributor
@@ -40,43 +40,43 @@ __all__ = [
     "ResidentLinkedDistributor",
     "PropertyMatchingDistributor",
     "RouteDistributor",
+    "DistributorConfigError",
     "distributor_from_yaml",
+    "distributor_preflight",
     "DISTRIBUTOR_TYPES",
 ]
 
 
-def distributor_from_yaml(yaml_path: str):
-    """
-    Factory function to create the appropriate distributor based on YAML configuration.
+def _distributor_class(config_path):
+    """The class `distributor_type` names, or `None` with its problem in the report.
 
-    Reads the 'distributor_type' field from the YAML and instantiates the correct class:
-    - distributor_type: "multi_venue" -> MultiVenueDistributor
-    - distributor_type: "single_venue" or missing -> VenueDistributor (default)
-
-    Args:
-        yaml_path: Path to distributor YAML file
-
-    Returns:
-        Instance of VenueDistributor or MultiVenueDistributor
-
-    Examples:
-        >>> distributor = distributor_from_yaml('yaml/distributors/school_distributor.yaml')
-        >>> distributor.allocate(world)
-
-        >>> distributor = distributor_from_yaml('yaml/distributors/multi_venue_distributor.yaml')
-        >>> distributor.allocate(world)
-    """
-    # Read YAML to check distributor_type
-    yaml_path = Path(pr.resolve(str(yaml_path)))
-    config = load_yaml(yaml_path)
-
+    `distributor_type` decides which of six config schemas the rest of the file is
+    written in, so an unrecognised one is a mistake rather than an instruction."""
+    report = PreflightReport()
+    config = load_config_mapping(config_path, report)
+    if config is None:
+        return None, report
     distributor_type = config.get("distributor_type", "single_venue")
+    if isinstance(distributor_type, (list, dict)) or distributor_type not in DISTRIBUTOR_TYPES:
+        report.problem("distributor_type", (
+            f"unknown distributor type {distributor_type!r}; expected one of {sorted(DISTRIBUTOR_TYPES)}"
+        ))
+        return None, report
+    return DISTRIBUTOR_TYPES[distributor_type], report
 
-    # `distributor_type` decides which of six config schemas the rest of the file is
-    # written in, so an unrecognised one is a mistake rather than an instruction.
-    if distributor_type not in DISTRIBUTOR_TYPES:
-        raise ValueError(
-            f"Unknown distributor_type {distributor_type!r} in {yaml_path}; "
-            f"expected one of {sorted(DISTRIBUTOR_TYPES)}."
-        )
-    return DISTRIBUTOR_TYPES[distributor_type](yaml_path)
+
+def distributor_preflight(config_path, context):
+    """Check a distributor YAML with the class its `distributor_type` names, building nothing."""
+    distributor_class, report = _distributor_class(config_path)
+    if distributor_class is None:
+        return report
+    return distributor_class.preflight(config_path, context)
+
+
+def distributor_from_yaml(config_path, world_config=None):
+    """Build the distributor its `distributor_type` names (`single_venue` when absent).
+
+    Raises `DistributorConfigError` on the problems `distributor_preflight` reports."""
+    distributor_class, report = _distributor_class(config_path)
+    report.raise_if_problems(DistributorConfigError, f"Distributor config {config_path} cannot be used.")
+    return distributor_class.from_config(config_path, world_config)

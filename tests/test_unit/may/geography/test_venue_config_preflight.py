@@ -89,6 +89,16 @@ def test_top_level_not_mapping_is_problem(write_config):
     ]
 
 
+@pytest.mark.parametrize("key", ["data_dir", "config_file"])
+@pytest.mark.parametrize("value", [["venues.yaml"], {"path": "venues.yaml"}], ids=["list", "mapping"])
+def test_a_path_that_is_a_list_or_mapping_is_problem(write_config, key, value):
+    block = write_config("venue_types: {}\n")
+    block[key] = value
+    venue_config, report = VenueManager.parse_config(block)
+    assert venue_config is None
+    assert [finding.key for finding in report.problems] == [key]
+
+
 def test_missing_venue_types_is_problem(write_config):
     block = write_config("settings: {}\n")
     venue_config, report = VenueManager.parse_config(block)
@@ -286,17 +296,6 @@ def test_empty_block_uses_defaults(working_dir):
     assert not report.problems
     assert venue_config.data_dir == DEFAULT_DATA_DIR
     assert venue_config.config_path == os.path.join(DEFAULT_DATA_DIR, DEFAULT_CONFIG_FILE)
-
-
-def test_enabled_venue_types_excludes_disabled(write_config):
-    block = write_config(
-        "venue_types:\n"
-        "  pub:\n    filename: pubs.csv\n"
-        "  school:\n    enabled: true\n    filename: schools.csv\n"
-        "  gym:\n    enabled: false\n"
-    )
-    venue_config, _ = VenueManager.parse_config(block)
-    assert venue_config.enabled_venue_types == frozenset({"pub", "school"})
 
 
 def test_preflight_returns_parse_config_report(write_config):

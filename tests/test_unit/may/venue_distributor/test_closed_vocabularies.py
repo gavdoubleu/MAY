@@ -33,13 +33,6 @@ def _write(tmp_path, config):
 # --- #8: distributor_type ---------------------------------------------------------
 
 
-def test_unknown_distributor_type_raises(tmp_path):
-    path = _write(tmp_path, {"distributor_type": "multivenue", "venue_type": "company"})
-
-    with pytest.raises(ValueError, match="Unknown distributor_type 'multivenue'"):
-        distributor_from_yaml(str(path))
-
-
 def test_error_lists_every_dispatched_type(tmp_path):
     """Six, counting the `single_venue` default that reaching deliberately is fine."""
     path = _write(tmp_path, {"distributor_type": "nonesuch", "venue_type": "company"})
