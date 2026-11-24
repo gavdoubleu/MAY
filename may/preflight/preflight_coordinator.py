@@ -45,7 +45,7 @@ def check_world_config(config: dict) -> PreflightReport:
         population_report = PopulationManager.preflight(population_block, geo_levels)
         report = PreflightReport.merge(report, population_report.under("population", sep="."))
     if venues_block is not None:
-        venue_config, venue_report = VenueManager.parse_config(venues_block)
+        venue_config, venue_report = VenueManager.parse_config(venues_block, geo_levels)
         report = PreflightReport.merge(report, venue_report.under("venues", sep="."))
     if households_block is not None:
         household_config, household_report = HouseholdDistributor.parse_config(households_block)

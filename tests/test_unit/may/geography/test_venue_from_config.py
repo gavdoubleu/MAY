@@ -95,6 +95,7 @@ def test_batch_type_loads_one_file_per_unit_present(loaded_geography, venues_dir
         "venue_types:\n"
         "  pub:\n"
         "    batch_mode: true\n"
+        "    level: MGU\n"
         "    filename: 'pubs_{unit}.csv'\n",
     )
     venue_manager = VenueManager.from_config(block, loaded_geography)
@@ -107,11 +108,41 @@ def test_batch_type_matching_no_files_raises(loaded_geography, venues_dir):
         "venue_types:\n"
         "  pub:\n"
         "    batch_mode: true\n"
+        "    level: MGU\n"
         "    filename: 'pubs_{unit}.csv'\n",
     )
     with pytest.raises(VenueError, match="matched no files"):
         VenueManager.from_config(block, loaded_geography)
 
+
+
+def test_batch_type_expands_unit_over_its_own_level(loaded_geography, venues_dir):
+    """Files are named by units of `level`, not by whatever sits at levels[1]."""
+    (venues_dir / "pubs_LGU_1.csv").write_text("name,geo_unit\nCrown,SGU_001\nAnchor,SGU_003\n")
+    (venues_dir / "pubs_MGU_01.csv").write_text("name,geo_unit\nDecoy,SGU_001\n")
+    block = block_for(
+        venues_dir,
+        "venue_types:\n"
+        "  pub:\n"
+        "    batch_mode: true\n"
+        "    level: LGU\n"
+        "    filename: 'pubs_{unit}.csv'\n",
+    )
+    venue_manager = VenueManager.from_config(block, loaded_geography)
+    assert venue_names(venue_manager, "pub") == ["Anchor", "Crown"]
+
+
+def test_batch_level_unknown_to_loaded_geography_raises(loaded_geography, venues_dir):
+    block = block_for(
+        venues_dir,
+        "venue_types:\n"
+        "  pub:\n"
+        "    batch_mode: true\n"
+        "    level: LSOA\n"
+        "    filename: 'pubs_{unit}.csv'\n",
+    )
+    with pytest.raises(VenueError, match="unknown geo level 'LSOA'"):
+        VenueManager.from_config(block, loaded_geography)
 
 def test_filter_keeps_only_matching_rows(loaded_geography, venues_dir):
     (venues_dir / "schools.csv").write_text(

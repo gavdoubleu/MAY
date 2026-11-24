@@ -2,6 +2,7 @@ venue_types:
   household:
     enabled: true
     batch_mode: true
+    level: MGU   # {unit} is each unit of this geography level
     filename: "{unit}_loc.csv"
     filter_column: "BTCode"
     filter_values: ["C"]
@@ -35,6 +36,7 @@ venue_types:
   pub:
     enabled: true
     batch_mode: true
+    level: MGU   # {unit} is each unit of this geography level
     filename: "{unit}_loc.csv"
     filter_column: "BTCode"
     filter_values: ["P"]
@@ -43,6 +45,7 @@ venue_types:
   school:
     enabled: true
     batch_mode: true
+    level: MGU   # {unit} is each unit of this geography level
     filename: "{unit}_loc.csv"
     filter_column: "BTCode"
     filter_values: ["S"]
@@ -51,6 +54,7 @@ venue_types:
   church:
     enabled: true
     batch_mode: true
+    level: MGU   # {unit} is each unit of this geography level
     filename: "{unit}_loc.csv"
     filter_column: "BTCode"
     filter_values: ["CH"]
@@ -59,6 +63,7 @@ venue_types:
   army_building:
     enabled: true
     batch_mode: true
+    level: MGU   # {unit} is each unit of this geography level
     filename: "{unit}_loc.csv"
     filter_column: "BTCode"
     filter_values: ["E"]
@@ -67,6 +72,7 @@ venue_types:
   medical:
     enabled: true
     batch_mode: true
+    level: MGU   # {unit} is each unit of this geography level
     filename: "{unit}_loc.csv"
     filter_column: "BTCode"
     filter_values: ["H"]
@@ -75,6 +81,7 @@ venue_types:
   prison:
     enabled: true
     batch_mode: true
+    level: MGU   # {unit} is each unit of this geography level
     filename: "{unit}_loc.csv"
     filter_column: "BTCode"
     filter_values: ["N"]
@@ -87,6 +94,7 @@ venue_types:
   workplace_sales:
     enabled: true
     batch_mode: true
+    level: MGU   # {unit} is each unit of this geography level
     filename: "{unit}_loc.csv"
     filter_column: "BTCode"
     filter_values: ["2"]
@@ -94,6 +102,7 @@ venue_types:
   workplace_service:
     enabled: true
     batch_mode: true
+    level: MGU   # {unit} is each unit of this geography level
     filename: "{unit}_loc.csv"
     filter_column: "BTCode"
     filter_values: ["3"]
@@ -101,6 +110,7 @@ venue_types:
   workplace_production:
     enabled: true
     batch_mode: true
+    level: MGU   # {unit} is each unit of this geography level
     filename: "{unit}_loc.csv"
     filter_column: "BTCode"
     filter_values: ["5"]
@@ -108,6 +118,7 @@ venue_types:
   workplace_education:
     enabled: true
     batch_mode: true
+    level: MGU   # {unit} is each unit of this geography level
     filename: "{unit}_loc.csv"
     filter_column: "BTCode"
     filter_values: ["12"]
@@ -115,6 +126,7 @@ venue_types:
   workplace_mine:
     enabled: true
     batch_mode: true
+    level: MGU   # {unit} is each unit of this geography level
     filename: "{unit}_loc.csv"
     filter_column: "BTCode"
     filter_values: ["50"]

@@ -17,6 +17,9 @@ because leg timings are line-relative), ``origin_unit_id`` / ``dest_unit_id``
 ``board_unit_id`` / ``alight_unit_id`` (this leg's stops). They are routing
 facts the router derives, so what "origin" means is still whatever
 origin_source/destination_source the config defined.
+
+``origin_source.level`` is required: besides the origin key, it is the level of
+the rider's residence unit that each lazily created line venue is placed in.
 """
 
 import logging
@@ -67,6 +70,12 @@ class RouteDistributor(BaseDistributor):
                 continue
             check_value(f"{key}.type", source.get("type", "ancestor"), SOURCE_TYPES, report)
             check_geo_level(f"{key}.level", source.get("level"), context, report)
+        origin_source = config.get("origin_source")
+        if origin_source is None or (isinstance(origin_source, dict) and origin_source.get("level") is None):
+            report.problem(
+                "origin_source.level",
+                "not set; line venues are placed in the rider's unit at this level",
+            )
         pool_rule = config.get("pool_rule") or None
         if pool_rule is not None:
             if "legs_table" in config:
@@ -454,19 +463,19 @@ class RouteDistributor(BaseDistributor):
         return get_attribute(person, self.class_source, nested_properties=False)
 
     def _get_or_create_line_venue(self, world, line_id: str, person) -> Optional[Any]:
-        """Lazily materialise one venue per line_id. Returns None if no MGU
-        can be resolved (shouldn't happen, since the rider's residence MGU is always
-        loaded)."""
+        """Lazily materialise one venue per line_id. Returns None if the rider
+        has no ancestor at origin_source.level (shouldn't happen, since the
+        rider's residence unit is always loaded)."""
         venue = self._line_to_venue.get(line_id)
         if venue is not None:
             return venue
-        # Attach the line venue to the rider's residence MGU. This MGU is
-        # guaranteed loaded (the rider lives there) and gives the venue a
-        # stable, deterministic location for HDF5 partitioning.
-        mgu_level = world.geography.levels[1]  # batch-partition level
+        # Attach the line venue to the rider's residence unit at
+        # origin_source.level. That unit is guaranteed loaded (the rider lives
+        # there) and gives the venue a stable, deterministic location.
+        placement_level = self.origin_source["level"]
         geo_unit = get_attribute(person, "geographical_unit")
-        if geo_unit is not None and geo_unit.level != mgu_level:
-            geo_unit = geo_unit.get_ancestor_by_level(mgu_level)
+        if geo_unit is not None and geo_unit.level != placement_level:
+            geo_unit = geo_unit.get_ancestor_by_level(placement_level)
         if geo_unit is None:
             return None
         # No per-venue properties: line_id is recorded as venue.name below

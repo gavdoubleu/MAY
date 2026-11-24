@@ -191,7 +191,7 @@ def test_enabled_type_without_filename_is_problem(write_config):
 
 def test_batch_filename_list_is_problem(write_config):
     block = write_config(
-        "venue_types:\n  pub:\n    batch_mode: true\n    filename: ['a_{unit}.csv', 'b_{unit}.csv']\n"
+        "venue_types:\n  pub:\n    batch_mode: true\n    level: MGU\n    filename: ['a_{unit}.csv', 'b_{unit}.csv']\n"
     )
     venue_config, report = VenueManager.parse_config(block)
     assert venue_config is None
@@ -205,7 +205,7 @@ def test_batch_filename_list_is_problem(write_config):
 
 def test_batch_filename_without_unit_placeholder_is_problem(write_config):
     block = write_config(
-        "venue_types:\n  pub:\n    batch_mode: true\n    filename: pubs.csv\n"
+        "venue_types:\n  pub:\n    batch_mode: true\n    level: MGU\n    filename: pubs.csv\n"
     )
     venue_config, report = VenueManager.parse_config(block)
     assert venue_config is None
@@ -344,3 +344,67 @@ def test_non_utf8_config_file_is_problem(working_dir):
     assert problem_lines(report) == [
         ("config_file", "venues.yaml could not be read: not UTF-8 text")
     ]
+
+
+BATCH_PUB = "venue_types:\n  pub:\n    batch_mode: true\n    filename: 'pubs_{unit}.csv'\n"
+PUB_KEY = "config_file (venues.yaml): venue_types.pub"
+GEO_LEVELS = frozenset({"SGU", "MGU"})
+
+
+def test_batch_type_without_level_is_problem(write_config):
+    block = write_config(BATCH_PUB)
+    venue_config, report = VenueManager.parse_config(block, GEO_LEVELS)
+    assert venue_config is None
+    assert problem_lines(report) == [
+        (f"{PUB_KEY}.level", "not set; batch_mode needs the geo level {unit} names")
+    ]
+
+
+def test_batch_level_unknown_to_geography_is_problem(write_config):
+    block = write_config(BATCH_PUB + "    level: LSOA\n")
+    venue_config, report = VenueManager.parse_config(block, GEO_LEVELS)
+    assert venue_config is None
+    assert problem_lines(report) == [
+        (f"{PUB_KEY}.level", "unknown geo level 'LSOA'; expected one of ['MGU', 'SGU']")
+    ]
+
+
+def test_batch_level_not_a_name_is_problem(write_config):
+    block = write_config(BATCH_PUB + "    level: [MGU]\n")
+    _, report = VenueManager.parse_config(block, GEO_LEVELS)
+    assert problem_lines(report) == [
+        (f"{PUB_KEY}.level", "must be a geo level name; got ['MGU']")
+    ]
+
+
+def test_batch_level_unchecked_without_geo_levels(write_config):
+    block = write_config(BATCH_PUB + "    level: LSOA\n")
+    venue_config, report = VenueManager.parse_config(block)
+    assert not report.problems and not report.warnings
+    assert venue_config.venue_types["pub"]["level"] == "LSOA"
+
+
+def test_level_on_non_batch_type_warns_unused(write_config):
+    block = write_config("venue_types:\n  pub:\n    filename: pubs.csv\n    level: MGU\n")
+    venue_config, report = VenueManager.parse_config(block, GEO_LEVELS)
+    assert not report.problems
+    assert venue_config is not None
+    assert warning_lines(report) == [
+        (f"{PUB_KEY}.level", "unused; batch_mode is not true")
+    ]
+
+
+def test_1911_shaped_batch_type_is_clean(write_config):
+    block = write_config(
+        "venue_types:\n"
+        "  household:\n"
+        "    enabled: true\n"
+        "    batch_mode: true\n"
+        "    level: MGU\n"
+        "    filename: '{unit}_loc.csv'\n"
+        "    filter_column: BTCode\n"
+        "    filter_values: [C]\n"
+        "    is_residence: true\n"
+    )
+    _, report = VenueManager.parse_config(block, GEO_LEVELS)
+    assert not report.problems and not report.warnings

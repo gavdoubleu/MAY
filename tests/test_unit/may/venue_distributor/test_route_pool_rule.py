@@ -281,3 +281,23 @@ def test_rail_is_refused_when_reaching_the_stations_costs_more_than_going_direct
 
     assert legs is None
     assert catchment_dist._stats["misses_access_exceeds_direct"] == 1
+
+
+class _RecordingVenues:
+    def create_venue(self, venue_type, geo_unit, properties):
+        return types.SimpleNamespace(type=venue_type, geographical_unit=geo_unit, name=None)
+
+
+def test_line_venue_is_placed_at_the_origin_source_level(pool_config, world):
+    """The line venue sits in the rider's ancestor at origin_source.level, not
+    at whatever level happens to be second in the hierarchy (MGU here)."""
+    config = yaml.safe_load(pool_config.read_text())
+    config["origin_source"] = {"type": "ancestor", "from": "geographical_unit", "level": "LGU"}
+    distributor = RouteDistributor(config_dict=config)
+    world.venues = _RecordingVenues()
+    rider = types.SimpleNamespace(geographical_unit=world.geography.get_unit("SM1"))
+
+    venue = distributor._get_or_create_line_venue(world, "bus_pool_M1", rider)
+
+    assert venue.geographical_unit.name == "Ayr, City of"
+    assert venue.geographical_unit.level == "LGU"

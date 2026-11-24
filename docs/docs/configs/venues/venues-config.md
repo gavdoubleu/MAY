@@ -55,13 +55,15 @@ venue_types:
   church:
     enabled: true
     batch_mode: true
+    level: MGU
+    filename: "{unit}_loc.csv"
     filter_column: "BTCode"
     filter_values: ["CH"]
     is_residence: false
     subset_key: "priest"
 ```
 
-When `batch_mode: true`, venues of this type are loaded from a shared CSV (the same file used by other batch-mode types in the same config) rather than from a type-specific file. `filter_column` names the CSV column used to distinguish types; `filter_values` is the list of values in that column that belong to this venue type. Rows not matching any listed value are ignored for this type.
+When `batch_mode: true`, venues of this type are loaded from one CSV per unit of the geography level named by `level`. `filename` is a single pattern containing `{unit}`, which is replaced by each unit's name (here `MGU_01_loc.csv`, `MGU_02_loc.csv`, ...). Files missing for some units are skipped, but a pattern matching no file at all is an error. `level` is required in batch mode and must be one of `geography.levels`; set without `batch_mode` it is ignored with a warning. Several batch-mode types can share one pattern; `filter_column` names the CSV column used to distinguish types, and `filter_values` is the list of values in that column that belong to this venue type. Rows not matching any listed value are ignored for this type.
 
 `subset_key` is an optional default subset name attached to the venue. For residence types, this becomes the subset that residents are placed into during allocation. `subset_categories` (less common) defines named age-band slots directly on the venue — used in the 1911 configs where household composition is encoded in the venue CSV rather than derived from a separate file.
 

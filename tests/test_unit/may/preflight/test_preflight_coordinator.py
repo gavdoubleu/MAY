@@ -578,3 +578,29 @@ def test_bad_geography_skips_population_level_check(tmp_path, geography_block):
     config["population"] = BATCH_POPULATION_UNKNOWN_LEVEL
     report = check_world_config(config)
     assert not any(key.startswith("population") for key in keys(report.problems))
+
+
+BATCH_VENUES_UNKNOWN_LEVEL = (
+    "venue_types:\n  pub:\n    batch_mode: true\n    level: LSOA\n    filename: 'pubs_{unit}.csv'\n"
+)
+
+
+def test_venue_batch_level_unknown_to_geography_is_problem(tmp_path):
+    config, _ = geography_config(tmp_path, VALID_GEOGRAPHY)
+    venues_yaml = tmp_path / "venues" / "venues.yaml"
+    venues_yaml.write_text(BATCH_VENUES_UNKNOWN_LEVEL)
+    report = check_world_config(config)
+    assert keys(report.problems) == [f"venues.config_file ({venues_yaml}): venue_types.pub.level"]
+    assert "['MGU', 'SGU']" in report.problems[0].message
+
+
+@pytest.mark.parametrize(
+    "geography_block",
+    [["SGU"], {"hierarchy_file": "hierarchy.csv"}, {**VALID_GEOGRAPHY, "load_all": "yes"}],
+    ids=["not_mapping", "no_levels", "other_problem"],
+)
+def test_bad_geography_skips_venue_level_check(tmp_path, geography_block):
+    config, _ = geography_config(tmp_path, geography_block)
+    (tmp_path / "venues" / "venues.yaml").write_text(BATCH_VENUES_UNKNOWN_LEVEL)
+    report = check_world_config(config)
+    assert not any(key.startswith("venues") for key in keys(report.problems))

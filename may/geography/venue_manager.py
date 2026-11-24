@@ -6,6 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Optional, Tuple
 from .venue import Venue
+from may.preflight.context import PreflightContext, check_geo_level
 from may.preflight.report import PreflightReport, not_mapping_message
 from may.utils import path_resolver as pr
 from may.utils.yaml_loader import invalid_yaml_message, load_yaml, unreadable_file_message
@@ -21,7 +22,7 @@ def _check_bool(report: PreflightReport, key: str, mapping: dict, name: str) -> 
         report.problem(key, f"must be true or false; got {mapping[name]!r}")
 
 
-def _check_venue_type(report: PreflightReport, type_key: str, type_config) -> None:
+def _check_venue_type(report: PreflightReport, type_key: str, type_config, context) -> None:
     if not isinstance(type_config, dict):
         report.problem(type_key, f"must be a mapping; got {type_config!r}")
         return
@@ -45,6 +46,14 @@ def _check_venue_type(report: PreflightReport, type_key: str, type_config) -> No
                 f"{type_key}.filename",
                 f"batch_mode pattern must contain '{{unit}}'; got {filename!r}",
             )
+    level_key = f"{type_key}.level"
+    if type_config.get("batch_mode") is not True:
+        if "level" in type_config:
+            report.warning(level_key, "unused; batch_mode is not true")
+    elif type_config.get("level") is None:
+        report.problem(level_key, "not set; batch_mode needs the geo level {unit} names")
+    else:
+        check_geo_level(level_key, type_config["level"], context, report)
 
 
 @dataclass(frozen=True)
@@ -409,9 +418,13 @@ class VenueManager:
         logger.info(f"Created {venues_created} {venue_type} venues")
 
     @staticmethod
-    def parse_config(block: dict) -> Tuple[Optional[VenueConfig], PreflightReport]:
-        """Parse a `venues` config block and its YAML file. Config is `None` if any problem."""
+    def parse_config(
+        block: dict, geo_levels=None
+    ) -> Tuple[Optional[VenueConfig], PreflightReport]:
+        """Parse a `venues` config block and its YAML file. Config is `None` if any problem.
+        Batch `level`s are checked against `geo_levels` when given."""
         report = PreflightReport()
+        context = PreflightContext(geo_levels=geo_levels)
         for path_key in ("data_dir", "config_file"):
             path_value = block.get(path_key)
             if path_value is not None and not isinstance(path_value, str):
@@ -453,7 +466,7 @@ class VenueManager:
             report.problem(venue_types_key, not_mapping_message(venue_types))
         else:
             for venue_type, type_config in venue_types.items():
-                _check_venue_type(report, f"{venue_types_key}.{venue_type}", type_config)
+                _check_venue_type(report, f"{venue_types_key}.{venue_type}", type_config, context)
         # A blank `settings:` (every setting commented out) uses the defaults.
         settings = config.get("settings")
         if settings is None:
@@ -478,15 +491,15 @@ class VenueManager:
         return venue_config, report
 
     @staticmethod
-    def preflight(block: dict) -> PreflightReport:
+    def preflight(block: dict, geo_levels=None) -> PreflightReport:
         """Check a `venues` config block and its YAML file without loading venues."""
-        _, report = VenueManager.parse_config(block)
+        _, report = VenueManager.parse_config(block, geo_levels)
         return report
 
     @classmethod
     def from_config(cls, block: dict, geography) -> "VenueManager":
         """Build a VenueManager from a `venues` config block; `VenueError` on any problem."""
-        venue_config, report = cls.parse_config(block)
+        venue_config, report = cls.parse_config(block, frozenset(geography.levels))
         report.raise_if_problems(
             VenueError, f"Venue config has {len(report.problems)} problem(s):"
         )
@@ -578,18 +591,20 @@ class VenueManager:
                 "dtype": type_config.get("dtype"),
             }
             if type_config.get("batch_mode", False):
-                self._load_batch_type(venue_type, filename, load_options)
+                self._load_batch_type(
+                    venue_type, filename, type_config["level"], load_options
+                )
             else:
                 self.load_venue_type_from_csv(venue_type, filename, **load_options)
 
         self._log_total_created()
         self._log_summary()
 
-    def _load_batch_type(self, venue_type, filename, load_options) -> None:
-        """One file per batch-partition-level (levels[1]) unit, named by
-        substituting {unit} into the filename. Absent per-unit files are skipped
-        (partial geographies are routine), but zero matches is a hard error."""
-        units = self.geography.get_units_by_level(self.geography.levels[1])
+    def _load_batch_type(self, venue_type, filename, level, load_options) -> None:
+        """One file per unit of `level`, named by substituting {unit} into the
+        filename. Absent per-unit files are skipped (partial geographies are
+        routine), but zero matches is a hard error."""
+        units = self.geography.get_units_by_level(level)
         matched = 0
         for unit_name in units.keys():
             unit_filename = filename.replace("{unit}", unit_name)

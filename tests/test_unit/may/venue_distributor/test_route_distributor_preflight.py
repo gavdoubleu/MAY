@@ -194,3 +194,32 @@ def test_from_config_builds_a_valid_file(tmp_path):
 ], ids=["corridor_level", "source_level"])
 def test_a_geo_level_that_is_not_a_name_is_a_problem(tmp_path, text, key):
     assert keys(preflight(write(tmp_path, text), KNOWN_GEOGRAPHY).problems) == [key]
+
+
+ORIGIN_LEVEL_PROBLEM = ("origin_source.level", "not set; line venues are placed in the rider's unit at this level")
+
+
+def test_origin_source_without_level_is_a_problem(tmp_path):
+    text = VALID.replace("from: geographical_unit\n  level: MGU\n", "from: geographical_unit\n")
+    report = preflight(write(tmp_path, text), KNOWN_GEOGRAPHY)
+
+    assert [(finding.key, finding.message) for finding in report.problems] == [ORIGIN_LEVEL_PROBLEM]
+
+
+def test_absent_origin_source_is_a_level_problem(tmp_path):
+    text = VALID.replace(
+        "origin_source:\n  type: ancestor\n  from: geographical_unit\n  level: MGU\n", ""
+    )
+    report = preflight(write(tmp_path, text), KNOWN_GEOGRAPHY)
+
+    assert [(finding.key, finding.message) for finding in report.problems] == [ORIGIN_LEVEL_PROBLEM]
+
+
+def test_property_origin_source_still_needs_a_level(tmp_path):
+    text = VALID.replace(
+        "origin_source:\n  type: ancestor\n  from: geographical_unit\n  level: MGU\n",
+        "origin_source:\n  type: property\n  from: properties.home_station\n",
+    )
+    report = preflight(write(tmp_path, text), KNOWN_GEOGRAPHY)
+
+    assert [(finding.key, finding.message) for finding in report.problems] == [ORIGIN_LEVEL_PROBLEM]

@@ -17,7 +17,7 @@ legs_table:   "${data_root}/activities/commute/route_legs.csv"
 origin_source:
   type: "ancestor"
   from: "geographical_unit"      # rider's residence (SGU)
-  level: "MGU"
+  level: "MGU"                   # also where line venues are placed
 destination_source:
   type: "ancestor"
   from: "properties.workplace_mgu"

@@ -23,7 +23,7 @@ leg_subset_key: "rider"
 origin_source:
   type: "ancestor"
   from: "geographical_unit"
-  level: "MGU"
+  level: "MGU"                   # also where line venues are placed
 destination_source:
   type: "ancestor"
   from: "properties.workplace_mgu"
