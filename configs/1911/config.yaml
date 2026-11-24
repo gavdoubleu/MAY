@@ -61,4 +61,3 @@ serialization:
   config_file: "configs/1911/serialization_config.yaml"
   output_dir: "output/1911"
   filename: "1911_durham_world.h5"
-  compression: "gzip"

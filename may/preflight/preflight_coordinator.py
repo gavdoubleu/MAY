@@ -3,8 +3,6 @@
 import logging
 from typing import Optional
 
-import yaml
-
 from may import timeline
 from may.geography.geography import Geography
 from may.geography.venue_manager import VenueConfig, VenueManager
@@ -12,13 +10,10 @@ from may.population.population import PopulationManager
 from may.preflight.context import PreflightContext
 from may.preflight.report import PreflightError, PreflightReport, not_mapping_message
 from may.residence.household_distributor import HouseholdDistributor
-from may.serialization.preflight import venue_property_gaps
-from may.utils import path_resolver as pr
-from may.utils.yaml_loader import invalid_yaml_message, load_yaml, unreadable_file_message
+from may.preflight.venue_property_gaps import venue_property_gaps
+from may.serialization.world_serializer import SerialisationSettings, WorldSerializer
 
 logger = logging.getLogger("preflight")
-
-SERIALIZATION_CONFIG_FILE_KEY = "serialization.config_file"
 
 
 def check_world_config(config: dict) -> PreflightReport:
@@ -52,14 +47,21 @@ def check_world_config(config: dict) -> PreflightReport:
         report = PreflightReport.merge(
             report, household_report.under("households", sep=".")
         )
-    loaded_schema = None
+    serialisation_settings = None
     if serialization_block is not None:
-        schema_report = PreflightReport()
-        loaded_schema = _load_serialization_schema(serialization_block, schema_report)
-        report = PreflightReport.merge(report, schema_report)
-    if venue_config is not None and loaded_schema is not None:
+        serialisation_settings, serialisation_report = WorldSerializer.parse_config(
+            serialization_block
+        )
         report = PreflightReport.merge(
-            report, _venue_property_gap_report(*loaded_schema, venue_config)
+            report, serialisation_report.under("serialization", sep=".")
+        )
+    if (
+        venue_config is not None
+        and serialisation_settings is not None
+        and serialisation_settings.enabled
+    ):
+        report = PreflightReport.merge(
+            report, _venue_property_gap_report(serialisation_settings, venue_config)
         )
     context = PreflightContext(
         geo_levels=geo_levels,
@@ -101,49 +103,16 @@ def _mapping_block(config: dict, name: str, report: PreflightReport) -> Optional
     return block
 
 
-def _load_serialization_schema(
-    serialization_block: dict, report: PreflightReport
-) -> Optional[tuple]:
-    """(path, parsed schema) if serialisation enabled with a readable config file, else `None`.
-
-    A missing, unreadable, empty or non-mapping config file is a problem in `report`: export would
-    fail after the build.
-    """
-    if not serialization_block.get("enabled", True):
-        return None
-    config_file = serialization_block.get("config_file")
-    if not config_file:
-        report.problem(SERIALIZATION_CONFIG_FILE_KEY, "not set; serialisation is enabled")
-        return None
-    path = pr.resolve(config_file)
-    try:
-        schema = load_yaml(path)
-    except FileNotFoundError:
-        report.problem(SERIALIZATION_CONFIG_FILE_KEY, f"{path} not found")
-        return None
-    except (OSError, UnicodeDecodeError) as error:
-        report.problem(SERIALIZATION_CONFIG_FILE_KEY, unreadable_file_message(path, error))
-        return None
-    except yaml.YAMLError as error:
-        report.problem(SERIALIZATION_CONFIG_FILE_KEY, invalid_yaml_message(path, error))
-        return None
-    # SerializationConfig rejects an empty schema, so export would fail after the build.
-    if not schema:
-        report.problem(SERIALIZATION_CONFIG_FILE_KEY, f"{path} is empty")
-        return None
-    if not isinstance(schema, dict):
-        report.problem(f"{SERIALIZATION_CONFIG_FILE_KEY} ({path})", not_mapping_message(schema))
-        return None
-    return path, schema
-
-
-def _venue_property_gap_report(path: str, schema, venue_config: VenueConfig) -> PreflightReport:
+def _venue_property_gap_report(
+    settings: SerialisationSettings, venue_config: VenueConfig
+) -> PreflightReport:
+    """Schema venue properties absent from the venue files, as warnings."""
     report = PreflightReport()
-    file_key = f"{SERIALIZATION_CONFIG_FILE_KEY} ({path})"
+    file_key = f"serialization.config_file ({settings.schema_path})"
     try:
-        gaps = venue_property_gaps(schema, venue_config.venue_types, venue_config.data_dir)
+        gaps = venue_property_gaps(settings.schema, venue_config)
     except Exception as error:
-        # Advisory check: a malformed schema or unreadable venue file must not
+        # Advisory check: an unreadable venue file must not
         # stop preflight, but the user is told the check did not run.
         report.warning(file_key, f"venue property check skipped: {error}")
         return report

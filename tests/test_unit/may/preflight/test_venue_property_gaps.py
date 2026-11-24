@@ -8,7 +8,9 @@ answer in the log while there is still time to act on it.
 
 import pytest
 
-from may.serialization.preflight import venue_property_gaps
+from may.geography.venue_manager import VenueConfig
+from may.preflight.venue_property_gaps import venue_property_gaps
+from may.serialization.serialization_config import SerialisationConfig
 
 VENUE_TYPES = {
     "company": {"filename": "companies.csv"},
@@ -25,26 +27,33 @@ def venue_dir(tmp_path):
     return str(tmp_path)
 
 
-def schema(types):
-    return {"venues": {"types": types}}
+def schema(venue_type_properties):
+    return SerialisationConfig(venue_type_properties=venue_type_properties)
+
+
+def venues(data_dir):
+    return VenueConfig(
+        data_dir=data_dir, config_path="venues.yaml", venue_types=VENUE_TYPES,
+        filter_by_geography=None,
+    )
 
 
 class TestVenuePropertyGaps:
     def test_a_column_the_files_carry_is_matched(self, venue_dir):
         gaps = venue_property_gaps(
-            schema({"company": {"properties": ["industry_code"]}}), VENUE_TYPES, venue_dir
+            schema({"company": ["industry_code"]}), venues(venue_dir)
         )
         assert gaps == []
 
     def test_a_name_absent_from_the_headers_is_a_gap(self, venue_dir):
         gaps = venue_property_gaps(
-            schema({"company": {"properties": ["work_sector"]}}), VENUE_TYPES, venue_dir
+            schema({"company": ["work_sector"]}), venues(venue_dir)
         )
         assert [(t, p) for t, p, _ in gaps] == [("company", "work_sector")]
 
     def test_gap_reports_the_columns_the_files_carry(self, venue_dir):
         gaps = venue_property_gaps(
-            schema({"company": {"properties": ["work_sector"]}}), VENUE_TYPES, venue_dir
+            schema({"company": ["work_sector"]}), venues(venue_dir)
         )
         assert "industry_code" in gaps[0][2]
 
@@ -52,8 +61,8 @@ class TestVenuePropertyGaps:
         """Nations arrive as separate files, and a column in any one of them
         counts as supplied."""
         gaps = venue_property_gaps(
-            schema({"school": {"properties": ["Gender", "NumberOfPupils"]}}),
-            VENUE_TYPES, venue_dir,
+            schema({"school": ["Gender", "NumberOfPupils"]}),
+            venues(venue_dir),
         )
         assert gaps == []
 
@@ -61,13 +70,13 @@ class TestVenuePropertyGaps:
         """The run assembles household venues, so their properties appear
         once the build reaches them."""
         gaps = venue_property_gaps(
-            schema({"household": {"properties": ["capacity"]}}), VENUE_TYPES, venue_dir
+            schema({"household": ["capacity"]}), venues(venue_dir)
         )
         assert gaps == []
 
     def test_absent_files_are_skipped(self, tmp_path):
         gaps = venue_property_gaps(
-            schema({"company": {"properties": ["anything"]}}), VENUE_TYPES, str(tmp_path)
+            schema({"company": ["anything"]}), venues(str(tmp_path))
         )
         assert gaps == []
 

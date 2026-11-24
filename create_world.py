@@ -8,6 +8,7 @@ import numba as nb
 import yaml
 from may.geography import Geography, GeographyError, VenueManager, VenueError
 from may.population import PopulationManager, PopulationError
+from may.serialization import SerialisationError, WorldSerializer
 from may.world import World
 from may.social_networks import SocialNetworkBuilder
 from may.preflight.preflight_coordinator import run_preflight
@@ -116,10 +117,15 @@ def main(args=None):
         logger.info("--preflight-only given; stopping before the build.")
         return None
 
+    try:
+        serialisation = WorldSerializer.from_config(config.get("serialization") or {})
+    except SerialisationError as e:
+        logger.error(f"Serialisation config failed: {e}")
+        sys.exit(1)
+
     # Every build records what its stages cost. The profile lands next to the
     # world this run produces.
-    profile_output_dir = pr.resolve((config.get("serialization") or {}).get("output_dir", "."))
-    bp.start(profile_output_dir, args.config, cprofile_enabled=getattr(args, "profile", False))
+    bp.start(serialisation.output_dir, args.config, cprofile_enabled=getattr(args, "profile", False))
 
     # Setup geography from config and command-line arguments
     with bp.stage("geography_load", "pipeline"):
@@ -233,26 +239,16 @@ def main(args=None):
     logger.info("=" * 60)
 
     # Export world to HDF5 for C++ simulation
-    serial_config = config.get("serialization") or {}
-    if serial_config.get("enabled", True):
+    if serialisation.enabled:
         logger.info("")
         logger.info("Exporting world to HDF5...")
         with bp.stage("hdf5_export", "pipeline"):
             try:
-                config_file = serial_config.get("config_file")
-                if not config_file:
-                    raise ValueError(
-                        "serialization.enabled is true but serialization.config_file "
-                        "is missing — a serialization schema is required."
-                    )
-                output_dir = pr.resolve(serial_config.get("output_dir", "."))
-                filename = args.filename or serial_config.get("filename", "world_state.h5")
-
-                if output_dir != ".":
-                    os.makedirs(output_dir, exist_ok=True)
-
-                export_path = os.path.join(output_dir, filename)
-                world.export_to_hdf5(export_path, config_file=pr.resolve(config_file))
+                os.makedirs(serialisation.output_dir, exist_ok=True)
+                export_path = os.path.join(
+                    serialisation.output_dir, args.filename or serialisation.filename
+                )
+                world.export_to_hdf5(export_path, serialisation.schema)
             except Exception as e:
                 logger.error(f"Failed to serialize world to HDF5: {e}")
                 logger.exception(e)

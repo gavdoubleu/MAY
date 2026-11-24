@@ -1,95 +1,177 @@
 """
-Configuration loader for world serialization.
+Serialisation schema: which properties and attributes the HDF5 export writes.
 
-Loads YAML configuration specifying which properties and attributes
-to include when exporting world state to HDF5.
+The schema is parsed once, before the build, so a malformed section is reported
+up front rather than crashing the export after the build has been paid for.
 """
 
 import logging
-import os
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+
+import yaml
+
+from may.preflight.report import PreflightReport, not_list_message, not_mapping_message
 from may.utils import path_resolver as pr
-from may.utils.yaml_loader import load_yaml
+from may.utils.yaml_loader import invalid_yaml_message, load_yaml, unreadable_file_message
 
 logger = logging.getLogger("serialization_config")
 
+KNOWN_SECTIONS = ("population", "geography", "venues", "relationships", "output")
+VENUE_GLOBAL_SWITCHES = ("include_coordinates", "include_is_residence")
 
-class SerializationConfig:
+
+class SerialisationError(Exception):
+    """The serialisation config or schema cannot be used; `.report` lists every problem."""
+
+
+@dataclass(frozen=True)
+class SerialisationConfig:
+    """Parsed serialisation schema. Build with `parse_schema` or `from_file`."""
+
+    population_properties: List[str] = field(default_factory=list)
+    geography_include_coordinates: bool = True
+    geography_properties: List[str] = field(default_factory=list)
+    venue_global_settings: Dict = field(default_factory=dict)
+    venue_type_properties: Dict[str, List[str]] = field(default_factory=dict)
+    relationships: Dict = field(default_factory=dict)
+    output_settings: Dict = field(default_factory=dict)
+
+    @classmethod
+    def from_file(cls, path: str) -> "SerialisationConfig":
+        """Load and parse a schema file; `SerialisationError` listing every problem."""
+        schema, report = load_schema_file(path)
+        report.raise_if_problems(
+            SerialisationError, f"Serialisation schema {path} cannot be used:"
+        )
+        for warning in report.warnings:
+            logger.info(f"Serialisation schema warning: {warning.key}: {warning.message}")
+        return schema
+
+
+def load_schema_file(path: str) -> Tuple[Optional[SerialisationConfig], PreflightReport]:
+    """Find (`find_config_file`), load and parse a schema file.
+
+    File findings are keyed `""`; schema findings `"(<found path>): <section>"`.
     """
-    Loads and normalizes serialization configuration from YAML.
+    report = PreflightReport()
+    try:
+        found_path = pr.find_config_file(path, None)
+    except pr.ConfigFileNotFoundError as error:
+        report.problem("", str(error))
+        return None, report
+    try:
+        loaded = load_yaml(found_path)
+    except yaml.YAMLError as error:
+        report.problem("", invalid_yaml_message(found_path, error))
+        return None, report
+    except (OSError, UnicodeDecodeError) as error:
+        report.problem("", unreadable_file_message(found_path, error))
+        return None, report
+    if not loaded:
+        report.problem("", f"{found_path} is empty")
+        return None, report
+    schema, schema_report = parse_schema(loaded)
+    return schema, PreflightReport.merge(report, schema_report.under(f"({found_path})"))
 
-    The config file specifies which properties to include for:
-    - Population (person.properties)
-    - Geography (geographical_unit.properties)
-    - Venues (venue.properties, per-type)
-    - Subsets (subset properties)
-    - Relationships (activity_map, hierarchies)
-    """
 
-    def __init__(self, config_file):
-        """
-        Initialize SerializationConfig.
+def parse_schema(schema) -> Tuple[Optional[SerialisationConfig], PreflightReport]:
+    """Parse a loaded schema; keys relative to its root. Config is `None` if any problem."""
+    report = PreflightReport()
+    if not schema:
+        report.problem("", "is empty")
+        return None, report
+    if not isinstance(schema, dict):
+        report.problem("", not_mapping_message(schema))
+        return None, report
 
-        Args:
-            config_file: Path to YAML configuration file
-        """
-        self.config_file = pr.resolve(config_file)
-        self.config = None
-
-        # Parsed configuration sections
-        self.population_properties = []
-        self.geography_include_coordinates = True
-        self.geography_properties = []
-        self.venue_global_settings = {}
-        self.venue_type_properties = {}
-        self.relationships = {}
-        self.output_settings = {}
-
-        self._load_config()
-
-    def _load_config(self):
-        """Load and parse the YAML configuration file."""
-        if not os.path.exists(self.config_file):
-            raise FileNotFoundError(
-                f"Serialization config not found: {self.config_file}"
+    for section in schema:
+        if section not in KNOWN_SECTIONS:
+            report.warning(
+                section, f"unknown section; ignored (known: {', '.join(KNOWN_SECTIONS)})"
             )
 
-        logger.info(f"Loading serialization config from {self.config_file}")
+    population = _section(report, schema, "population", "population")
+    geography = _section(report, schema, "geography", "geography")
+    venues = _section(report, schema, "venues", "venues")
+    relationships = _section(report, schema, "relationships", "relationships")
+    output = _section(report, schema, "output", "output")
 
-        self.config = load_yaml(self.config_file)
+    population_properties = _names(report, population, "properties", "population")
+    geography_properties = _names(report, geography, "properties", "geography")
+    _switch(report, geography, "include_coordinates", "geography")
 
-        if not self.config:
-            raise ValueError(f"Empty serialization config: {self.config_file}")
-
-        population = self.config.get("population", {})
-        self.population_properties = population.get("properties", [])
-        logger.info(
-            f"Population: {len(self.population_properties)} additional properties to serialize"
-        )
-        if self.population_properties:
-            logger.info(f"  Properties: {self.population_properties}")
-
-        geography = self.config.get("geography", {})
-        self.geography_include_coordinates = geography.get("include_coordinates", True)
-        self.geography_properties = geography.get("properties", [])
-        logger.info(
-            f"Geography: coordinates={self.geography_include_coordinates}, "
-            f"{len(self.geography_properties)} additional properties"
+    venue_global = _section(report, venues, "global", "venues.global")
+    for switch in VENUE_GLOBAL_SWITCHES:
+        _switch(report, venue_global, switch, "venues.global")
+    venue_types = _section(report, venues, "types", "venues.types")
+    venue_type_properties = {}
+    for venue_type in venue_types or {}:
+        type_settings = _section(report, venue_types, venue_type, f"venues.types.{venue_type}")
+        venue_type_properties[venue_type] = _names(
+            report, type_settings, "properties", f"venues.types.{venue_type}"
         )
 
-        venues = self.config.get("venues", {})
-        self.venue_global_settings = venues.get("global", {})
-        for venue_type, type_config in venues.get("types", {}).items():
-            properties = type_config.get("properties", [])
-            self.venue_type_properties[venue_type] = properties
-            if properties:
-                logger.info(
-                    f"Venue '{venue_type}': {len(properties)} properties to serialize"
-                )
-                logger.info(f"  Properties: {properties}")
-            else:
-                logger.debug(
-                    f"Venue '{venue_type}': minimal serialization (core attributes only)"
-                )
+    _switch(report, relationships, "include_activity_map", "relationships")
+    _switch(report, output, "include_metadata", "output")
+    _names(report, output, "metadata", "output")
+    if output and "compression_level" in output:
+        level = output["compression_level"]
+        if isinstance(level, bool) or not isinstance(level, int):
+            report.problem("output.compression_level", f"must be a whole number; got {level!r}")
 
-        self.relationships = self.config.get("relationships", {})
-        self.output_settings = self.config.get("output", {})
+    if report.has_problems:
+        return None, report
+    return (
+        SerialisationConfig(
+            population_properties=population_properties,
+            geography_include_coordinates=geography.get("include_coordinates", True),
+            geography_properties=geography_properties,
+            venue_global_settings=venue_global,
+            venue_type_properties=venue_type_properties,
+            relationships=relationships,
+            output_settings=output,
+        ),
+        report,
+    )
+
+
+def _section(report: PreflightReport, parent, name: str, key: str) -> Optional[dict]:
+    """`parent[name]` as a mapping (`{}` if absent or blank); `None` with a problem otherwise.
+
+    A `None` parent (itself malformed, already reported) gives `None` silently."""
+    if parent is None:
+        return None
+    value = parent.get(name)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        report.problem(key, not_mapping_message(value))
+        return None
+    return value
+
+
+def _names(report: PreflightReport, section, name: str, section_key: str) -> List[str]:
+    """`section[name]` as a list of strings (`[]` if absent or blank); problems keyed by index."""
+    if section is None:
+        return []
+    value = section.get(name)
+    if value is None:
+        return []
+    key = f"{section_key}.{name}"
+    if not isinstance(value, list):
+        report.problem(key, not_list_message(value))
+        return []
+    for index, entry in enumerate(value):
+        if not isinstance(entry, str):
+            report.problem(f"{key}[{index}]", f"must be a name; got {entry!r}")
+    return value
+
+
+def _switch(report: PreflightReport, section, name: str, section_key: str) -> None:
+    """Problem if `section[name]` is set and not true/false."""
+    if section is None or name not in section:
+        return
+    value = section[name]
+    if not isinstance(value, bool):
+        report.problem(f"{section_key}.{name}", f"must be true or false; got {value!r}")

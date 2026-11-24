@@ -8,7 +8,7 @@ created by WorldSerializer.export_to_hdf5().
 import logging
 import h5py
 import numpy as np
-from .serialization_config import SerializationConfig
+from .serialization_config import SerialisationConfig
 import time
 
 logger = logging.getLogger("world_loader")
@@ -88,7 +88,7 @@ def load_world_from_hdf5(
     logger.info("=" * 60)
     logger.info(f"Input file: {input_file}")
 
-    config = SerializationConfig(config_file)
+    config = SerialisationConfig.from_file(config_file)
 
     with h5py.File(input_file, "r") as f:
         # Read metadata

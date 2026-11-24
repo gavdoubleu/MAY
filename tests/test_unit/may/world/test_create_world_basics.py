@@ -82,7 +82,7 @@ def test_main_cli_arg_parsing(mock_geography_class):
                             # we can just let it run through safely since it's mocked
                             try:
                                 main()
-                            except Exception:
+                            except (Exception, SystemExit):
                                 pass # We only care that config was read
                                 
             # Assert config was attempted to be opened
@@ -258,3 +258,94 @@ def test_timeline_problem_exits_before_geography_loads(tmp_path):
             run_main(config_path)
     assert excinfo.value.code == 1
     geography_class.from_config.assert_not_called()
+
+
+SCHEMA_YAML = "venues:\n  types:\n    company:\n      properties: [industry_code]\n"
+
+
+def write_serialisation_config(tmp_path, serialisation_yaml):
+    """Minimal config whose only real block under test is `serialization`."""
+    (tmp_path / "venues_config.yaml").write_text("venue_types: {}\n", encoding="utf-8")
+    (tmp_path / "serialization.yaml").write_text(SCHEMA_YAML, encoding="utf-8")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        VALID_GEOGRAPHY_YAML + f"venues:\n  data_dir: {tmp_path}\n"
+        + serialisation_yaml + VALID_TIMELINE_YAML,
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def run_build(config_path, *extra_args):
+    """Run `main` with the build mocked out; returns (World class mock, bp.start mock)."""
+    with patch("create_world.Geography"), \
+            patch("create_world.VenueManager"), \
+            patch("create_world.PopulationManager"), \
+            patch("create_world.World") as world_class, \
+            patch("create_world.run_timeline"), \
+            patch("create_world.bp.start") as profile_start:
+        run_main(config_path, *extra_args)
+    return world_class, profile_start
+
+
+def enabled_block(tmp_path, extra=""):
+    return (
+        f"serialization:\n  enabled: true\n  config_file: {tmp_path / 'serialization.yaml'}\n"
+        f"  output_dir: {tmp_path / 'output'}\n" + extra
+    )
+
+
+def test_bad_serialisation_block_exits_before_build(tmp_path):
+    """`from_config` stops the run even when preflight lets the block through."""
+    config_path = write_serialisation_config(
+        tmp_path, f"serialization:\n  enabled: 'yes'\n  output_dir: {tmp_path}\n"
+    )
+    with patch("create_world.run_preflight"), \
+            patch("create_world.Geography") as geography_class:
+        with pytest.raises(SystemExit) as excinfo:
+            run_main(config_path)
+    assert excinfo.value.code == 1
+    geography_class.from_config.assert_not_called()
+
+
+def test_export_receives_settings_schema_and_path(tmp_path):
+    from may.serialization import SerialisationConfig
+
+    config_path = write_serialisation_config(
+        tmp_path, enabled_block(tmp_path, "  filename: scenario.h5\n")
+    )
+    world_class, _ = run_build(config_path)
+    export = world_class.return_value.export_to_hdf5
+    export.assert_called_once_with(
+        os.path.join(str(tmp_path / "output"), "scenario.h5"),
+        SerialisationConfig.from_file(str(tmp_path / "serialization.yaml")),
+    )
+    assert (tmp_path / "output").is_dir()
+
+
+def test_filename_argument_overrides_block_filename(tmp_path):
+    config_path = write_serialisation_config(
+        tmp_path, enabled_block(tmp_path, "  filename: scenario.h5\n")
+    )
+    world_class, _ = run_build(config_path, "--filename", "override.h5")
+    export_path = world_class.return_value.export_to_hdf5.call_args.args[0]
+    assert export_path == os.path.join(str(tmp_path / "output"), "override.h5")
+
+
+def test_disabled_serialisation_does_not_export(tmp_path):
+    config_path = write_serialisation_config(
+        tmp_path, f"serialization:\n  enabled: false\n  output_dir: {tmp_path}\n"
+    )
+    world_class, _ = run_build(config_path)
+    world_class.return_value.export_to_hdf5.assert_not_called()
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_profile_dir_is_settings_output_dir(tmp_path, enabled):
+    block = (
+        enabled_block(tmp_path) if enabled
+        else f"serialization:\n  enabled: false\n  output_dir: {tmp_path / 'output'}\n"
+    )
+    config_path = write_serialisation_config(tmp_path, block)
+    _, profile_start = run_build(config_path)
+    assert profile_start.call_args.args[0] == str(tmp_path / "output")

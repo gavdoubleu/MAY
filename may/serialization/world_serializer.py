@@ -12,7 +12,12 @@ import h5py
 import numpy as np
 from datetime import datetime
 from collections import defaultdict
-from .serialization_config import SerializationConfig
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
+from may.preflight.report import PreflightReport
+from may.utils import path_resolver as pr
+from .serialization_config import SerialisationConfig, SerialisationError, load_schema_file
 from .property_types import (
     PropertyTypeError,
     describe_problems,
@@ -21,6 +26,21 @@ from .property_types import (
 )
 
 logger = logging.getLogger("world_serializer")
+
+DEFAULT_ENABLED = True
+DEFAULT_OUTPUT_DIR = "."
+DEFAULT_FILENAME = "world_state.h5"
+
+
+@dataclass(frozen=True)
+class SerialisationSettings:
+    """Parsed `serialization` block. `schema` is `None` when disabled."""
+
+    enabled: bool
+    schema_path: Optional[str]
+    schema: Optional[SerialisationConfig]
+    output_dir: str
+    filename: str
 
 
 def _encode_json(value):
@@ -43,22 +63,55 @@ def _encode_json(value):
         )
 
 
+def _output_path(
+    block: dict, key: str, default: str, report: Optional[PreflightReport] = None
+) -> Optional[str]:
+    """Resolved `block[key]` (`default` if unset). Not a path: problem, or `default` silently
+    without a report."""
+    value = block.get(key)
+    if value is None:
+        return pr.resolve(default)
+    if not isinstance(value, str) or not value:
+        if report is None:
+            return pr.resolve(default)
+        report.problem(key, f"must be a path; got {value!r}")
+        return None
+    return pr.resolve(value)
+
+
+def _parse_schema_file(
+    block: dict, report: PreflightReport
+) -> Tuple[Optional[str], Optional[SerialisationConfig]]:
+    """Resolved `config_file` and its parsed schema; findings keyed `config_file ...`."""
+    config_file = block.get("config_file")
+    if config_file is None or config_file == "":
+        report.problem("config_file", "not set; serialisation is enabled")
+        return None, None
+    if not isinstance(config_file, str):
+        report.problem("config_file", f"must be a path; got {config_file!r}")
+        return None, None
+    schema_path = pr.resolve(config_file)
+    schema, schema_report = load_schema_file(schema_path)
+    nested = schema_report.under("config_file", sep=" ")
+    report.problems.extend(nested.problems)
+    report.warnings.extend(nested.warnings)
+    return schema_path, schema
+
+
 class WorldSerializer:
     """
     Serializes World object to HDF5 format for C++ consumption.
 
-    Uses SerializationConfig to determine which properties to include.
+    Uses a parsed SerialisationConfig to determine which properties to include.
     Exports data in Structure-of-Arrays (SoA) format for efficient C++ loading.
     """
 
-    def __init__(self, config_file):
+    def __init__(self, schema: SerialisationConfig):
         """
-        Initialize WorldSerializer.
-
         Args:
-            config_file: Path to serialization YAML configuration
+            schema: Parsed serialisation schema (`SerialisationConfig.from_file`).
         """
-        self.config = SerializationConfig(config_file)
+        self.config = schema
         self.compression_settings = {
             "compression": self.config.output_settings.get("compression", "gzip"),
             "compression_level": self.config.output_settings.get(
@@ -66,6 +119,65 @@ class WorldSerializer:
             ),
         }
         self.registries = {}  # Registry of string-to-int mappings
+
+    @staticmethod
+    def parse_config(
+        block: Optional[dict],
+    ) -> Tuple[Optional[SerialisationSettings], PreflightReport]:
+        """Parse a `serialization` block. Settings are `None` if any problem.
+
+        `enabled: false` checks nothing; the schema is then not loaded."""
+        report = PreflightReport()
+        block = block or {}
+        enabled = block.get("enabled", DEFAULT_ENABLED)
+        if not isinstance(enabled, bool):
+            report.problem("enabled", f"must be true or false; got {enabled!r}")
+            return None, report
+        if not enabled:
+            return (
+                SerialisationSettings(
+                    enabled=False,
+                    schema_path=None,
+                    schema=None,
+                    output_dir=_output_path(block, "output_dir", DEFAULT_OUTPUT_DIR),
+                    filename=_output_path(block, "filename", DEFAULT_FILENAME),
+                ),
+                report,
+            )
+
+        output_dir = _output_path(block, "output_dir", DEFAULT_OUTPUT_DIR, report)
+        filename = _output_path(block, "filename", DEFAULT_FILENAME, report)
+        schema_path, schema = _parse_schema_file(block, report)
+        if report.has_problems:
+            return None, report
+        return (
+            SerialisationSettings(
+                enabled=True,
+                schema_path=schema_path,
+                schema=schema,
+                output_dir=output_dir,
+                filename=filename,
+            ),
+            report,
+        )
+
+    @staticmethod
+    def preflight(block: Optional[dict]) -> PreflightReport:
+        """Check a `serialization` block and its schema file without building anything."""
+        _, report = WorldSerializer.parse_config(block)
+        return report
+
+    @staticmethod
+    def from_config(block: Optional[dict]) -> SerialisationSettings:
+        """Settings from a `serialization` block; `SerialisationError` listing every problem."""
+        settings, report = WorldSerializer.parse_config(block)
+        report.raise_if_problems(
+            SerialisationError,
+            f"Serialisation config has {len(report.problems)} problem(s):",
+        )
+        for finding in report.warnings:
+            logger.info(f"Serialisation config warning: {finding.key}: {finding.message}")
+        return settings
 
     def export(self, world, output_file):
         """

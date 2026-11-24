@@ -1,5 +1,5 @@
 """
-Compare the serialization schema with the venue data before the world is built.
+Compare the serialisation schema with the venue data before the world is built.
 
 The HDF5 export runs last, so a property the schema names and the venue files
 omit surfaces once the rest of the run has been paid for. Reading one header per
@@ -15,17 +15,18 @@ import os
 
 import pandas as pd
 
+from may.geography.venue_manager import VenueConfig
+from may.serialization.serialization_config import SerialisationConfig
 from may.utils.stacked_input import as_path_list
 
 
-def venue_property_gaps(serialization_config, venue_types, venues_data_dir):
+def venue_property_gaps(schema: SerialisationConfig, venue_config: VenueConfig):
     """
     Configured venue properties whose name is missing from the venue files.
 
     Args:
-        serialization_config: Parsed serialization YAML.
-        venue_types: Parsed venue types (name -> type config), as in `VenueConfig`.
-        venues_data_dir: Directory the venue filenames are relative to.
+        schema: Parsed serialisation schema.
+        venue_config: Parsed venue config; filenames are relative to its `data_dir`.
 
     Returns:
         List of (venue_type, property, columns_available), one entry per
@@ -33,22 +34,19 @@ def venue_property_gaps(serialization_config, venue_types, venues_data_dir):
         supplies the type. columns_available holds the names those headers do
         carry, sorted.
     """
-    configured = ((serialization_config.get("venues") or {}).get("types")) or {}
-
     gaps = []
-    for venue_type, type_settings in configured.items():
-        properties = (type_settings or {}).get("properties") or []
-        spec = venue_types.get(venue_type)
+    for venue_type, properties in schema.venue_type_properties.items():
+        spec = venue_config.venue_types.get(venue_type)
         if not isinstance(spec, dict) or not spec.get("filename"):
             # The run assembles this type, so its properties appear once the
             # build reaches them.
             continue
 
         paths = [
-            os.path.join(venues_data_dir, p)
-            for p in as_path_list(spec["filename"], f"venue type '{venue_type}'")
+            os.path.join(venue_config.data_dir, path)
+            for path in as_path_list(spec["filename"], f"venue type '{venue_type}'")
         ]
-        present = [p for p in paths if os.path.exists(p)]
+        present = [path for path in paths if os.path.exists(path)]
         if not present:
             continue
 
@@ -56,8 +54,7 @@ def venue_property_gaps(serialization_config, venue_types, venues_data_dir):
         for path in present:
             columns |= set(pd.read_csv(path, nrows=0).columns)
 
-        for prop in properties:
-            if prop not in columns:
-                gaps.append((venue_type, prop, sorted(columns)))
+        for property_name in properties:
+            if property_name not in columns:
+                gaps.append((venue_type, property_name, sorted(columns)))
     return gaps
-

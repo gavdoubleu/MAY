@@ -172,7 +172,7 @@ def test_missing_schema_file_is_problem(venues_dir, tmp_path):
     config["serialization"]["config_file"] = str(missing_path)
     report = check_world_config(config)
     assert [(finding.key, finding.message) for finding in report.problems] == [
-        ("serialization.config_file", f"{missing_path} not found")
+        ("serialization.config_file", f"not found; tried {missing_path}")
     ]
 
 
@@ -200,18 +200,66 @@ def test_unreadable_schema_is_problem_even_when_venues_are_broken(venues_dir, tm
     assert keys(report.problems) == ["venues.config_file", "serialization.config_file"]
 
 
-@pytest.mark.parametrize(
-    "schema_yaml",
-    ["venues: [a, b]\n", "venues:\n  types: company\n"],
-    ids=["venues_list", "types_string"],
-)
-def test_gap_check_failure_is_warning(venues_dir, tmp_path, schema_yaml):
+def test_gap_check_failure_is_warning(venues_dir, tmp_path):
     serialization_path = tmp_path / "serialization.yaml"
-    config = world_config(venues_dir, COMPANY_VENUES, serialization_path, schema_yaml)
+    config = world_config(venues_dir, COMPANY_VENUES, serialization_path, WORK_SECTOR_SCHEMA)
+    (venues_dir / "companies.csv").unlink()
+    (venues_dir / "companies.csv").mkdir()
     report = check_world_config(config)
     assert report.problems == []
     assert keys(report.warnings) == [f"serialization.config_file ({serialization_path})"]
     assert report.warnings[0].message.startswith("venue property check skipped: ")
+
+
+def test_bad_enabled_is_problem_prefixed_with_serialization(venues_dir, tmp_path):
+    config = world_config(
+        venues_dir, COMPANY_VENUES, tmp_path / "serialization.yaml", WORK_SECTOR_SCHEMA
+    )
+    config["serialization"]["enabled"] = "yes"
+    report = check_world_config(config)
+    assert keys(report.problems) == ["serialization.enabled"]
+    assert report.warnings == []
+
+
+@pytest.mark.parametrize(
+    "schema_yaml, section",
+    [
+        ("venues: [a, b]\n", "venues"),
+        ("venues:\n  types: company\n", "venues.types"),
+        ("venues:\n  types:\n    company:\n      properties: work_sector\n", "venues.types.company.properties"),
+    ],
+    ids=["venues_list", "types_string", "properties_string"],
+)
+def test_malformed_schema_is_problem_and_skips_gap_check(
+    venues_dir, tmp_path, schema_yaml, section
+):
+    serialization_path = tmp_path / "serialization.yaml"
+    config = world_config(venues_dir, COMPANY_VENUES, serialization_path, schema_yaml)
+    report = check_world_config(config)
+    assert keys(report.problems) == [f"serialization.config_file ({serialization_path}): {section}"]
+    assert report.warnings == []
+
+
+def test_unknown_schema_section_is_warning(venues_dir, tmp_path):
+    serialization_path = tmp_path / "serialization.yaml"
+    config = world_config(
+        venues_dir, COMPANY_VENUES, serialization_path, "extras: {}\n" + WORK_SECTOR_SCHEMA
+    )
+    (venues_dir / "companies.csv").write_text("geo_unit,work_sector\nA,C\n")
+    report = check_world_config(config)
+    assert report.problems == []
+    assert keys(report.warnings) == [f"serialization.config_file ({serialization_path}): extras"]
+
+
+def test_schema_venue_type_absent_from_venues_config_is_accepted(venues_dir, tmp_path):
+    """Child and route venue types exist only once the build creates them."""
+    schema_yaml = "venues:\n  types:\n    classroom:\n      properties: [capacity]\n"
+    config = world_config(
+        venues_dir, COMPANY_VENUES, tmp_path / "serialization.yaml", schema_yaml
+    )
+    report = check_world_config(config)
+    assert report.problems == []
+    assert report.warnings == []
 
 
 def test_run_preflight_raises_on_problems_after_logging(venues_dir, caplog):

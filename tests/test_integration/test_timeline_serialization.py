@@ -1,114 +1,10 @@
 import pytest
 import os
 import h5py
-from unittest.mock import patch, MagicMock
 
-# We focus on the isolated block of logic found in run_world (Lines 335-350)
-def execute_serialization_block(world_mock, config, args, logger_mock):
-    """
-    Simulates the exact serialization block from create_world.py
-    for targeted evaluation without running the full 5-minute pipeline.
-    """
-    serial_config = config.get("serialization", {})
-    if serial_config.get("enabled", True):
-        logger_mock.info("")
-        logger_mock.info("Exporting world to HDF5...")
-        config_file = serial_config.get("config_file")
-        if not config_file:
-            raise ValueError("serialization.config_file is required")
-        output_dir = serial_config.get("output_dir", ".")
-        filename = serial_config.get("filename", args.filename)
+from may.serialization import SerialisationConfig
 
-        if output_dir != ".":
-            os.makedirs(output_dir, exist_ok=True)
-
-        export_path = os.path.join(output_dir, filename)
-        world_mock.export_to_hdf5(export_path, config_file=config_file)
-
-
-class TestCreateWorldSerializationRouting:
-    """Verifies the engine parses combinations of YAML and CLI arguments natively."""
-
-    @pytest.fixture
-    def args_mock(self):
-        args = MagicMock()
-        args.filename = "default_cli_world.h5"
-        return args
-
-    @pytest.fixture
-    def world_mock(self):
-        return MagicMock()
-
-    @pytest.fixture
-    def logger_mock(self):
-        return MagicMock()
-
-    def test_serialization_explicitly_disabled(self, world_mock, args_mock, logger_mock):
-        """Verify config['serialization']['enabled'] = False aborts export."""
-        config = {"serialization": {"enabled": False}}
-        
-        execute_serialization_block(world_mock, config, args_mock, logger_mock)
-        
-        # Verify export was never called
-        world_mock.export_to_hdf5.assert_not_called()
-
-    def test_serialization_missing_config_file_fails_loud(self, world_mock, args_mock, logger_mock):
-        """Verify an enabled export with no config_file is rejected (no scenario-generic default)."""
-        config = {} # Missing or empty serialization block -> enabled defaults True, no config_file
-
-        with pytest.raises(ValueError):
-            execute_serialization_block(world_mock, config, args_mock, logger_mock)
-
-        world_mock.export_to_hdf5.assert_not_called()
-
-    @patch('os.makedirs')
-    def test_serialization_custom_output_directory_generation(self, mock_makedirs, world_mock, args_mock, logger_mock):
-        """Verify output_dir invokes os.makedirs and forms the correct joined path."""
-        custom_dir = "custom_outputs"
-        config = {
-            "serialization": {
-                "enabled": True,
-                "output_dir": custom_dir,
-                "config_file": "serializer.yaml"
-            }
-        }
-
-        execute_serialization_block(world_mock, config, args_mock, logger_mock)
-
-        mock_makedirs.assert_called_once_with(custom_dir, exist_ok=True)
-        expected_path = os.path.join(custom_dir, args_mock.filename)
-        world_mock.export_to_hdf5.assert_called_once_with(expected_path, config_file="serializer.yaml")
-
-    def test_serialization_custom_filename_priority(self, world_mock, args_mock, logger_mock):
-        """Verify YAML filename completely overrides the CLI fallback."""
-        custom_name = "specific_world.h5"
-        config = {
-            "serialization": {
-                "enabled": True,
-                "filename": custom_name,
-                "config_file": "serializer.yaml"
-            }
-        }
-
-        execute_serialization_block(world_mock, config, args_mock, logger_mock)
-
-        expected_path = os.path.join(".", custom_name)
-        world_mock.export_to_hdf5.assert_called_once_with(expected_path, config_file="serializer.yaml")
-
-    def test_serialization_custom_config_link(self, world_mock, args_mock, logger_mock):
-        """Verify the custom serializer config gets intercepted and passed as a kwarg."""
-        custom_serializer = "custom_serializer.yaml"
-        config = {
-            "serialization": {
-                "enabled": True,
-                "config_file": custom_serializer
-            }
-        }
-        
-        execute_serialization_block(world_mock, config, args_mock, logger_mock)
-        
-        expected_path = os.path.join(".", args_mock.filename)
-        world_mock.export_to_hdf5.assert_called_once_with(expected_path, config_file=custom_serializer)
+SCHEMA_2021 = "configs/2021/serialization_config.yaml"
 
 
 @pytest.fixture
@@ -168,7 +64,7 @@ class TestWorldHDF5PayloadIntegrity:
         
         # 1. Trigger realistic serialization using the internal method natively.
         stats = minimal_world.export_to_hdf5(
-            test_export_path, config_file="configs/2021/serialization_config.yaml"
+            test_export_path, SerialisationConfig.from_file(SCHEMA_2021)
         )
 
         # Confirm the statistics return trace matches the minimal_world injection size
@@ -241,7 +137,7 @@ class TestExportRejectsUnwritableProperties:
         export_path = str(tmp_path / "rejected.h5")
         with pytest.raises(Exception) as excinfo:
             minimal_world.export_to_hdf5(
-                export_path, config_file="configs/2021/serialization_config.yaml"
+                export_path, SerialisationConfig.from_file(SCHEMA_2021)
             )
 
         message = str(excinfo.value)
@@ -254,7 +150,7 @@ class TestExportRejectsUnwritableProperties:
         for person in minimal_world.population.get_all_people():
             person.properties["ethnicity"] = "white"
         stats = minimal_world.export_to_hdf5(
-            export_path, config_file="configs/2021/serialization_config.yaml"
+            export_path, SerialisationConfig.from_file(SCHEMA_2021)
         )
         assert stats["num_people"] == 10
         assert os.path.exists(export_path)
