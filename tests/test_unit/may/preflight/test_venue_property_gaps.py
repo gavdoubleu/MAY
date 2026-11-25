@@ -6,6 +6,8 @@ name a column the data supplies. Running it at the start of a build puts that
 answer in the log while there is still time to act on it.
 """
 
+import os
+
 import pytest
 
 from may.geography.venue_manager import VenueConfig
@@ -32,9 +34,17 @@ def schema(venue_type_properties):
 
 
 def venues(data_dir):
+    """Parsed config for VENUE_TYPES: the file-read types carry absolute paths."""
+    venue_paths = {
+        "company": [os.path.join(data_dir, "companies.csv")],
+        "school": [
+            os.path.join(data_dir, "ew_schools.csv"),
+            os.path.join(data_dir, "sct_schools.csv"),
+        ],
+    }
     return VenueConfig(
         data_dir=data_dir, config_path="venues.yaml", venue_types=VENUE_TYPES,
-        filter_by_geography=None,
+        filter_by_geography=None, venue_paths=venue_paths,
     )
 
 
@@ -74,9 +84,13 @@ class TestVenuePropertyGaps:
         )
         assert gaps == []
 
-    def test_absent_files_are_skipped(self, tmp_path):
-        gaps = venue_property_gaps(
-            schema({"company": ["anything"]}), venues(str(tmp_path))
+    def test_types_without_venue_paths_are_skipped(self, venue_dir):
+        """Batch and disabled types have no venue_paths; the export checks them."""
+        config = VenueConfig(
+            data_dir=venue_dir, config_path="venues.yaml",
+            venue_types={"company": {"filename": "companies.csv", "enabled": False}},
+            filter_by_geography=None,
         )
+        gaps = venue_property_gaps(schema({"company": ["anything"]}), config)
         assert gaps == []
 

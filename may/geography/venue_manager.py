@@ -3,8 +3,8 @@ import pandas as pd
 import yaml
 import os
 from collections import defaultdict
-from dataclasses import dataclass
-from typing import Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 from .venue import Venue
 from may.preflight.context import PreflightContext, check_geo_level
 from may.preflight.report import PreflightReport, not_mapping_message
@@ -59,6 +59,16 @@ def _check_venue_type(report: PreflightReport, type_key: str, type_config, conte
         check_geo_level(level_key, type_config["level"], context, report)
 
 
+def _loads_from_file(type_config) -> bool:
+    """An enabled non-batch type with a filename: its files are read whole."""
+    return (
+        isinstance(type_config, dict)
+        and type_config.get("enabled", True) is not False
+        and type_config.get("batch_mode") is not True
+        and bool(type_config.get("filename"))
+    )
+
+
 @dataclass(frozen=True)
 class VenueConfig:
     """Parsed venue config block and YAML file; checked by `VenueManager.parse_config`."""
@@ -67,6 +77,8 @@ class VenueConfig:
     config_path: str
     venue_types: dict
     filter_by_geography: Optional[bool]
+    # Absolute paths of each enabled non-batch type's files; batch types have none.
+    venue_paths: Dict[str, List[str]] = field(default_factory=dict)
 
 
 class VenueError(Exception):
@@ -467,9 +479,17 @@ class VenueManager:
             report.problem(venue_types_key, "not set")
         elif not isinstance(venue_types, dict):
             report.problem(venue_types_key, not_mapping_message(venue_types))
-        else:
+        venue_paths = {}
+        if isinstance(venue_types, dict):
             for venue_type, type_config in venue_types.items():
-                _check_venue_type(report, f"{venue_types_key}.{venue_type}", type_config, context)
+                type_key = f"{venue_types_key}.{venue_type}"
+                _check_venue_type(report, type_key, type_config, context)
+                if _loads_from_file(type_config):
+                    paths = pr.check_data_files(
+                        report, f"{type_key}.filename", type_config["filename"], data_dir
+                    )
+                    if paths is not None:
+                        venue_paths[venue_type] = paths
         # A blank `settings:` (every setting commented out) uses the defaults.
         settings = config.get("settings")
         if settings is None:
@@ -490,6 +510,7 @@ class VenueManager:
             config_path=config_path,
             venue_types=venue_types,
             filter_by_geography=settings.get("filter_by_geography"),
+            venue_paths=venue_paths,
         )
         return venue_config, report
 
@@ -520,7 +541,8 @@ class VenueManager:
         self, venue_type, filename, filter_column=None, filter_values=None, dtype=None
     ):
         """
-        Load venues of a specific type from CSV (relative to data_dir).
+        Load venues of a specific type from CSV (relative paths join data_dir;
+        absolute paths are used as given).
         ``filename`` may be a single file or a list of files stacked into one
         table; all files must share the same columns.
 
@@ -538,19 +560,17 @@ class VenueManager:
         file and mixed in another arrives with two types and fails the stacking
         check; naming the type here settles it for the whole stack.
         """
-        from may.utils.stacked_input import as_path_list, load_stacked_csv
+        from may.utils.stacked_input import load_stacked_csv
 
         if self.data_dir is None:
             raise VenueError(
                 f"Cannot load venue type '{venue_type}' from CSV: VenueManager "
                 "has no data_dir; build it with VenueManager.from_config."
             )
-        venue_paths = [
-            os.path.join(self.data_dir, p)
-            for p in as_path_list(filename, f"venue type '{venue_type}'")
-        ]
-
         try:
+            venue_paths = pr.data_file_paths(
+                filename, self.data_dir, f"venue type '{venue_type}'"
+            )
             read_kwargs = {"dtype": dtype} if dtype else {}
             venue_df = load_stacked_csv(
                 venue_paths, label=f"{venue_type} venues", **read_kwargs
@@ -598,7 +618,9 @@ class VenueManager:
                     venue_type, filename, type_config["level"], load_options
                 )
             else:
-                self.load_venue_type_from_csv(venue_type, filename, **load_options)
+                self.load_venue_type_from_csv(
+                    venue_type, venue_config.venue_paths[venue_type], **load_options
+                )
 
         self._log_total_created()
         self._log_summary()

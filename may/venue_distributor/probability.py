@@ -7,7 +7,7 @@ manager reads the result, so the cache identity and the error type live here
 rather than in either of them.
 """
 
-from may.utils.stacked_input import as_path_list
+from may.utils.path_resolver import as_path_list
 
 # Keys rejected inside a probability_config block. Probability files have to
 # cover the loaded geography, so a `default` rate has no geo unit left to fill

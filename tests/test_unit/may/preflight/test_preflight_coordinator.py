@@ -27,10 +27,15 @@ def keys(findings):
 # Passes the timeline preflight, so tests of other blocks see only their own findings.
 CONSTANT_ATTRIBUTE = Path(__file__).parents[3] / "test_data" / "preflight" / "constant_attribute.yaml"
 VALID_TIMELINE = {"enabled": True, "steps": [{"type": "attribute", "config": str(CONSTANT_ATTRIBUTE)}]}
-# Passes the geography preflight; files are not opened there.
-VALID_GEOGRAPHY = {"levels": ["SGU", "MGU"], "hierarchy_file": "hierarchy.csv"}
+# Passes the geography preflight; there the file must exist but is not opened.
+PREFLIGHT_DATA = Path(__file__).parents[3] / "test_data" / "preflight"
+VALID_GEOGRAPHY = {
+    "levels": ["SGU", "MGU"],
+    "data_dir": str(PREFLIGHT_DATA),
+    "hierarchy_file": "hierarchy.csv",
+}
 # Passes the population preflight with no warning; an absent block warns.
-VALID_POPULATION = {"type": "matrix"}
+VALID_POPULATION = {"type": "matrix", "data_dir": str(PREFLIGHT_DATA)}
 
 
 def test_venue_problems_are_prefixed_with_venues(venues_dir):
@@ -465,6 +470,7 @@ def residence_config(venues_dir, tmp_path, **households_overrides):
     )
     (households_dir / "rules.yaml").write_text("enabled: true\n")
     (households_dir / "step_strategy.yaml").write_text(STRATEGY)
+    (households_dir / "h.csv").write_text("geo_unit\n")
     block = {
         "data_dir": str(households_dir), "data_file": "h.csv",
         "config_file": "households.yaml", "rules_file": "rules.yaml",
@@ -596,7 +602,12 @@ def test_population_not_mapping_is_problem(tmp_path):
 
 
 @pytest.mark.parametrize("population_block", [None, {}], ids=["absent", "empty"])
-def test_absent_population_is_defaults_warning(tmp_path, population_block):
+def test_absent_population_is_defaults_warning(tmp_path, monkeypatch, population_block):
+    default_population_dir = tmp_path / "data" / "population"
+    default_population_dir.mkdir(parents=True)
+    for name in ("demographics_male.csv", "demographics_female.csv"):
+        (default_population_dir / name).write_text("")
+    monkeypatch.chdir(tmp_path)
     config, _ = geography_config(tmp_path, VALID_GEOGRAPHY)
     config["population"] = population_block
     report = check_world_config(config)

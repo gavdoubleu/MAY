@@ -17,6 +17,33 @@ def reset_resolver(monkeypatch):
     monkeypatch.setattr(path_resolver, "_resolver", None)
 
 
+DATA_FILES = [
+    "EW_demographics_male.csv",
+    "EW_demographics_female.csv",
+    DEFAULT_MALE_FILE,
+    DEFAULT_FEMALE_FILE,
+    "people.csv",
+    "a.csv",
+    "b.csv",
+]
+
+
+@pytest.fixture(autouse=True)
+def working_dir(tmp_path, monkeypatch):
+    """Every data file the blocks below name exists under `data/population`."""
+    working = tmp_path / "working"
+    population_dir = working / "data" / "population"
+    population_dir.mkdir(parents=True)
+    monkeypatch.chdir(working)
+    for name in DATA_FILES:
+        (population_dir / name).write_text("")
+    return working
+
+
+def data_path(working_dir, name):
+    return str(working_dir / "data" / "population" / name)
+
+
 def matrix_block(**overrides):
     """A block shaped like `configs/2021`'s `population:` block."""
     block = {
@@ -70,13 +97,13 @@ def assert_single_warning(block, key, geo_levels=None):
 # Clean blocks
 
 
-def test_clean_matrix_block_is_clean_and_parsed():
+def test_clean_matrix_block_is_clean_and_parsed(working_dir):
     population_config, report = PopulationManager.parse_config(matrix_block())
     assert not report.problems and not report.warnings
     assert population_config.data_dir == "data/population"
     assert population_config.type == "matrix"
-    assert population_config.male_file == "EW_demographics_male.csv"
-    assert population_config.female_file == "EW_demographics_female.csv"
+    assert population_config.male_file == [data_path(working_dir, "EW_demographics_male.csv")]
+    assert population_config.female_file == [data_path(working_dir, "EW_demographics_female.csv")]
     assert population_config.column_mapping == {}
     assert population_config.filename is None
     assert population_config.level is None
@@ -91,11 +118,11 @@ def test_clean_batch_block_is_clean_and_parsed():
     assert population_config.level == "MGU"
 
 
-def test_clean_explicit_block_is_clean_and_parsed():
+def test_clean_explicit_block_is_clean_and_parsed(working_dir):
     population_config, report = PopulationManager.parse_config(explicit_block())
     assert not report.problems and not report.warnings
     assert population_config.type == "explicit"
-    assert population_config.filename == "people.csv"
+    assert population_config.filename == [data_path(working_dir, "people.csv")]
 
 
 def test_preflight_returns_parse_report():
@@ -103,33 +130,37 @@ def test_preflight_returns_parse_report():
     assert [finding.key for finding in report.problems] == ["level"]
 
 
-def test_paths_are_resolved():
-    path_resolver.init(config_root="/config", data_root="/root", output_root="/out")
+def test_paths_are_resolved(working_dir):
+    data_root = str(working_dir / "data")
+    path_resolver.init(config_root="/config", data_root=data_root, output_root="/out")
     population_config, report = PopulationManager.parse_config(
         matrix_block(
             data_dir="${data_root}/population",
-            demographics_male_file=["${data_root}/a.csv", "b.csv"],
-            demographics_female_file="${data_root}/c.csv",
+            demographics_male_file=["${data_root}/population/a.csv", "b.csv"],
+            demographics_female_file="${data_root}/population/people.csv",
         )
     )
     assert not report.problems
-    assert population_config.data_dir == "/root/population"
-    assert population_config.male_file == ["/root/a.csv", "b.csv"]
-    assert population_config.female_file == "/root/c.csv"
+    assert population_config.data_dir == f"{data_root}/population"
+    assert population_config.male_file == [
+        data_path(working_dir, "a.csv"),
+        data_path(working_dir, "b.csv"),
+    ]
+    assert population_config.female_file == [data_path(working_dir, "people.csv")]
 
 
 # Row: block absent or blank → defaults warning
 
 
 @pytest.mark.parametrize("block", [{}, None])
-def test_absent_or_blank_block_warns_defaults_in_use(block):
+def test_absent_or_blank_block_warns_defaults_in_use(block, working_dir):
     message = assert_single_warning(block, "")
     assert "default" in message
     population_config, _ = PopulationManager.parse_config(block)
     assert population_config.type == DEFAULT_TYPE == "matrix"
     assert population_config.data_dir == DEFAULT_DATA_DIR
-    assert population_config.male_file == DEFAULT_MALE_FILE
-    assert population_config.female_file == DEFAULT_FEMALE_FILE
+    assert population_config.male_file == [data_path(working_dir, DEFAULT_MALE_FILE)]
+    assert population_config.female_file == [data_path(working_dir, DEFAULT_FEMALE_FILE)]
 
 
 # Row: data_dir
@@ -190,6 +221,12 @@ def test_explicit_filename_not_a_path(filename):
     assert_single_problem(explicit_block(filename=filename), "filename")
 
 
+def test_explicit_filename_missing_file(working_dir):
+    (working_dir / "data" / "population" / "people.csv").unlink()
+    message = assert_single_problem(explicit_block(), "filename")
+    assert "people.csv" in message
+
+
 # Row: matrix demographics files
 
 
@@ -199,22 +236,65 @@ def test_matrix_demographics_file_not_a_path_spec(key, spec):
     assert_single_problem(matrix_block(**{key: spec}), key)
 
 
-def test_matrix_demographics_file_list_accepted():
+def test_matrix_demographics_file_list_accepted(working_dir):
     population_config, report = PopulationManager.parse_config(
         matrix_block(demographics_male_file=["a.csv", "b.csv"])
     )
     assert not report.problems
-    assert population_config.male_file == ["a.csv", "b.csv"]
+    assert population_config.male_file == [data_path(working_dir, "a.csv"), data_path(working_dir, "b.csv")]
 
 
-def test_matrix_unset_demographics_files_use_defaults():
+def test_matrix_unset_demographics_files_use_defaults(working_dir):
     block = matrix_block()
     del block["demographics_male_file"]
     del block["demographics_female_file"]
     population_config, report = PopulationManager.parse_config(block)
     assert not report.problems and not report.warnings
-    assert population_config.male_file == DEFAULT_MALE_FILE
-    assert population_config.female_file == DEFAULT_FEMALE_FILE
+    assert population_config.male_file == [data_path(working_dir, DEFAULT_MALE_FILE)]
+    assert population_config.female_file == [data_path(working_dir, DEFAULT_FEMALE_FILE)]
+
+
+@pytest.mark.parametrize(
+    "key, name",
+    [
+        ("demographics_male_file", "EW_demographics_male.csv"),
+        ("demographics_female_file", "EW_demographics_female.csv"),
+    ],
+)
+def test_matrix_demographics_file_missing(working_dir, key, name):
+    (working_dir / "data" / "population" / name).unlink()
+    message = assert_single_problem(matrix_block(), key)
+    assert name in message
+
+
+@pytest.mark.parametrize(
+    "key, name",
+    [
+        ("demographics_male_file", DEFAULT_MALE_FILE),
+        ("demographics_female_file", DEFAULT_FEMALE_FILE),
+    ],
+)
+def test_matrix_default_demographics_file_missing(working_dir, key, name):
+    (working_dir / "data" / "population" / name).unlink()
+    block = matrix_block()
+    del block["demographics_male_file"]
+    del block["demographics_female_file"]
+    message = assert_single_problem(block, key)
+    assert name in message
+
+
+def test_matrix_stacked_demographics_lists_every_missing_file(working_dir):
+    message = assert_single_problem(
+        matrix_block(demographics_male_file=["a.csv", "gone_1.csv", "gone_2.csv"]),
+        "demographics_male_file",
+    )
+    assert "gone_1.csv" in message and "gone_2.csv" in message
+
+
+def test_batch_files_not_existence_checked():
+    population_config, report = PopulationManager.parse_config(batch_block(), GEO_LEVELS)
+    assert population_config is not None
+    assert not report.problems
 
 
 # Rows: explicit_batch level

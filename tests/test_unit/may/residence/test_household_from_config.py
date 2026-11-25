@@ -28,6 +28,7 @@ def data_dir(tmp_path):
 
 def block_for(data_dir, config_text=CATEGORIES, **overrides):
     (data_dir / "households.yaml").write_text(config_text)
+    (data_dir / "households.csv").write_text("geo_unit\n")
     block = {
         "data_dir": str(data_dir),
         "config_file": "households.yaml",

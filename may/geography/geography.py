@@ -1,17 +1,11 @@
 import logging
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .geographical_unit import GeographicalUnit
 from may.preflight.report import PreflightReport, not_list_message, not_mapping_message
 from may.utils import path_resolver as pr
-from may.utils.stacked_input import (
-    StackedInputError,
-    as_path_list,
-    check_path_spec,
-    load_stacked_csv,
-    resolve_path_spec,
-)
+from may.utils.stacked_input import StackedInputError, load_stacked_csv
 from may.utils.yaml_loader import unreadable_file_message
 
 logger = logging.getLogger("geography")
@@ -40,8 +34,8 @@ class GeographyConfig:
 
     data_dir: str
     levels: list
-    hierarchy_file: object
-    coord_files: dict
+    hierarchy_file: List[str]
+    coord_files: Dict[str, List[str]]
     filters: Optional[dict]
 
 
@@ -74,19 +68,22 @@ def _parse_levels(block: dict, report: PreflightReport) -> Optional[list]:
     return levels
 
 
-def _parse_coord_files(block: dict, levels, report: PreflightReport) -> dict:
+def _parse_coord_files(block: dict, levels, data_dir, report: PreflightReport) -> dict:
+    """Paths per level; only levels listed are checked. A level absent has no coordinates."""
     coord_files = block.get("coord_files")
     if coord_files is None:
         return {}
     if not isinstance(coord_files, dict):
         report.problem("coord_files", not_mapping_message(coord_files))
         return {}
+    coord_paths = {}
     for level, spec in coord_files.items():
         key = f"coord_files.{level}"
         if levels is not None and level not in levels:
             report.problem(key, f"not a configured level; levels are {levels}")
-        check_path_spec(report, key, spec)
-    return coord_files
+            continue
+        coord_paths[level] = pr.check_data_files(report, key, spec, data_dir)
+    return coord_paths
 
 
 def _parse_filter(filter_block, levels, data_dir, report: PreflightReport) -> Optional[dict]:
@@ -217,8 +214,8 @@ class Geography:
         if hierarchy_file is None or hierarchy_file == "":
             report.problem("hierarchy_file", "not set")
         else:
-            check_path_spec(report, "hierarchy_file", hierarchy_file)
-        coord_files = _parse_coord_files(block, levels, report)
+            hierarchy_file = pr.check_data_files(report, "hierarchy_file", hierarchy_file, data_dir)
+        coord_files = _parse_coord_files(block, levels, data_dir, report)
         load_all = block.get("load_all", False)
         if not isinstance(load_all, bool):
             report.problem("load_all", f"must be true or false; got {load_all!r}")
@@ -231,8 +228,8 @@ class Geography:
         geography_config = GeographyConfig(
             data_dir=data_dir,
             levels=levels,
-            hierarchy_file=resolve_path_spec(hierarchy_file),
-            coord_files={level: resolve_path_spec(spec) for level, spec in coord_files.items()},
+            hierarchy_file=hierarchy_file,
+            coord_files=coord_files,
             filters=filters,
         )
         return geography_config, report
@@ -261,7 +258,7 @@ class Geography:
         )
         try:
             geography.load_from_csv()
-        except (ValueError, StackedInputError) as error:
+        except (ValueError, StackedInputError, pr.DataFileNotFoundError) as error:
             raise GeographyError(f"Geography data cannot be loaded: {error}") from error
         return geography
 
@@ -270,8 +267,6 @@ class Geography:
         Load geography data from the configured hierarchy and coordinate CSVs.
         Each may be a single file or a list of files stacked into one table.
         """
-        import os
-
         logger.info(f"Loading geography from {self.data_dir}")
 
         # 1. Load hierarchy file(s) (define parent-child relationships)
@@ -281,10 +276,9 @@ class Geography:
                 "and optionally 'coord_files' (a {level: path-or-list} mapping); "
                 "relative paths resolve against geography data_dir."
             )
-        hierarchy_paths = [
-            os.path.join(self.data_dir, p)
-            for p in as_path_list(self.hierarchy_file, "geography.hierarchy_file")
-        ]
+        hierarchy_paths = pr.data_file_paths(
+            self.hierarchy_file, self.data_dir, "geography.hierarchy_file"
+        )
         # Leaf units are the row keys: the same smallest-level unit defined in
         # two files (or twice in one) is a data error, not something to merge.
         hierarchy_df = load_stacked_csv(
@@ -366,10 +360,9 @@ class Geography:
         }
         coords = {level: {} for level in self.levels}
         for level, file_spec in self.coord_files.items():
-            coord_paths = [
-                os.path.join(self.data_dir, p)
-                for p in as_path_list(file_spec, f"geography.coord_files.{level}")
-            ]
+            coord_paths = pr.data_file_paths(
+                file_spec, self.data_dir, f"geography.coord_files.{level}"
+            )
             coord_df = load_stacked_csv(coord_paths, label=f"{level} coordinates")
             self._validate_coord_columns(coord_df, coord_paths, level)
             for _candidate in ("geo_unit", level.lower(), level):

@@ -8,7 +8,6 @@ This module handles:
 - Handling census data obfuscation through composition demotion
 """
 
-import os
 import logging
 import math
 import numpy as np
@@ -52,7 +51,7 @@ class HouseholdConfig:
     """A checked `households` block: resolved paths and the parsed household config.
 
     ``rules_path`` is ``None`` when `rules_file` is unset (relationship rules
-    disabled). ``data_file`` is carried as written; its lookup is the loader's.
+    disabled). ``data_file`` is the list of absolute paths, each checked to exist.
     ``strategy_path`` is the found `strategy_file`, ``None`` when unset; it is only
     checked to exist, since the timeline step's file wins when both are set.
     """
@@ -61,7 +60,7 @@ class HouseholdConfig:
     config_path: str
     config: Dict[str, Any]
     rules_path: Optional[str]
-    data_file: Any
+    data_file: List[str]
     column_policy: str
     strategy_path: Optional[str] = None
 
@@ -295,6 +294,11 @@ class HouseholdDistributor:
             except pr.ConfigFileNotFoundError as error:
                 report.problem("strategy_file", str(error))
 
+        # Without data_dir (its own problem) only the shape can be checked.
+        data_paths = None
+        if block.get("data_file"):
+            data_paths = pr.check_data_files(report, "data_file", block["data_file"], data_dir)
+
         if report.has_problems:
             return None, report
         household_config = HouseholdConfig(
@@ -302,7 +306,7 @@ class HouseholdDistributor:
             config_path=config_path,
             config=config,
             rules_path=rules_path,
-            data_file=block["data_file"],
+            data_file=data_paths,
             column_policy=block.get("column_policy", "strict"),
             strategy_path=strategy_path,
         )
@@ -365,24 +369,24 @@ class HouseholdDistributor:
         Load household composition data from CSV.
 
         Args:
-            filename: Filename or list of filenames in data_dir. The first
+            filename: Path or list of paths; relative ones join data_dir. The first
                 column is the geo unit key; the rest are composition patterns.
             column_policy: "strict" requires all files to share one pattern
                 vocabulary; "union_zero_fill" lets sources with different
                 vocabularies stack, reading an absent pattern as zero
                 households of that shape for that source's geo units.
         """
-        from may.utils.stacked_input import as_path_list, load_stacked_csv
+        from may.utils.stacked_input import load_stacked_csv
 
-        filepaths = [
-            os.path.join(self.data_dir, p)
-            for p in as_path_list(filename, "households.data_file")
-        ]
-        logger.info(f"Loading household data from {filepaths}")
-
-        # Reset state up-front so a second call starts from a clean slate
-        # (parallel with load_demographics_from_csv).
+        # Reset state up-front so a second call starts from a clean slate, even
+        # one that fails (parallel with load_demographics_from_csv).
         self.household_counts_by_geo_unit = {}
+
+        try:
+            filepaths = pr.data_file_paths(filename, self.data_dir, "households.data_file")
+        except (pr.DataFileSpecError, pr.DataFileNotFoundError) as error:
+            raise HouseholdError(f"households.data_file: {error}") from error
+        logger.info(f"Loading household data from {filepaths}")
 
         # Get the smallest geographical level from the loaded geography
         # to filter household data to only relevant geo units

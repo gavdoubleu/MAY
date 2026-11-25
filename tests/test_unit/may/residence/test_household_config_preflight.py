@@ -29,10 +29,12 @@ def working_dir(tmp_path, monkeypatch):
 
 @pytest.fixture
 def write_block(working_dir):
-    """Write household YAML files in the working dir; return the block pointing at them."""
+    """Write household YAML files in the working dir, and a stub data/households.csv;
+    return the block pointing at them."""
 
     def write(config_text=CATEGORIES, rules_text=RULES, **overrides):
         (working_dir / "households.yaml").write_text(config_text)
+        (working_dir / "data" / "households.csv").write_text("geo_unit\n")
         block = {
             "data_dir": "data",
             "data_file": "households.csv",
@@ -63,7 +65,7 @@ def test_a_path_that_is_a_list_or_mapping_is_problem(write_block, key, value):
     assert [finding.key for finding in report.problems] == [key]
 
 
-def test_clean_block_is_parsed(write_block):
+def test_clean_block_is_parsed(write_block, working_dir):
     household_config, report = HouseholdDistributor.parse_config(write_block())
     assert not report.problems and not report.warnings
     assert household_config.data_dir == "data"
@@ -73,7 +75,7 @@ def test_clean_block_is_parsed(write_block):
         "A",
     ]
     assert household_config.rules_path == "rules.yaml"
-    assert household_config.data_file == "households.csv"
+    assert household_config.data_file == [str(working_dir / "data" / "households.csv")]
     assert household_config.column_policy == "strict"
 
 
@@ -84,12 +86,17 @@ def test_column_policy_is_carried(write_block):
     assert household_config.column_policy == "union_zero_fill"
 
 
-def test_data_file_list_is_carried_unchecked(write_block):
+def test_data_file_list_is_carried_as_absolute_paths(write_block, working_dir):
+    for name in ("a.csv", "b.csv"):
+        (working_dir / "data" / name).write_text("geo_unit\n")
     household_config, report = HouseholdDistributor.parse_config(
         write_block(data_file=["a.csv", "b.csv"])
     )
     assert not report.problems
-    assert household_config.data_file == ["a.csv", "b.csv"]
+    assert household_config.data_file == [
+        str(working_dir / "data" / "a.csv"),
+        str(working_dir / "data" / "b.csv"),
+    ]
 
 
 @pytest.mark.parametrize("key", ["data_dir", "config_file", "data_file"])
@@ -424,3 +431,29 @@ def test_dead_strategy_file_is_problem(write_block):
     assert problem_lines(report) == [
         ("strategy_file", "not found; tried gone.yaml, data/gone.yaml")
     ]
+
+
+def test_data_file_not_found_is_problem(write_block, working_dir):
+    household_config, report = HouseholdDistributor.parse_config(
+        write_block(data_file="gone.csv")
+    )
+    assert household_config is None
+    assert problem_lines(report) == [
+        ("data_file", f"not found: {working_dir / 'data' / 'gone.csv'}")
+    ]
+
+
+@pytest.mark.parametrize("value", [["a.csv", 3], {"path": "a.csv"}], ids=["non_str", "mapping"])
+def test_data_file_bad_shape_is_problem(write_block, value):
+    household_config, report = HouseholdDistributor.parse_config(write_block(data_file=value))
+    assert household_config is None
+    assert problem_lines(report) == [
+        ("data_file", f"must be a path or non-empty list of paths; got {value!r}")
+    ]
+
+
+def test_data_file_shape_checked_without_data_dir(write_block):
+    block = write_block(data_file=["a.csv", 3])
+    del block["data_dir"]
+    _, report = HouseholdDistributor.parse_config(block)
+    assert [key for key, _ in problem_lines(report)] == ["data_dir", "data_file"]

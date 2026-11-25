@@ -42,7 +42,8 @@ import numpy as np
 from may.utils import path_resolver as pr
 from may.utils.yaml_loader import load_yaml
 from may.utils.attribute_access import get_attribute
-from may.utils.stacked_input import as_path_list, load_stacked_csv
+from may.utils.path_resolver import as_path_list
+from may.utils.stacked_input import load_stacked_csv
 from may.utils.age_bands import OPEN_BAND_MAX, parse_age_band
 
 logger = logging.getLogger("romantic_relationships")

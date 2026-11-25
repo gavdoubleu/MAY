@@ -11,13 +11,10 @@ exist on disk. Types assembled during the run, and the person properties, take
 their values from the build itself and are checked as the export writes them.
 """
 
-import os
-
 import pandas as pd
 
 from may.geography.venue_manager import VenueConfig
 from may.serialization.serialization_config import SerialisationConfig
-from may.utils.stacked_input import as_path_list
 
 
 def venue_property_gaps(schema: SerialisationConfig, venue_config: VenueConfig):
@@ -26,7 +23,7 @@ def venue_property_gaps(schema: SerialisationConfig, venue_config: VenueConfig):
 
     Args:
         schema: Parsed serialisation schema.
-        venue_config: Parsed venue config; filenames are relative to its `data_dir`.
+        venue_config: Parsed venue config; reads its `venue_paths`.
 
     Returns:
         List of (venue_type, property, columns_available), one entry per
@@ -36,22 +33,14 @@ def venue_property_gaps(schema: SerialisationConfig, venue_config: VenueConfig):
     """
     gaps = []
     for venue_type, properties in schema.venue_type_properties.items():
-        spec = venue_config.venue_types.get(venue_type)
-        if not isinstance(spec, dict) or not spec.get("filename"):
-            # The run assembles this type, so its properties appear once the
-            # build reaches them.
-            continue
-
-        paths = [
-            os.path.join(venue_config.data_dir, path)
-            for path in as_path_list(spec["filename"], f"venue type '{venue_type}'")
-        ]
-        present = [path for path in paths if os.path.exists(path)]
-        if not present:
+        paths = venue_config.venue_paths.get(venue_type)
+        if not paths:
+            # The run assembles this type, or reads it per unit (batch) or not
+            # at all (disabled), so its properties are checked at export.
             continue
 
         columns = set()
-        for path in present:
+        for path in paths:
             columns |= set(pd.read_csv(path, nrows=0).columns)
 
         for property_name in properties:

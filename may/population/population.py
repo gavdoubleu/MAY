@@ -12,13 +12,12 @@ import numpy as np
 import pandas as pd
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, FrozenSet, Optional, Tuple
+from typing import Dict, FrozenSet, List, Optional, Tuple
 
 from .person import Person
 from may.preflight.context import PreflightContext, check_geo_level
 from may.preflight.report import PreflightReport, not_mapping_message
 from may.utils import path_resolver as pr
-from may.utils.stacked_input import check_path_spec, resolve_path_spec
 
 logger = logging.getLogger("population")
 
@@ -47,15 +46,16 @@ class PopulationError(Exception):
 class PopulationConfig:
     """Parsed `population` config block; checked by `PopulationManager.parse_config`.
 
-    Paths are `${...}`-resolved. Keys the chosen type ignores are `None` (`{}` for
-    `column_mapping`)."""
+    `data_dir` is `${...}`-resolved. Data files (`filename`, `male_file`,
+    `female_file`) are lists of absolute paths, checked to exist. Keys the chosen
+    type ignores are `None` (`{}` for `column_mapping`)."""
 
     data_dir: str
     type: str
     column_mapping: dict = field(default_factory=dict)
-    filename: Optional[str] = None
-    male_file: object = None
-    female_file: object = None
+    filename: Optional[List[str]] = None
+    male_file: Optional[List[str]] = None
+    female_file: Optional[List[str]] = None
     level: Optional[str] = None
 
 
@@ -164,11 +164,21 @@ class PopulationManager:
                 report.problem("filename", "not set; type 'explicit' needs it")
             elif not _is_name(filename):
                 report.problem("filename", f"must be a path; got {filename!r}")
+            else:
+                filename = pr.check_data_files(report, "filename", filename, data_dir)
         elif population_type == "matrix":
-            male_file = block.get("demographics_male_file", DEFAULT_MALE_FILE)
-            female_file = block.get("demographics_female_file", DEFAULT_FEMALE_FILE)
-            check_path_spec(report, "demographics_male_file", male_file)
-            check_path_spec(report, "demographics_female_file", female_file)
+            male_file = pr.check_data_files(
+                report,
+                "demographics_male_file",
+                block.get("demographics_male_file", DEFAULT_MALE_FILE),
+                data_dir,
+            )
+            female_file = pr.check_data_files(
+                report,
+                "demographics_female_file",
+                block.get("demographics_female_file", DEFAULT_FEMALE_FILE),
+                data_dir,
+            )
         else:  # explicit_batch
             level = block.get("level")
             if level is None:
@@ -182,9 +192,9 @@ class PopulationManager:
             data_dir=data_dir,
             type=population_type,
             column_mapping=column_mapping,
-            filename=pr.resolve(filename) if filename is not None else None,
-            male_file=resolve_path_spec(male_file) if male_file is not None else None,
-            female_file=resolve_path_spec(female_file) if female_file is not None else None,
+            filename=filename,
+            male_file=male_file,
+            female_file=female_file,
             level=level,
         )
         return population_config, report
@@ -253,16 +263,17 @@ class PopulationManager:
             male_file: Filename or list of filenames for male demographics
             female_file: Filename or list of filenames for female demographics
         """
-        from may.utils.stacked_input import as_path_list, load_stacked_csv
+        from may.utils.stacked_input import load_stacked_csv
 
-        male_paths = [
-            os.path.join(self.data_dir, p)
-            for p in as_path_list(male_file, "population.demographics_male_file")
-        ]
-        female_paths = [
-            os.path.join(self.data_dir, p)
-            for p in as_path_list(female_file, "population.demographics_female_file")
-        ]
+        try:
+            male_paths = pr.data_file_paths(
+                male_file, self.data_dir, "population.demographics_male_file"
+            )
+            female_paths = pr.data_file_paths(
+                female_file, self.data_dir, "population.demographics_female_file"
+            )
+        except pr.DataFileNotFoundError as error:
+            raise PopulationError(f"Demographics {error}") from error
 
         # Get the smallest geographical level from the loaded geography
         # to filter demographics to only relevant geo units
@@ -368,13 +379,19 @@ class PopulationManager:
         )
         logger.info(f"Total people in demographics: {total_people:,}")
 
-    def load_explicit_from_csv(self, filename: str, column_mapping: Dict[str, str]):
+    def load_explicit_from_csv(self, filename, column_mapping: Dict[str, str]):
         """
-        Load individual-level population data from a CSV file.
+        Load individual-level population data from one CSV file.
+
+        `filename` is a path, or a one-item list of paths; relative to `data_dir`.
         """
-        path = os.path.join(self.data_dir, filename)
-        if not os.path.exists(path):
-            raise PopulationError(f"Explicit population file not found: {path}")
+        try:
+            paths = pr.data_file_paths(filename, self.data_dir, "population.filename")
+        except pr.DataFileNotFoundError as error:
+            raise PopulationError(f"Explicit population {error}") from error
+        if len(paths) != 1:
+            raise PopulationError(f"Explicit population takes one file; got {filename!r}")
+        (path,) = paths
 
         logger.info(f"Loading explicit population from {path}")
         df = pd.read_csv(path)

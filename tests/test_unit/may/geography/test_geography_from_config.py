@@ -56,10 +56,11 @@ def test_problems_raise_geography_error_with_every_line(working_dir, geography_d
     with pytest.raises(GeographyError) as raised:
         Geography.from_config(block)
     message = str(raised.value)
-    assert message.startswith("Geography config has 2 problem(s):")
+    assert message.startswith("Geography config has 3 problem(s):")
     assert "levels" in message
     assert "hierarchy_file" in message
-    assert len(raised.value.report.problems) == 2
+    assert "coord_files.BOGUS: not found" in message
+    assert len(raised.value.report.problems) == 3
 
 
 def test_warnings_are_logged_at_info(working_dir, geography_dir, caplog):

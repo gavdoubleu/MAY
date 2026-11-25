@@ -27,7 +27,8 @@ from dataclasses import dataclass
 
 from may.population.person import Person
 from may.utils.attribute_access import get_attribute
-from may.utils.stacked_input import as_path_list, load_stacked_csv
+from may.utils.path_resolver import as_path_list
+from may.utils.stacked_input import load_stacked_csv
 
 logger = logging.getLogger("relationship_rules")
 

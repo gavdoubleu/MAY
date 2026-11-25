@@ -14,7 +14,17 @@ def working_dir(tmp_path, monkeypatch):
     working = tmp_path / "working"
     working.mkdir()
     monkeypatch.chdir(working)
+    (working / "data").mkdir()
+    for name in DATA_FILES:
+        (working / "data" / name).write_text("")
     return working
+
+
+DATA_FILES = ["EW_hierarchy.csv", "EW_coord_sgu.csv", "EW_coord_mgu.csv"]
+
+
+def data_path(working_dir, name):
+    return str(working_dir / "data" / name)
 
 
 def clean_block(**overrides):
@@ -52,10 +62,10 @@ def test_clean_block_is_clean_and_parsed(working_dir):
     assert not report.problems and not report.warnings
     assert geography_config.data_dir == "data"
     assert geography_config.levels == ["SGU", "MGU", "LGU", "XLGU"]
-    assert geography_config.hierarchy_file == "EW_hierarchy.csv"
+    assert geography_config.hierarchy_file == [data_path(working_dir, "EW_hierarchy.csv")]
     assert geography_config.coord_files == {
-        "SGU": "EW_coord_sgu.csv",
-        "MGU": "EW_coord_mgu.csv",
+        "SGU": [data_path(working_dir, "EW_coord_sgu.csv")],
+        "MGU": [data_path(working_dir, "EW_coord_mgu.csv")],
     }
     assert geography_config.filters == {
         "level": "LGU",
@@ -68,8 +78,12 @@ def test_preflight_returns_parse_report(working_dir):
     assert [finding.key for finding in report.problems] == ["levels"]
 
 
-def test_paths_are_template_resolved(working_dir):
-    path_resolver.init("/configs", "/data", "/output")
+def test_paths_are_template_resolved(working_dir, tmp_path):
+    data_root = tmp_path / "data_root"
+    (data_root / "geography").mkdir(parents=True)
+    for name in ["a.csv", "sgu.csv", "geography/b.csv"]:
+        (data_root / name).write_text("")
+    path_resolver.init("/configs", str(data_root), "/output")
     geography_config, report = Geography.parse_config(
         clean_block(
             data_dir="${data_root}/geography",
@@ -78,9 +92,12 @@ def test_paths_are_template_resolved(working_dir):
         )
     )
     assert not report.problems
-    assert geography_config.data_dir == "/data/geography"
-    assert geography_config.hierarchy_file == ["/data/a.csv", "b.csv"]
-    assert geography_config.coord_files == {"SGU": "/data/sgu.csv"}
+    assert geography_config.data_dir == f"{data_root}/geography"
+    assert geography_config.hierarchy_file == [
+        f"{data_root}/a.csv",
+        f"{data_root}/geography/b.csv",
+    ]
+    assert geography_config.coord_files == {"SGU": [f"{data_root}/sgu.csv"]}
 
 
 # data_dir
@@ -88,6 +105,10 @@ def test_paths_are_template_resolved(working_dir):
 
 @pytest.mark.parametrize("blank", [None, ""])
 def test_blank_data_dir_falls_back_to_default(working_dir, blank):
+    default_dir = working_dir / DEFAULT_DATA_DIR
+    default_dir.mkdir(parents=True)
+    for name in DATA_FILES:
+        (default_dir / name).write_text("")
     geography_config, report = Geography.parse_config(clean_block(data_dir=blank))
     assert not report.problems
     assert geography_config.data_dir == DEFAULT_DATA_DIR
@@ -134,10 +155,27 @@ def test_hierarchy_file_missing_is_problem(working_dir, missing):
     assert message == "not set"
 
 
-@pytest.mark.parametrize("bad_path", [3, [], ["a.csv", 3], {"a": "b"}])
+@pytest.mark.parametrize("bad_path", [3, [], ["a.csv", 3], ["a.csv", ""], {"a": "b"}])
 def test_hierarchy_file_not_a_path_is_problem(working_dir, bad_path):
     message = assert_single_problem(clean_block(hierarchy_file=bad_path), "hierarchy_file")
     assert message == f"must be a path or non-empty list of paths; got {bad_path!r}"
+
+
+def test_hierarchy_file_missing_on_disk_is_problem(working_dir):
+    message = assert_single_problem(
+        clean_block(hierarchy_file=["EW_hierarchy.csv", "gone.csv"]), "hierarchy_file"
+    )
+    assert message == f"not found: {data_path(working_dir, 'gone.csv')}"
+
+
+def test_absolute_hierarchy_file_not_joined(working_dir, tmp_path):
+    absolute = tmp_path / "elsewhere.csv"
+    absolute.write_text("")
+    geography_config, report = Geography.parse_config(
+        clean_block(hierarchy_file=str(absolute))
+    )
+    assert not report.problems
+    assert geography_config.hierarchy_file == [str(absolute)]
 
 
 # coord_files
@@ -167,6 +205,36 @@ def test_coord_files_value_not_a_path_is_problem(working_dir, bad_path):
         clean_block(coord_files={"SGU": bad_path}), "coord_files.SGU"
     )
     assert message == f"must be a path or non-empty list of paths; got {bad_path!r}"
+
+
+def test_coord_file_missing_on_disk_is_problem(working_dir):
+    message = assert_single_problem(
+        clean_block(coord_files={"SGU": "EW_coord_sgu.csv", "LGU": "gone.csv"}),
+        "coord_files.LGU",
+    )
+    assert message == f"not found: {data_path(working_dir, 'gone.csv')}"
+
+
+def test_level_absent_from_coord_files_is_not_checked(working_dir):
+    geography_config, report = Geography.parse_config(
+        clean_block(coord_files={"SGU": "EW_coord_sgu.csv"})
+    )
+    assert not report.problems
+    assert set(geography_config.coord_files) == {"SGU"}
+
+
+def test_unknown_coord_level_file_not_checked_for_existence(working_dir):
+    message = assert_single_problem(
+        clean_block(coord_files={"OA": "gone.csv"}), "coord_files.OA"
+    )
+    assert message.startswith("not a configured level")
+
+
+def test_bad_data_dir_skips_existence_checks(working_dir):
+    message = assert_single_problem(
+        clean_block(data_dir=["data"], hierarchy_file="gone.csv"), "data_dir"
+    )
+    assert message == "must be a path; got ['data']"
 
 
 # load_all
@@ -234,7 +302,6 @@ def test_filter_file_found_in_working_dir(working_dir):
 
 
 def test_filter_file_found_under_data_dir(working_dir):
-    (working_dir / "data").mkdir()
     (working_dir / "data" / "codes.txt").write_text("Darlington\n")
     geography_config, report = Geography.parse_config(
         clean_block(filter={"level": "LGU", "file": "codes.txt"})

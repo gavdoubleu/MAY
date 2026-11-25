@@ -25,10 +25,14 @@ def working_dir(tmp_path, monkeypatch):
 
 @pytest.fixture
 def write_config(working_dir):
-    """Write venue YAML in the working dir; return the block pointing at it."""
+    """Write venue YAML in the working dir, and empty `data_files` under data/;
+    return the block pointing at them."""
 
-    def write(text, config_file="venues.yaml"):
+    def write(text, config_file="venues.yaml", data_files=()):
         (working_dir / config_file).write_text(text)
+        (working_dir / "data").mkdir(exist_ok=True)
+        for name in data_files:
+            (working_dir / "data" / name).write_text("geo_unit\n")
         return {"data_dir": "data", "config_file": config_file}
 
     return write
@@ -144,7 +148,8 @@ def test_settings_not_mapping_is_problem(write_config):
 @pytest.mark.parametrize("flag", ["enabled", "batch_mode"])
 def test_type_flag_not_bool_is_problem(write_config, flag):
     block = write_config(
-        f"venue_types:\n  pub:\n    filename: pubs.csv\n    {flag}: 'true'\n"
+        f"venue_types:\n  pub:\n    filename: pubs.csv\n    {flag}: 'true'\n",
+        data_files=["pubs.csv"],
     )
     venue_config, report = VenueManager.parse_config(block)
     assert venue_config is None
@@ -223,7 +228,8 @@ def warning_lines(report):
 
 def test_filter_column_without_values_warns_and_still_parses(write_config):
     block = write_config(
-        "venue_types:\n  pub:\n    filename: pubs.csv\n    filter_column: kind\n"
+        "venue_types:\n  pub:\n    filename: pubs.csv\n    filter_column: kind\n",
+        data_files=["pubs.csv"],
     )
     venue_config, report = VenueManager.parse_config(block)
     assert not report.problems
@@ -238,7 +244,8 @@ def test_filter_column_without_values_warns_and_still_parses(write_config):
 
 def test_filter_values_without_column_warns_and_still_parses(write_config):
     block = write_config(
-        "venue_types:\n  pub:\n    filename: pubs.csv\n    filter_values: [A, B]\n"
+        "venue_types:\n  pub:\n    filename: pubs.csv\n    filter_values: [A, B]\n",
+        data_files=["pubs.csv"],
     )
     venue_config, report = VenueManager.parse_config(block)
     assert not report.problems
@@ -257,7 +264,8 @@ def test_several_findings_in_one_file_all_reported(write_config):
         "  pub:\n    enabled: maybe\n    filename: pubs.csv\n"
         "  school:\n    description: schools\n"
         "  gym:\n    filename: gyms.csv\n    filter_column: kind\n"
-        "settings: []\n"
+        "settings: []\n",
+        data_files=["pubs.csv", "gyms.csv"],
     )
     venue_config, report = VenueManager.parse_config(block)
     assert venue_config is None
@@ -394,7 +402,10 @@ def test_batch_level_unchecked_without_geo_levels(write_config):
 
 
 def test_level_on_non_batch_type_warns_unused(write_config):
-    block = write_config("venue_types:\n  pub:\n    filename: pubs.csv\n    level: MGU\n")
+    block = write_config(
+        "venue_types:\n  pub:\n    filename: pubs.csv\n    level: MGU\n",
+        data_files=["pubs.csv"],
+    )
     venue_config, report = VenueManager.parse_config(block, GEO_LEVELS)
     assert not report.problems
     assert venue_config is not None
@@ -417,3 +428,34 @@ def test_1911_shaped_batch_type_is_clean(write_config):
     )
     _, report = VenueManager.parse_config(block, GEO_LEVELS)
     assert not report.problems and not report.warnings
+
+
+def test_enabled_type_with_missing_file_is_problem(write_config):
+    block = write_config("venue_types:\n  pub:\n    filename: pubs.csv\n")
+    venue_config, report = VenueManager.parse_config(block)
+    assert venue_config is None
+    assert problem_lines(report) == [
+        (f"{PUB_KEY}.filename", f"not found: {os.path.abspath('data/pubs.csv')}")
+    ]
+
+
+def test_disabled_type_with_missing_file_is_valid(write_config):
+    block = write_config("venue_types:\n  pub:\n    enabled: false\n    filename: pubs.csv\n")
+    venue_config, report = VenueManager.parse_config(block)
+    assert not report.problems
+    assert venue_config.venue_paths == {}
+
+
+def test_venue_paths_hold_absolute_lists_for_enabled_file_types_only(write_config):
+    block = write_config(
+        "venue_types:\n"
+        "  school:\n    filename: [ew.csv, sct.csv]\n"
+        "  pub:\n    enabled: false\n    filename: pubs.csv\n"
+        "  household:\n    batch_mode: true\n    level: MGU\n    filename: '{unit}.csv'\n",
+        data_files=["ew.csv", "sct.csv"],
+    )
+    venue_config, report = VenueManager.parse_config(block, GEO_LEVELS)
+    assert not report.problems
+    assert venue_config.venue_paths == {
+        "school": [os.path.abspath("data/ew.csv"), os.path.abspath("data/sct.csv")]
+    }

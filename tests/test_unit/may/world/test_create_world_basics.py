@@ -89,9 +89,15 @@ def test_main_cli_arg_parsing(mock_geography_class):
             mock_open.assert_any_call(test_config_path, "r", encoding="utf-8-sig")
 
 
-CONSTANT_ATTRIBUTE = Path(__file__).parents[3] / "test_data" / "preflight" / "constant_attribute.yaml"
-# Passes the geography preflight; files are not opened there.
-VALID_GEOGRAPHY_YAML = "geography:\n  levels: [SGU, MGU]\n  hierarchy_file: hierarchy.csv\n"
+PREFLIGHT_DATA = Path(__file__).parents[3] / "test_data" / "preflight"
+CONSTANT_ATTRIBUTE = PREFLIGHT_DATA / "constant_attribute.yaml"
+# Passes the geography preflight; there the file must exist but is not opened.
+VALID_GEOGRAPHY_YAML = (
+    f"geography:\n  levels: [SGU, MGU]\n  data_dir: {PREFLIGHT_DATA}\n"
+    "  hierarchy_file: hierarchy.csv\n"
+)
+# Passes the population preflight; stub default demographics files.
+VALID_POPULATION_YAML = f"population:\n  data_dir: {PREFLIGHT_DATA}\n"
 VALID_TIMELINE_YAML = (
     f"timeline:\n  enabled: true\n  steps:\n    - type: attribute\n      config: {CONSTANT_ATTRIBUTE}\n"
 )
@@ -106,7 +112,7 @@ def test_main_hands_the_world_and_its_config_to_run_timeline(tmp_path):
     config_path = tmp_path / "config.yaml"
     (tmp_path / "venues_config.yaml").write_text("venue_types: {}\n", encoding="utf-8")
     config_path.write_text(
-        VALID_GEOGRAPHY_YAML + f"venues:\n  data_dir: {tmp_path}\n"
+        VALID_GEOGRAPHY_YAML + VALID_POPULATION_YAML + f"venues:\n  data_dir: {tmp_path}\n"
         f"serialization:\n  enabled: false\n  output_dir: {tmp_path}\n"
         + VALID_TIMELINE_YAML,
         encoding="utf-8",
@@ -134,7 +140,7 @@ def test_main_exits_when_the_timeline_fails(tmp_path):
     config_path = tmp_path / "config.yaml"
     (tmp_path / "venues_config.yaml").write_text("venue_types: {}\n", encoding="utf-8")
     config_path.write_text(
-        VALID_GEOGRAPHY_YAML + f"venues:\n  data_dir: {tmp_path}\nserialization:\n  enabled: false\n  output_dir: {tmp_path}\n"
+        VALID_GEOGRAPHY_YAML + VALID_POPULATION_YAML + f"venues:\n  data_dir: {tmp_path}\nserialization:\n  enabled: false\n  output_dir: {tmp_path}\n"
         + VALID_TIMELINE_YAML,
         encoding="utf-8",
     )
@@ -170,7 +176,7 @@ def write_world_config(tmp_path, venues_yaml="venue_types: {}\n", timeline_yaml=
     )
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        VALID_GEOGRAPHY_YAML + f"venues:\n  data_dir: {venues_dir}\n  config_file: venues.yaml\n"
+        VALID_GEOGRAPHY_YAML + VALID_POPULATION_YAML + f"venues:\n  data_dir: {venues_dir}\n  config_file: venues.yaml\n"
         f"serialization:\n  enabled: true\n  config_file: {schema_path}\n"
         f"  output_dir: {tmp_path / 'output'}\n" + timeline_yaml,
         encoding="utf-8",
@@ -269,7 +275,7 @@ def write_serialisation_config(tmp_path, serialisation_yaml):
     (tmp_path / "serialization.yaml").write_text(SCHEMA_YAML, encoding="utf-8")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        VALID_GEOGRAPHY_YAML + f"venues:\n  data_dir: {tmp_path}\n"
+        VALID_GEOGRAPHY_YAML + VALID_POPULATION_YAML + f"venues:\n  data_dir: {tmp_path}\n"
         + serialisation_yaml + VALID_TIMELINE_YAML,
         encoding="utf-8",
     )

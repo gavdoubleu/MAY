@@ -77,3 +77,72 @@ def find_config_file(path: Union[str, os.PathLike], data_dir: Optional[str]) -> 
         if os.path.exists(candidate):
             return candidate
     raise ConfigFileNotFoundError(path, tried)
+
+
+class DataFileSpecError(ValueError):
+    """A data-file setting is not a path or a non-empty list of paths."""
+
+
+class DataFileNotFoundError(FileNotFoundError):
+    """Data file(s) missing. Message omits the config key; caller adds it."""
+
+    def __init__(self, missing: List[str]):
+        self.missing = missing
+        super().__init__(f"not found: {', '.join(missing)}")
+
+
+def as_path_list(spec, label: str) -> List[str]:
+    """A path or list of paths as a list; `DataFileSpecError` naming `label` otherwise."""
+    if isinstance(spec, str):
+        spec = [spec]
+    elif isinstance(spec, (list, tuple)):
+        if not spec:
+            raise DataFileSpecError(f"{label}: the file list is empty.")
+    else:
+        raise DataFileSpecError(
+            f"{label}: expected a path or a list of paths, got "
+            f"{type(spec).__name__} ({spec!r})."
+        )
+    bad_entries = [path for path in spec if not isinstance(path, str) or not path]
+    if bad_entries:
+        raise DataFileSpecError(
+            f"{label}: every entry must be a non-empty path string; got {bad_entries!r}."
+        )
+    return list(spec)
+
+
+def data_file_paths(spec, data_dir: Optional[str], label: str) -> List[str]:
+    """Paths of the data files `spec` names: `${...}` resolved, relative ones under `data_dir`.
+
+    Absolute paths are kept as written; relative ones are made absolute. Raises `DataFileSpecError` on a bad shape and
+    `DataFileNotFoundError` listing every missing file."""
+    if isinstance(spec, os.PathLike):
+        spec = os.fspath(spec)
+    data_dir = resolve(str(data_dir)) if data_dir else data_dir
+    paths = []
+    for path in as_path_list(spec, label):
+        path = resolve(path)
+        if not os.path.isabs(path):
+            path = os.path.abspath(os.path.join(data_dir or "", path))
+        paths.append(path)
+    missing = [path for path in paths if not os.path.exists(path)]
+    if missing:
+        raise DataFileNotFoundError(missing)
+    return paths
+
+
+def check_data_files(report, key: str, spec, data_dir: Optional[str]) -> Optional[List[str]]:
+    """`data_file_paths` for `parse_config`: any error is one problem under `key` in `report`.
+
+    `None` on a problem, or if `data_dir` is `None` (its own problem, already reported):
+    then only the shape is checked."""
+    try:
+        if data_dir is None:
+            as_path_list(spec, key)
+            return None
+        return data_file_paths(spec, data_dir, key)
+    except DataFileSpecError:
+        report.problem(key, f"must be a path or non-empty list of paths; got {spec!r}")
+    except DataFileNotFoundError as error:
+        report.problem(key, str(error))
+    return None

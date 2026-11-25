@@ -7,36 +7,12 @@ names the offending files, columns, or keys.
 import pandas as pd
 import pytest
 
-from may.utils.stacked_input import (
-    StackedInputError,
-    as_path_list,
-    load_stacked_csv,
-)
+from may.utils.stacked_input import StackedInputError, load_stacked_csv
 
 
 def _write(path, text):
     path.write_text(text)
     return str(path)
-
-
-class TestAsPathList:
-    def test_single_string_becomes_one_element_list(self):
-        assert as_path_list("a.csv", "x") == ["a.csv"]
-
-    def test_list_passes_through(self):
-        assert as_path_list(["a.csv", "b.csv"], "x") == ["a.csv", "b.csv"]
-
-    def test_empty_list_raises(self):
-        with pytest.raises(StackedInputError, match="empty"):
-            as_path_list([], "households.data_file")
-
-    def test_non_string_entry_raises(self):
-        with pytest.raises(StackedInputError, match="path string"):
-            as_path_list(["a.csv", 3], "x")
-
-    def test_non_path_value_raises(self):
-        with pytest.raises(StackedInputError, match="expected a path"):
-            as_path_list({"a": 1}, "x")
 
 
 class TestLoadStackedCsv:

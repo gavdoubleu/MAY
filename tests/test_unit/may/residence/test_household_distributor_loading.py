@@ -40,7 +40,12 @@ def _make_geo(sgus):
 
 def _make_distributor(geo, data_dir):
     """Build a HouseholdDistributor pointing at a tmp data_dir, using the
-    real micro_world household categories config."""
+    real micro_world household categories config. Preflight needs
+    households.csv to exist, so a stub is written when the test has none yet."""
+    households_path = os.path.join(data_dir, "households.csv")
+    if not os.path.exists(households_path):
+        with open(households_path, "w") as stub:
+            stub.write("geo_unit\n")
     pm = PopulationManager(geography=geo, data_dir='/tmp')
     vm = VenueManager(geo, filter_by_geography=False)
     config_src = "tests/test_data/micro_world/households/test_households_config.yaml"

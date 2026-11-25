@@ -48,10 +48,11 @@ def test_problems_raise_venue_error_with_every_line(loaded_geography, venues_dir
     with pytest.raises(VenueError) as raised:
         VenueManager.from_config(block, loaded_geography)
     message = str(raised.value)
-    assert message.startswith("Venue config has 2 problem(s):")
+    assert message.startswith("Venue config has 3 problem(s):")
     assert "venue_types.school.enabled" in message
+    assert "venue_types.school.filename: not found" in message
     assert "venue_types.pub.filename" in message
-    assert len(raised.value.report.problems) == 2
+    assert len(raised.value.report.problems) == 3
 
 
 def test_warnings_are_logged_at_info(loaded_geography, venues_dir, caplog):

@@ -23,7 +23,8 @@ from .probability import (
 from may.preflight.report import config_entry
 from may.utils import path_resolver as pr
 from may.utils.attribute_access import get_attribute
-from may.utils.stacked_input import StackedInputError, as_path_list, load_stacked_csv
+from may.utils.path_resolver import DataFileSpecError, as_path_list
+from may.utils.stacked_input import load_stacked_csv
 
 import logging
 import numpy as np
@@ -111,7 +112,7 @@ class VenueDistributor(BaseDistributor):
             return
         try:
             paths = as_path_list(file_path, f"{key}.file_path")
-        except StackedInputError as error:
+        except DataFileSpecError as error:
             report.problem(f"{key}.file_path", str(error))
             return
         missing = [path for path in paths if not Path(resolve_data_path(path, config_path)).exists()]
