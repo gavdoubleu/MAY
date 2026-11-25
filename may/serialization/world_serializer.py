@@ -13,11 +13,14 @@ import numpy as np
 from datetime import datetime
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
-from may.preflight.report import PreflightReport
+from may.geography.venue_manager import VenueManager
+from may.preflight.config_reader import FAILED, ConfigReader
+from may.preflight.config_stage import ConfigError, ConfigStage
 from may.utils import path_resolver as pr
-from .serialization_config import SerialisationConfig, SerialisationError, load_schema_file
+from .serialization_config import SerialisationConfig, SerialisationError, parse_schema
+from .venue_property_gaps import venue_property_gaps
 from .property_types import (
     PropertyTypeError,
     describe_problems,
@@ -63,42 +66,42 @@ def _encode_json(value):
         )
 
 
-def _output_path(
-    block: dict, key: str, default: str, report: Optional[PreflightReport] = None
-) -> Optional[str]:
-    """Resolved `block[key]` (`default` if unset). Not a path: problem, or `default` silently
-    without a report."""
+def _disabled_output_path(block: dict, key: str, default: str) -> str:
+    """Resolved `block[key]`; `default` if unset or not a path. Disabled serialisation checks
+    nothing, but the build still writes its profile under `output_dir`."""
     value = block.get(key)
-    if value is None:
-        return pr.resolve(default)
     if not isinstance(value, str) or not value:
-        if report is None:
-            return pr.resolve(default)
-        report.problem(key, f"must be a path; got {value!r}")
-        return None
+        return pr.resolve(default)
     return pr.resolve(value)
 
 
-def _parse_schema_file(
-    block: dict, report: PreflightReport
-) -> Tuple[Optional[str], Optional[SerialisationConfig]]:
-    """Resolved `config_file` and its parsed schema; findings keyed `config_file ...`."""
-    config_file = block.get("config_file")
-    if config_file is None or config_file == "":
-        report.problem("config_file", "not set; serialisation is enabled")
-        return None, None
-    if not isinstance(config_file, str):
-        report.problem("config_file", f"must be a path; got {config_file!r}")
-        return None, None
-    schema_path = pr.resolve(config_file)
-    schema, schema_report = load_schema_file(schema_path)
-    nested = schema_report.under("config_file", sep=" ")
-    report.problems.extend(nested.problems)
-    report.warnings.extend(nested.warnings)
-    return schema_path, schema
+def _output_path(reader: ConfigReader, key: str, default: str):
+    """Resolved path at `key`, `default` if absent; `FAILED` on a problem."""
+    value = reader.name(key, default=default, give="a path")
+    return FAILED if value is FAILED else pr.resolve(value)
 
 
-class WorldSerializer:
+def _warn_venue_property_gaps(file_reader: ConfigReader, schema: SerialisationConfig, venue_config) -> None:
+    """Warn of schema venue properties absent from the venue files, under the schema file."""
+    try:
+        gaps = venue_property_gaps(schema, venue_config)
+    except Exception as error:
+        # Advisory check: an unreadable venue file must not
+        # stop preflight, but the user is told the check did not run.
+        file_reader.warning(f"venue property check skipped: {error}")
+        return
+    for venue_type, property_name, columns in gaps:
+        file_reader.warning(
+            f"{property_name!r} not in the venue files; they carry {columns}",
+            at=f"venues.types.{venue_type}.properties",
+        )
+
+
+class SerialisationConfigError(ConfigError, SerialisationError):
+    """The `serialization` config block cannot be used; `.report` holds the findings."""
+
+
+class WorldSerializer(ConfigStage):
     """
     Serializes World object to HDF5 format for C++ consumption.
 
@@ -120,64 +123,54 @@ class WorldSerializer:
         }
         self.registries = {}  # Registry of string-to-int mappings
 
-    @staticmethod
-    def parse_config(
-        block: Optional[dict],
-    ) -> Tuple[Optional[SerialisationSettings], PreflightReport]:
-        """Parse a `serialization` block. Settings are `None` if any problem.
+    display_name = "Serialisation"
+    config_error = SerialisationConfigError
+    config_key = "serialization"
+
+    @classmethod
+    def parse(cls, reader: ConfigReader, context) -> Optional[SerialisationSettings]:
+        """Read a `serialization` block and its schema file. When enabled and
+        `context[VenueManager]` parsed, warn of schema venue properties the venue files lack.
 
         `enabled: false` checks nothing; the schema is then not loaded."""
-        report = PreflightReport()
-        block = block or {}
-        enabled = block.get("enabled", DEFAULT_ENABLED)
-        if not isinstance(enabled, bool):
-            report.problem("enabled", f"must be true or false; got {enabled!r}")
-            return None, report
+        venue_config = context[VenueManager]
+        enabled = reader.true_or_false("enabled", default=DEFAULT_ENABLED)
+        if enabled is FAILED:
+            return None
         if not enabled:
-            return (
-                SerialisationSettings(
-                    enabled=False,
-                    schema_path=None,
-                    schema=None,
-                    output_dir=_output_path(block, "output_dir", DEFAULT_OUTPUT_DIR),
-                    filename=_output_path(block, "filename", DEFAULT_FILENAME),
-                ),
-                report,
+            block = reader.value()
+            return SerialisationSettings(
+                enabled=False,
+                schema_path=None,
+                schema=None,
+                output_dir=_disabled_output_path(block, "output_dir", DEFAULT_OUTPUT_DIR),
+                filename=_disabled_output_path(block, "filename", DEFAULT_FILENAME),
             )
 
-        output_dir = _output_path(block, "output_dir", DEFAULT_OUTPUT_DIR, report)
-        filename = _output_path(block, "filename", DEFAULT_FILENAME, report)
-        schema_path, schema = _parse_schema_file(block, report)
-        if report.has_problems:
-            return None, report
-        return (
-            SerialisationSettings(
-                enabled=True,
-                schema_path=schema_path,
-                schema=schema,
-                output_dir=output_dir,
-                filename=filename,
-            ),
-            report,
+        output_dir = _output_path(reader, "output_dir", DEFAULT_OUTPUT_DIR)
+        filename = _output_path(reader, "filename", DEFAULT_FILENAME)
+        file_reader = reader.config_file(
+            "config_file", data_dir=None, give="a schema file, or set enabled: false"
+        )
+        schema = parse_schema(file_reader)
+        if (
+            venue_config is not None
+            and not file_reader.failed
+            and schema.venue_type_properties is not FAILED
+        ):
+            _warn_venue_property_gaps(file_reader, schema, venue_config)
+        return SerialisationSettings(
+            enabled=True,
+            schema_path=file_reader.found_path,
+            schema=schema,
+            output_dir=output_dir,
+            filename=filename,
         )
 
-    @staticmethod
-    def preflight(block: Optional[dict]) -> PreflightReport:
-        """Check a `serialization` block and its schema file without building anything."""
-        _, report = WorldSerializer.parse_config(block)
-        return report
-
-    @staticmethod
-    def from_config(block: Optional[dict]) -> SerialisationSettings:
-        """Settings from a `serialization` block; `SerialisationError` listing every problem."""
-        settings, report = WorldSerializer.parse_config(block)
-        report.raise_if_problems(
-            SerialisationError,
-            f"Serialisation config has {len(report.problems)} problem(s):",
-        )
-        for finding in report.warnings:
-            logger.info(f"Serialisation config warning: {finding.key}: {finding.message}")
-        return settings
+    @classmethod
+    def build(cls, parsed: SerialisationSettings) -> SerialisationSettings:
+        """The parsed settings are what the build uses."""
+        return parsed
 
     def export(self, world, output_file):
         """

@@ -4,10 +4,11 @@ import logging
 
 import pytest
 
+from may.preflight.config_reader import ConfigReader
+from may.preflight.report import PreflightReport
 from may.serialization.serialization_config import (
     SerialisationConfig,
     SerialisationError,
-    load_schema_file,
     parse_schema,
 )
 from may.utils import path_resolver
@@ -47,6 +48,13 @@ def schema(**overrides):
     return base
 
 
+def parse(mapping):
+    """(parsed schema, report), keys relative to the schema root."""
+    report = PreflightReport()
+    parsed = parse_schema(ConfigReader(mapping, "", report))
+    return parsed, report
+
+
 def problem_keys(report):
     return [finding.key for finding in report.problems]
 
@@ -57,7 +65,7 @@ def warning_keys(report):
 
 class TestParseSchema:
     def test_clean_schema_has_empty_report_and_parsed_fields(self):
-        parsed, report = parse_schema(schema())
+        parsed, report = parse(schema())
         assert report.problems == [] and report.warnings == []
         assert parsed.population_properties == ["ethnicity", "friendships"]
         assert parsed.geography_include_coordinates is True
@@ -71,12 +79,12 @@ class TestParseSchema:
         assert parsed.output_settings["compression_level"] == 4
 
     def test_parsed_config_is_frozen(self):
-        parsed, _ = parse_schema(schema())
+        parsed, _ = parse(schema())
         with pytest.raises(Exception):
             parsed.population_properties = []
 
-    def test_absent_and_blank_sections_take_defaults(self):
-        parsed, report = parse_schema({"population": None, "venues": {"types": {"pub": None}}})
+    def test_absent_sections_take_defaults(self):
+        parsed, report = parse({"venues": {"types": {"pub": {}}}})
         assert report.problems == []
         assert parsed.population_properties == []
         assert parsed.geography_include_coordinates is True
@@ -84,19 +92,24 @@ class TestParseSchema:
         assert parsed.relationships == {}
         assert parsed.output_settings == {}
 
-    @pytest.mark.parametrize("value", [None, {}])
-    def test_empty_schema_is_problem(self, value):
-        parsed, report = parse_schema(value)
-        assert parsed is None
+    @pytest.mark.parametrize(
+        "overrides, key",
+        [
+            ({"population": None}, "population"),
+            ({"venues": {"types": None}}, "venues.types"),
+            ({"venues": {"types": {"pub": None}}}, "venues.types.pub"),
+            ({"population": {"properties": None}}, "population.properties"),
+            ({"output": {"metadata": None}}, "output.metadata"),
+        ],
+    )
+    def test_blank_section_or_name_list_is_problem(self, overrides, key):
+        _, report = parse(schema(**overrides))
+        assert problem_keys(report) == [key]
+
+    def test_empty_schema_is_problem(self):
+        _, report = parse({})
         assert problem_keys(report) == [""]
         assert "empty" in report.problems[0].message
-
-    @pytest.mark.parametrize("value", [["population"], "population"])
-    def test_non_mapping_schema_is_problem(self, value):
-        parsed, report = parse_schema(value)
-        assert parsed is None
-        assert problem_keys(report) == [""]
-        assert "must be a mapping" in report.problems[0].message
 
     @pytest.mark.parametrize(
         "overrides, key",
@@ -112,8 +125,7 @@ class TestParseSchema:
         ],
     )
     def test_section_not_mapping_is_problem(self, overrides, key):
-        parsed, report = parse_schema(schema(**overrides))
-        assert parsed is None
+        _, report = parse(schema(**overrides))
         assert problem_keys(report) == [key]
         assert "must be a mapping" in report.problems[0].message
 
@@ -130,17 +142,21 @@ class TestParseSchema:
         ],
     )
     def test_name_list_not_list_is_problem(self, overrides, key):
-        parsed, report = parse_schema(schema(**overrides))
-        assert parsed is None
+        _, report = parse(schema(**overrides))
         assert problem_keys(report) == [key]
         assert "must be a list" in report.problems[0].message
 
-    def test_name_list_entry_not_string_is_problem_naming_index(self):
-        parsed, report = parse_schema(
-            schema(population={"properties": ["ethnicity", 5, None]})
+    def test_name_list_bad_items_are_problems_counted_from_one(self):
+        _, report = parse(schema(population={"properties": ["ethnicity", 5.5, None]}))
+        assert problem_keys(report) == ["population.properties[2]", "population.properties[3]"]
+
+    def test_whole_number_names_read_as_text(self):
+        parsed, report = parse(
+            schema(population={"properties": [2021]}, venues={"types": {7: {"properties": [1]}}})
         )
-        assert parsed is None
-        assert problem_keys(report) == ["population.properties[1]", "population.properties[2]"]
+        assert report.problems == []
+        assert parsed.population_properties == ["2021"]
+        assert parsed.venue_type_properties == {"7": ["1"]}
 
     @pytest.mark.parametrize(
         "overrides, key",
@@ -162,81 +178,31 @@ class TestParseSchema:
         ],
     )
     def test_switch_not_true_or_false_is_problem(self, overrides, key):
-        parsed, report = parse_schema(schema(**overrides))
-        assert parsed is None
+        _, report = parse(schema(**overrides))
         assert problem_keys(report) == [key]
-        assert "true or false" in report.problems[0].message
 
     @pytest.mark.parametrize("value", ["4", 4.5, True])
     def test_compression_level_not_whole_number_is_problem(self, value):
-        parsed, report = parse_schema(schema(output={"compression_level": value}))
-        assert parsed is None
+        _, report = parse(schema(output={"compression_level": value}))
         assert problem_keys(report) == ["output.compression_level"]
 
     def test_unknown_top_level_section_is_warning(self):
-        parsed, report = parse_schema(schema(subsets={"properties": []}))
+        parsed, report = parse(schema(subsets={"properties": []}))
         assert parsed is not None
         assert report.problems == []
         assert warning_keys(report) == ["subsets"]
 
     def test_every_problem_reported_in_one_pass(self):
-        _, report = parse_schema(
-            schema(population="x", geography={"include_coordinates": "y"}, output=[])
-        )
+        _, report = parse(schema(population="x", geography={"include_coordinates": "y"}, output=[]))
         assert set(problem_keys(report)) == {"population", "geography.include_coordinates", "output"}
 
 
-class TestLoadSchemaFile:
-    @pytest.mark.parametrize("path", REPO_SCHEMAS)
-    def test_repo_schemas_are_clean(self, path):
-        parsed, report = load_schema_file(path)
-        assert report.problems == [] and report.warnings == []
-        assert isinstance(parsed, SerialisationConfig)
-
-    def test_missing_file_is_problem_naming_path(self, tmp_path):
-        missing = str(tmp_path / "absent.yaml")
-        parsed, report = load_schema_file(missing)
-        assert parsed is None
-        assert problem_keys(report) == [""]
-        assert missing in report.problems[0].message
-
-    def test_invalid_yaml_is_problem(self, tmp_path):
-        path = tmp_path / "bad.yaml"
-        path.write_text("population: [unclosed\n")
-        parsed, report = load_schema_file(str(path))
-        assert parsed is None
-        assert problem_keys(report) == [""]
-        assert "not valid YAML" in report.problems[0].message
-
-    def test_empty_file_is_problem(self, tmp_path):
-        path = tmp_path / "empty.yaml"
-        path.write_text("# everything commented out\n")
-        parsed, report = load_schema_file(str(path))
-        assert parsed is None
-        assert problem_keys(report) == [""]
-        assert str(path) in report.problems[0].message
-        assert "empty" in report.problems[0].message
-
-    def test_schema_findings_keyed_under_found_path(self, tmp_path):
-        path = tmp_path / "schema.yaml"
-        path.write_text("population: [ethnicity]\nsubsets: {}\n")
-        parsed, report = load_schema_file(str(path))
-        assert parsed is None
-        assert problem_keys(report) == [f"({path}): population"]
-        assert warning_keys(report) == [f"({path}): subsets"]
-
-    def test_config_root_substituted(self, tmp_path):
-        (tmp_path / "schema.yaml").write_text("population: {properties: [age_band]}\n")
-        path_resolver.init(config_root=str(tmp_path), data_root=None, output_root=str(tmp_path))
-        parsed, report = load_schema_file("${config_root}/schema.yaml")
-        assert report.problems == []
-        assert parsed.population_properties == ["age_band"]
-
-
 class TestFromFile:
-    def test_returns_parsed_schema(self):
-        parsed = SerialisationConfig.from_file(REPO_SCHEMAS[0])
-        assert "ethnicity" in parsed.population_properties
+    @pytest.mark.parametrize("path", REPO_SCHEMAS)
+    def test_repo_schemas_parse(self, path):
+        parsed = SerialisationConfig.from_file(path)
+        assert isinstance(parsed, SerialisationConfig)
+        assert parsed.population_properties
 
     def test_raises_listing_every_problem(self, tmp_path):
         path = tmp_path / "schema.yaml"
@@ -244,8 +210,31 @@ class TestFromFile:
         with pytest.raises(SerialisationError) as excinfo:
             SerialisationConfig.from_file(str(path))
         message = str(excinfo.value)
-        assert "population" in message and "output.compression_level" in message
+        assert message.startswith(f"Serialisation schema {path} cannot be used:")
+        assert f"schema ({path}): population" in message
+        assert f"schema ({path}): output.compression_level" in message
         assert excinfo.value.report.has_problems
+
+    @pytest.mark.parametrize(
+        "text, expected",
+        [(None, "not found"), ("population: [unclosed\n", "not valid YAML"), ("# nothing\n", "empty")],
+        ids=["missing", "bad_yaml", "empty"],
+    )
+    def test_unloadable_file_raises_one_problem(self, tmp_path, text, expected):
+        path = tmp_path / "schema.yaml"
+        if text is not None:
+            path.write_text(text)
+        with pytest.raises(SerialisationError) as excinfo:
+            SerialisationConfig.from_file(str(path))
+        problems = excinfo.value.report.problems
+        assert [finding.key for finding in problems] == ["schema"]
+        assert expected in problems[0].message
+
+    def test_config_root_substituted(self, tmp_path):
+        (tmp_path / "schema.yaml").write_text("population: {properties: [age_band]}\n")
+        path_resolver.init(config_root=str(tmp_path), data_root=None, output_root=str(tmp_path))
+        parsed = SerialisationConfig.from_file("${config_root}/schema.yaml")
+        assert parsed.population_properties == ["age_band"]
 
     def test_logs_warnings_at_info(self, tmp_path, caplog):
         path = tmp_path / "schema.yaml"

@@ -14,6 +14,7 @@ from may.social_networks import SocialNetworkBuilder
 from may.preflight.preflight_coordinator import run_preflight
 from may.preflight.context import ConfigContext
 from may.geography import geography as geography_module
+from may.geography import venue_manager as venue_manager_module
 from may.preflight.report import PreflightError
 from may.utils import path_resolver as pr
 from may.utils import build_profile as bp
@@ -94,6 +95,16 @@ def _geography_context(config) -> ConfigContext:
     return ConfigContext(results={geography_stage: geography_config})
 
 
+
+def _venue_context(config) -> ConfigContext:
+    """`_geography_context` plus the parsed venues, for serialisation's venue property check.
+
+    Temporary like `_geography_context`; reads `VenueManager` from its module for the same reason."""
+    context = _geography_context(config)
+    venue_stage = venue_manager_module.VenueManager
+    venue_config, _ = venue_stage.preflight(config.get("venues", {}), context)
+    return context.with_result(venue_stage, venue_config)
+
 def main(args=None):
     """
     Main entry point for world creation.
@@ -130,7 +141,9 @@ def main(args=None):
         return None
 
     try:
-        serialisation = WorldSerializer.from_config(config.get("serialization") or {})
+        serialisation = WorldSerializer.from_config(
+            config.get("serialization", {}), _venue_context(config)
+        )
     except SerialisationError as e:
         logger.error(f"Serialisation config failed: {e}")
         sys.exit(1)

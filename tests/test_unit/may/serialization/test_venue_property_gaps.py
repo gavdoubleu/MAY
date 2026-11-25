@@ -11,7 +11,7 @@ import os
 import pytest
 
 from may.geography.venue_manager import VenueConfig
-from may.preflight.venue_property_gaps import venue_property_gaps
+from may.serialization.venue_property_gaps import venue_property_gaps
 from may.serialization.serialization_config import SerialisationConfig
 
 VENUE_TYPES = {

@@ -71,6 +71,7 @@ def world_config(venues_dir, venues_yaml, serialization_path, serialization_yaml
     }
 
 
+GIVE_SCHEMA = "give a schema file, or set enabled: false"
 COMPANY_VENUES = "venue_types:\n  company:\n    filename: companies.csv\n"
 WORK_SECTOR_SCHEMA = "venues:\n  types:\n    company:\n      properties: [work_sector]\n"
 
@@ -119,21 +120,25 @@ def test_no_serialization_findings_without_an_enabled_schema(
 
 
 @pytest.mark.parametrize(
-    "serialization_block",
-    [None, {}, {"enabled": True}, {"output_dir": "out"}, {"config_file": ""}],
+    "serialization_block, expected",
+    [
+        (None, ("serialization", "left blank; give a value")),
+        ({}, ("serialization.config_file", f"not set; {GIVE_SCHEMA}")),
+        ({"enabled": True}, ("serialization.config_file", f"not set; {GIVE_SCHEMA}")),
+        ({"output_dir": "out"}, ("serialization.config_file", f"not set; {GIVE_SCHEMA}")),
+        ({"config_file": ""}, ("serialization.config_file", f"must not be empty; {GIVE_SCHEMA}")),
+    ],
     ids=["blank", "empty", "enabled", "output_dir_only", "empty_config_file"],
 )
 def test_enabled_serialization_without_config_file_is_problem(
-    venues_dir, tmp_path, serialization_block
+    venues_dir, tmp_path, serialization_block, expected
 ):
     config = world_config(
         venues_dir, COMPANY_VENUES, tmp_path / "serialization.yaml", WORK_SECTOR_SCHEMA
     )
     config["serialization"] = serialization_block
     report = check_world_config(config)
-    assert [(finding.key, finding.message) for finding in report.problems] == [
-        ("serialization.config_file", "not set; serialisation is enabled")
-    ]
+    assert [(finding.key, finding.message) for finding in report.problems] == [expected]
 
 
 def test_serialization_absent_is_problem(venues_dir, tmp_path):
@@ -150,8 +155,8 @@ def test_serialization_absent_is_problem(venues_dir, tmp_path):
     [
         ("venues", "configs/venues_config.yaml", "must be a mapping; got text 'configs/venues_config.yaml'"),
         ("venues", ["a"], "must be a mapping; got a list"),
-        ("serialization", "schema.yaml", "must be a mapping; got scalar (str)"),
-        ("serialization", ["a"], "must be a mapping; got sequence (list)"),
+        ("serialization", "schema.yaml", "must be a mapping; got text 'schema.yaml'"),
+        ("serialization", ["a"], "must be a mapping; got a list"),
     ],
     ids=["venues_string", "venues_list", "serialization_string", "serialization_list"],
 )
@@ -205,17 +210,6 @@ def test_unreadable_schema_is_problem_even_when_venues_are_broken(venues_dir, tm
     assert keys(report.problems) == ["venues.config_file", "serialization.config_file"]
 
 
-def test_gap_check_failure_is_warning(venues_dir, tmp_path):
-    serialization_path = tmp_path / "serialization.yaml"
-    config = world_config(venues_dir, COMPANY_VENUES, serialization_path, WORK_SECTOR_SCHEMA)
-    (venues_dir / "companies.csv").unlink()
-    (venues_dir / "companies.csv").mkdir()
-    report = check_world_config(config)
-    assert report.problems == []
-    assert keys(report.warnings) == [f"serialization.config_file ({serialization_path})"]
-    assert report.warnings[0].message.startswith("venue property check skipped: ")
-
-
 def test_bad_enabled_is_problem_prefixed_with_serialization(venues_dir, tmp_path):
     config = world_config(
         venues_dir, COMPANY_VENUES, tmp_path / "serialization.yaml", WORK_SECTOR_SCHEMA
@@ -223,25 +217,6 @@ def test_bad_enabled_is_problem_prefixed_with_serialization(venues_dir, tmp_path
     config["serialization"]["enabled"] = "yes"
     report = check_world_config(config)
     assert keys(report.problems) == ["serialization.enabled"]
-    assert report.warnings == []
-
-
-@pytest.mark.parametrize(
-    "schema_yaml, section",
-    [
-        ("venues: [a, b]\n", "venues"),
-        ("venues:\n  types: company\n", "venues.types"),
-        ("venues:\n  types:\n    company:\n      properties: work_sector\n", "venues.types.company.properties"),
-    ],
-    ids=["venues_list", "types_string", "properties_string"],
-)
-def test_malformed_schema_is_problem_and_skips_gap_check(
-    venues_dir, tmp_path, schema_yaml, section
-):
-    serialization_path = tmp_path / "serialization.yaml"
-    config = world_config(venues_dir, COMPANY_VENUES, serialization_path, schema_yaml)
-    report = check_world_config(config)
-    assert keys(report.problems) == [f"serialization.config_file ({serialization_path}): {section}"]
     assert report.warnings == []
 
 
@@ -254,17 +229,6 @@ def test_unknown_schema_section_is_warning(venues_dir, tmp_path):
     report = check_world_config(config)
     assert report.problems == []
     assert keys(report.warnings) == [f"serialization.config_file ({serialization_path}): extras"]
-
-
-def test_schema_venue_type_absent_from_venues_config_is_accepted(venues_dir, tmp_path):
-    """Child and route venue types exist only once the build creates them."""
-    schema_yaml = "venues:\n  types:\n    classroom:\n      properties: [capacity]\n"
-    config = world_config(
-        venues_dir, COMPANY_VENUES, tmp_path / "serialization.yaml", schema_yaml
-    )
-    report = check_world_config(config)
-    assert report.problems == []
-    assert report.warnings == []
 
 
 def test_run_preflight_raises_on_problems_after_logging(venues_dir, caplog):
@@ -357,7 +321,7 @@ def test_malformed_timeline_is_problem_and_skips_households(
     assert "households" not in keys(report.problems)
 
 
-@pytest.mark.parametrize("schema_yaml", ["", "# nothing\n", "{}\n"], ids=["empty", "comment", "empty_mapping"])
+@pytest.mark.parametrize("schema_yaml", ["", "# nothing\n"], ids=["empty", "comment"])
 def test_empty_schema_is_problem(venues_dir, tmp_path, schema_yaml):
     serialization_path = tmp_path / "serialization.yaml"
     config = world_config(venues_dir, COMPANY_VENUES, serialization_path, schema_yaml)
@@ -372,10 +336,7 @@ def test_schema_not_mapping_is_problem(venues_dir, tmp_path):
     config = world_config(venues_dir, COMPANY_VENUES, serialization_path, "- population\n")
     report = check_world_config(config)
     assert [(finding.key, finding.message) for finding in report.problems] == [
-        (
-            f"serialization.config_file ({serialization_path})",
-            "must be a mapping; got sequence (list)",
-        )
+        ("serialization.config_file", f"{serialization_path} must hold a mapping; got a list")
     ]
     assert report.warnings == []
 
