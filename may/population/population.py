@@ -6,6 +6,7 @@ Population manager for MAY.
 Handles population generation and distribution across geographical units.
 """
 
+import glob
 import os
 import logging
 import numpy as np
@@ -26,6 +27,7 @@ DEFAULT_TYPE = "matrix"
 VALID_TYPES = ("matrix", "explicit", "explicit_batch")
 DEFAULT_MALE_FILE = "demographics_male.csv"
 DEFAULT_FEMALE_FILE = "demographics_female.csv"
+BATCH_FILE_PATTERN = "*_pop.csv"
 
 # Keys each type reads; any other of these set under that type is ignored.
 _TYPE_KEYS = {
@@ -70,6 +72,21 @@ def _parse_data_dir(block: dict, report: PreflightReport) -> Optional[str]:
         report.problem("data_dir", f"must be a path; got {data_dir!r}")
         return None
     return pr.resolve(data_dir or DEFAULT_DATA_DIR)
+
+
+def _check_batch_data_dir(data_dir: Optional[str], report: PreflightReport) -> None:
+    """`explicit_batch` reads `<unit>_pop.csv` per unit; the units are unknown before
+    the geography loads, so at least one such file must exist."""
+    if data_dir is None:
+        return
+    if not os.path.isdir(data_dir):
+        report.problem("data_dir", f"{os.path.abspath(data_dir)} not found")
+    elif not glob.glob(os.path.join(glob.escape(data_dir), BATCH_FILE_PATTERN)):
+        report.problem(
+            "data_dir",
+            f"no {BATCH_FILE_PATTERN} files in {os.path.abspath(data_dir)}; "
+            "type 'explicit_batch' reads one per unit of `level`",
+        )
 
 
 def _parse_type(block: dict, report: PreflightReport) -> Optional[str]:
@@ -185,6 +202,7 @@ class PopulationManager:
                 report.problem("level", "not set; type 'explicit_batch' needs it")
             else:
                 check_geo_level("level", level, PreflightContext(geo_levels=geo_levels), report)
+            _check_batch_data_dir(data_dir, report)
 
         if report.has_problems:
             return None, report
@@ -725,4 +743,10 @@ class PopulationManager:
 
             self.load_explicit_from_df(df, column_mapping)
 
+        if total_files == 0:
+            raise PopulationError(
+                f"Batch explicit population: no population files in {data_dir} for "
+                f"any of the {len(unit_names)} {level} units (expected <unit>_pop.csv); "
+                "check `level` and `data_dir`."
+            )
         logger.info(f"Batch load complete. Processed {total_files} files.")

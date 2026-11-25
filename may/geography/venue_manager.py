@@ -1,3 +1,4 @@
+import glob
 import logging
 import pandas as pd
 import yaml
@@ -57,6 +58,26 @@ def _check_venue_type(report: PreflightReport, type_key: str, type_config, conte
         report.problem(level_key, "not set; batch_mode needs the geo level {unit} names")
     else:
         check_geo_level(level_key, type_config["level"], context, report)
+
+
+def _check_batch_files(report: PreflightReport, type_key: str, type_config, data_dir: str) -> None:
+    """An enabled batch type's pattern must match a file for some unit; units are
+    unknown before the geography loads, so `{unit}` matches anything."""
+    if not (
+        isinstance(type_config, dict)
+        and type_config.get("enabled", True) is not False
+        and type_config.get("batch_mode") is True
+    ):
+        return
+    pattern = type_config.get("filename")
+    if not isinstance(pattern, str) or "{unit}" not in pattern:
+        return  # Its own problem, from `_check_venue_type`.
+    unit_glob = "*".join(glob.escape(part) for part in pattern.split("{unit}"))
+    if not glob.glob(os.path.join(glob.escape(data_dir), unit_glob)):
+        report.problem(
+            f"{type_key}.filename",
+            f"pattern {pattern!r} matched no files in {os.path.abspath(data_dir)}",
+        )
 
 
 def _loads_from_file(type_config) -> bool:
@@ -484,6 +505,7 @@ class VenueManager:
             for venue_type, type_config in venue_types.items():
                 type_key = f"{venue_types_key}.{venue_type}"
                 _check_venue_type(report, type_key, type_config, context)
+                _check_batch_files(report, type_key, type_config, data_dir)
                 if _loads_from_file(type_config):
                     paths = pr.check_data_files(
                         report, f"{type_key}.filename", type_config["filename"], data_dir

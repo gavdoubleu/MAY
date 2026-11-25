@@ -14,6 +14,7 @@ from .venue_allocator import _allocate_to_venue_type
 from .household_distributor import HouseholdError
 from .composition_pattern import CompositionPattern
 from may.preflight.config_file import load_config_mapping
+from may.preflight.context import PreflightContext, check_geo_level
 from may.preflight.report import PreflightReport, not_list_message, not_mapping_message
 from may.utils import path_resolver as pr
 from may.utils import build_profile as bp
@@ -50,8 +51,10 @@ class AllocationStrategy:
         self.world_config = world_config
 
     @staticmethod
-    def parse_config(config_path, data_dir=None):
+    def parse_config(config_path, data_dir=None, geo_levels=None):
         """Parse a strategy YAML into a `ParsedStrategy`, or `None` if any problem.
+
+        `mixture.geo_level` is checked against `geo_levels` when given.
 
         Checks need no household data: the vocabulary-dependent pattern checks run
         when the strategy executes. The mixture file is checked to exist, never opened."""
@@ -64,7 +67,7 @@ class AllocationStrategy:
         config = load_config_mapping(found_path, report)
         if config is None:
             return None, report
-        _check_strategy(config, report)
+        _check_strategy(config, report, PreflightContext(geo_levels=geo_levels))
         if report.has_problems:
             return None, report
         return ParsedStrategy(found_path, config), report
@@ -76,7 +79,9 @@ class AllocationStrategy:
         household_config = context.households
         if household_config is None:
             return PreflightReport()
-        parsed, report = cls.parse_config(config_path, household_config.data_dir)
+        parsed, report = cls.parse_config(
+            config_path, household_config.data_dir, context.geo_levels
+        )
         overridden = household_config.strategy_path
         if parsed is not None and overridden and not _same_file(overridden, parsed.path):
             report.warning("config", (
@@ -115,7 +120,7 @@ def _same_file(first, second):
     return os.path.realpath(first) == os.path.realpath(second)
 
 
-def _check_strategy(config, report):
+def _check_strategy(config, report, context):
     """Every check a strategy YAML gets before household data is loaded. A disabled
     strategy is never run, so its steps and mixture are not checked."""
     if not config.get("enabled", True):
@@ -137,10 +142,10 @@ def _check_strategy(config, report):
                 f"{step_key}.type",
                 f"unknown step type {step.get('type')!r}; expected one of {list(STEP_TYPES)}",
             )
-    _check_mixture(config.get("mixture"), steps, report)
+    _check_mixture(config.get("mixture"), steps, report, context)
 
 
-def _check_mixture(mixture, steps, report):
+def _check_mixture(mixture, steps, report, context):
     interpretation_steps = [
         step.get("name", "household") for step in steps
         if isinstance(step, dict) and step.get("type") == "household"
@@ -156,6 +161,10 @@ def _check_mixture(mixture, steps, report):
     if not isinstance(mixture, dict):
         report.problem("mixture", not_mapping_message(mixture))
         return
+    if mixture.get("geo_level") is None:
+        report.problem("mixture.geo_level", "not set")
+    else:
+        check_geo_level("mixture.geo_level", mixture["geo_level"], context, report)
     if not mixture.get("file"):
         report.problem("mixture.file", "not set")
         return

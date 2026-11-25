@@ -37,6 +37,9 @@ def working_dir(tmp_path, monkeypatch):
     monkeypatch.chdir(working)
     for name in DATA_FILES:
         (population_dir / name).write_text("")
+    batch_dir = working / "1911_data" / "population"
+    batch_dir.mkdir(parents=True)
+    (batch_dir / "M1_pop.csv").write_text("")
     return working
 
 
@@ -291,10 +294,22 @@ def test_matrix_stacked_demographics_lists_every_missing_file(working_dir):
     assert "gone_1.csv" in message and "gone_2.csv" in message
 
 
-def test_batch_files_not_existence_checked():
+def test_batch_data_dir_with_unit_files_is_clean():
     population_config, report = PopulationManager.parse_config(batch_block(), GEO_LEVELS)
     assert population_config is not None
     assert not report.problems
+
+
+def test_batch_data_dir_missing_is_problem():
+    message = assert_single_problem(batch_block(data_dir="gone"), "data_dir", GEO_LEVELS)
+    assert "not found" in message
+
+
+def test_batch_data_dir_without_unit_files_is_problem():
+    message = assert_single_problem(
+        batch_block(data_dir="data/population"), "data_dir", GEO_LEVELS
+    )
+    assert "_pop.csv" in message
 
 
 # Rows: explicit_batch level

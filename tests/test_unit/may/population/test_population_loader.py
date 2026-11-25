@@ -373,6 +373,17 @@ class TestLoadBatchExplicitFromCsv:
         assert len(pm.people) == 2
         assert {p.geographical_unit.name for p in pm.people} == {'S1', 'S2'}
 
+    def test_no_unit_files_at_all_is_error(self, two_level_geo, tmp_path):
+        """Zero matches means a wrong level or data_dir, never a partial
+        geography: an empty world must fail loudly."""
+        pm = PopulationManager(geography=two_level_geo, data_dir=str(tmp_path))
+        with pytest.raises(PopulationError, match="no population files"):
+            pm.load_batch_explicit_from_csv(
+                data_dir=str(tmp_path),
+                column_mapping={'age': 'Age', 'sex': 'Sex'},
+                level='MGU',
+            )
+
     def test_rows_outside_loaded_geography_are_filtered_per_file(
         self, two_level_geo, tmp_path
     ):

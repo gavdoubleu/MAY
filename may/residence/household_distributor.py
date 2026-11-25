@@ -26,6 +26,7 @@ from may.preflight.report import PreflightReport, not_list_message, not_mapping_
 from may.utils.yaml_loader import invalid_yaml_message, load_yaml, unreadable_file_message
 from may.residence.relationship_rules import RelationshipRulesValidator
 from may.utils import path_resolver as pr
+from may.utils.stacked_input import COLUMN_POLICIES
 from may.residence.models import Category
 from may.residence.composition_pattern import CompositionPattern
 from may.utils.attribute_access import get_attribute
@@ -43,6 +44,7 @@ REQUIRED_KEYS = ("data_dir", "config_file", "data_file")
 # Keys read as one file or directory path; `data_file` may also be a list of files.
 PATH_KEYS = ("data_dir", "config_file", "rules_file", "strategy_file")
 CATEGORY_KEYS = ("name", "symbol", "attribute", "type")
+DEFAULT_COLUMN_POLICY = "strict"
 CATEGORY_TYPES = ("numerical", "categorical")
 
 
@@ -299,6 +301,14 @@ class HouseholdDistributor:
         if block.get("data_file"):
             data_paths = pr.check_data_files(report, "data_file", block["data_file"], data_dir)
 
+        # A blank key (`column_policy:` with no value) falls back to the default.
+        column_policy = block.get("column_policy") or DEFAULT_COLUMN_POLICY
+        if column_policy not in COLUMN_POLICIES:
+            report.problem(
+                "column_policy",
+                f"{column_policy!r} unknown; expected one of {list(COLUMN_POLICIES)}",
+            )
+
         if report.has_problems:
             return None, report
         household_config = HouseholdConfig(
@@ -307,7 +317,7 @@ class HouseholdDistributor:
             config=config,
             rules_path=rules_path,
             data_file=data_paths,
-            column_policy=block.get("column_policy", "strict"),
+            column_policy=column_policy,
             strategy_path=strategy_path,
         )
         return household_config, report

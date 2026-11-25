@@ -619,9 +619,17 @@ def test_absent_population_is_defaults_warning(tmp_path, monkeypatch, population
 BATCH_POPULATION_UNKNOWN_LEVEL = {"type": "explicit_batch", "level": "LSOA"}
 
 
+def with_batch_population(tmp_path, config):
+    """Point the batch block at a data_dir holding one per-unit file."""
+    batch_dir = tmp_path / "batch_population"
+    batch_dir.mkdir()
+    (batch_dir / "M1_pop.csv").write_text("")
+    config["population"] = {**BATCH_POPULATION_UNKNOWN_LEVEL, "data_dir": str(batch_dir)}
+
+
 def test_population_batch_level_unknown_to_geography_is_problem(tmp_path):
     config, _ = geography_config(tmp_path, VALID_GEOGRAPHY)
-    config["population"] = BATCH_POPULATION_UNKNOWN_LEVEL
+    with_batch_population(tmp_path, config)
     report = check_world_config(config)
     assert keys(report.problems) == ["population.level"]
     assert "['MGU', 'SGU']" in report.problems[0].message
@@ -634,7 +642,7 @@ def test_population_batch_level_unknown_to_geography_is_problem(tmp_path):
 )
 def test_bad_geography_skips_population_level_check(tmp_path, geography_block):
     config, _ = geography_config(tmp_path, geography_block)
-    config["population"] = BATCH_POPULATION_UNKNOWN_LEVEL
+    with_batch_population(tmp_path, config)
     report = check_world_config(config)
     assert not any(key.startswith("population") for key in keys(report.problems))
 
@@ -648,6 +656,7 @@ def test_venue_batch_level_unknown_to_geography_is_problem(tmp_path):
     config, _ = geography_config(tmp_path, VALID_GEOGRAPHY)
     venues_yaml = tmp_path / "venues" / "venues.yaml"
     venues_yaml.write_text(BATCH_VENUES_UNKNOWN_LEVEL)
+    (tmp_path / "venues" / "pubs_M1.csv").write_text("")
     report = check_world_config(config)
     assert keys(report.problems) == [f"venues.config_file ({venues_yaml}): venue_types.pub.level"]
     assert "['MGU', 'SGU']" in report.problems[0].message
@@ -661,5 +670,6 @@ def test_venue_batch_level_unknown_to_geography_is_problem(tmp_path):
 def test_bad_geography_skips_venue_level_check(tmp_path, geography_block):
     config, _ = geography_config(tmp_path, geography_block)
     (tmp_path / "venues" / "venues.yaml").write_text(BATCH_VENUES_UNKNOWN_LEVEL)
+    (tmp_path / "venues" / "pubs_M1.csv").write_text("")
     report = check_world_config(config)
     assert not any(key.startswith("venues") for key in keys(report.problems))

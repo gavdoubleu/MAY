@@ -231,3 +231,46 @@ def test_disabled_strategy_steps_and_mixture_are_not_checked(working_dir):
     report = AllocationStrategy.preflight("strategy.yaml", context())
 
     assert report.problems == []
+
+
+GEO_LEVELS = frozenset({"SGU", "MGU", "LGU"})
+
+
+def geo_context(**household_overrides):
+    return PreflightContext(
+        geo_levels=GEO_LEVELS, households=households(**household_overrides),
+        households_block_present=True,
+    )
+
+
+def test_mixture_geo_level_unknown_is_problem(working_dir):
+    (working_dir / "shares.csv").write_text("")
+    (working_dir / "strategy.yaml").write_text(
+        GOOD_STRATEGY + "mixture: {file: shares.csv, geo_level: MSOA}\n"
+    )
+
+    report = AllocationStrategy.preflight("strategy.yaml", geo_context())
+
+    assert lines(report.problems) == [
+        ("mixture.geo_level", "unknown geo level 'MSOA'; expected one of ['LGU', 'MGU', 'SGU']")
+    ]
+
+
+def test_mixture_geo_level_unset_is_problem(working_dir):
+    (working_dir / "shares.csv").write_text("")
+    (working_dir / "strategy.yaml").write_text(GOOD_STRATEGY + "mixture: {file: shares.csv}\n")
+
+    report = AllocationStrategy.preflight("strategy.yaml", geo_context())
+
+    assert [finding.key for finding in report.problems] == ["mixture.geo_level"]
+
+
+def test_mixture_geo_level_known_is_clean(working_dir):
+    (working_dir / "shares.csv").write_text("")
+    (working_dir / "strategy.yaml").write_text(
+        GOOD_STRATEGY + "mixture: {file: shares.csv, geo_level: MGU}\n"
+    )
+
+    report = AllocationStrategy.preflight("strategy.yaml", geo_context())
+
+    assert report.problems == []

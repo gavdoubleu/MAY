@@ -86,6 +86,16 @@ def test_column_policy_is_carried(write_block):
     assert household_config.column_policy == "union_zero_fill"
 
 
+@pytest.mark.parametrize("value", ["union_zerofill", 3])
+def test_unknown_column_policy_is_problem(write_block, value):
+    household_config, report = HouseholdDistributor.parse_config(
+        write_block(column_policy=value)
+    )
+    assert household_config is None
+    assert [finding.key for finding in report.problems] == ["column_policy"]
+    assert "strict" in report.problems[0].message
+
+
 def test_data_file_list_is_carried_as_absolute_paths(write_block, working_dir):
     for name in ("a.csv", "b.csv"):
         (working_dir / "data" / name).write_text("geo_unit\n")
