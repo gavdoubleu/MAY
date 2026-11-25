@@ -13,11 +13,12 @@ import numpy as np
 import pandas as pd
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, FrozenSet, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from .person import Person
-from may.preflight.context import PreflightContext, check_geo_level
-from may.preflight.report import PreflightReport, not_mapping_message
+from may.geography.geography import check_geo_level
+from may.preflight.config_reader import FAILED, ConfigReader
+from may.preflight.config_stage import ConfigError, ConfigStage
 from may.utils import path_resolver as pr
 
 logger = logging.getLogger("population")
@@ -44,13 +45,18 @@ class PopulationError(Exception):
     process exit."""
 
 
+class PopulationConfigError(ConfigError, PopulationError):
+    """The `population` config block cannot be used; `.report` holds the findings."""
+
+
 @dataclass(frozen=True)
 class PopulationConfig:
-    """Parsed `population` config block; checked by `PopulationManager.parse_config`.
+    """Parsed `population` config block; read by `PopulationManager.parse`.
 
     `data_dir` is `${...}`-resolved. Data files (`filename`, `male_file`,
     `female_file`) are lists of absolute paths, checked to exist. Keys the chosen
-    type ignores are `None` (`{}` for `column_mapping`)."""
+    type ignores are `None` (`{}` for `column_mapping`). Fields of a block with
+    problems may be `FAILED`."""
 
     data_dir: str
     type: str
@@ -61,66 +67,70 @@ class PopulationConfig:
     level: Optional[str] = None
 
 
-def _is_name(value) -> bool:
-    return isinstance(value, str) and bool(value)
+def _parse_data_dir(reader: ConfigReader):
+    """Resolved data dir, default when absent; `FAILED` if not a path or empty."""
+    data_dir = reader.path("data_dir", default=DEFAULT_DATA_DIR)
+    if data_dir == "":
+        reader.problem("must not be empty; give a path, or remove the key to use the default", at="data_dir")
+        return FAILED
+    return data_dir
 
 
-def _parse_data_dir(block: dict, report: PreflightReport) -> Optional[str]:
-    """Resolved data dir; a blank key falls back to the default. `None` if not a path."""
-    data_dir = block.get("data_dir")
-    if data_dir is not None and not isinstance(data_dir, str):
-        report.problem("data_dir", f"must be a path; got {data_dir!r}")
-        return None
-    return pr.resolve(data_dir or DEFAULT_DATA_DIR)
-
-
-def _check_batch_data_dir(data_dir: Optional[str], report: PreflightReport) -> None:
+def _check_batch_data_dir(reader: ConfigReader, data_dir) -> None:
     """`explicit_batch` reads `<unit>_pop.csv` per unit; the units are unknown before
     the geography loads, so at least one such file must exist."""
-    if data_dir is None:
+    if data_dir is FAILED:
         return
     if not os.path.isdir(data_dir):
-        report.problem("data_dir", f"{os.path.abspath(data_dir)} not found")
+        reader.problem(f"{os.path.abspath(data_dir)} not found", at="data_dir")
     elif not glob.glob(os.path.join(glob.escape(data_dir), BATCH_FILE_PATTERN)):
-        report.problem(
-            "data_dir",
+        reader.problem(
             f"no {BATCH_FILE_PATTERN} files in {os.path.abspath(data_dir)}; "
             "type 'explicit_batch' reads one per unit of `level`",
+            at="data_dir",
         )
 
 
-def _parse_type(block: dict, report: PreflightReport) -> Optional[str]:
-    population_type = block.get("type")
-    if population_type is None:
-        return DEFAULT_TYPE
-    if not isinstance(population_type, str) or population_type not in VALID_TYPES:
-        report.problem("type", f"{population_type!r} unknown; expected one of {list(VALID_TYPES)}")
-        return None
-    return population_type
-
-
-def _parse_column_mapping(block: dict, report: PreflightReport) -> dict:
-    column_mapping = block.get("column_mapping")
-    if column_mapping is None:
-        return {}
-    if not isinstance(column_mapping, dict):
-        report.problem("column_mapping", not_mapping_message(column_mapping))
-        return {}
-    for field_name, column_name in column_mapping.items():
-        if not _is_name(column_name):
-            report.problem(
-                f"column_mapping.{field_name}", f"must be a column name; got {column_name!r}"
-            )
+def _parse_column_mapping(reader: ConfigReader):
+    """Field → column name; a bad column is a problem at its field, siblings still read."""
+    mapping_reader = reader.section("column_mapping", default={})
+    field_names = mapping_reader.keys()
+    if field_names is FAILED:
+        return FAILED
+    column_mapping = {}
+    for field_name in field_names:
+        column_name = mapping_reader.name(field_name, give="a column name")
+        if column_name is not FAILED:
+            column_mapping[field_name] = column_name
+    if len(column_mapping) != len(field_names):
+        return FAILED
     return column_mapping
 
 
-def _warn_unused_keys(block: dict, population_type: str, report: PreflightReport) -> None:
+def _parse_explicit_filename(reader: ConfigReader, data_dir):
+    """The one population file, as a one-item path list; a list is not accepted."""
+    if isinstance(reader.value("filename"), list):
+        reader.problem("must be a path; got a list", at="filename")
+        return FAILED
+    return reader.data_file("filename", data_dir, give="a path")
+
+
+def _parse_batch_level(reader: ConfigReader, context):
+    """The required `level`, known to the geography once it parsed."""
+    level = reader.name("level", give="a geo level name")
+    if level is FAILED:
+        return FAILED
+    return check_geo_level(reader, "level", context)
+
+
+def _warn_unused_keys(reader: ConfigReader, population_type: str) -> None:
+    written_keys = set(reader.keys())
     for key in sorted(_TYPE_SPECIFIC_KEYS - _TYPE_KEYS[population_type]):
-        if key in block:
-            report.warning(key, f"ignored by population type {population_type!r}")
+        if key in written_keys:
+            reader.warning(f"ignored by population type {population_type!r}", at=key)
 
 
-class PopulationManager:
+class PopulationManager(ConfigStage):
     """
     Manages population generation and distribution.
 
@@ -147,66 +157,45 @@ class PopulationManager:
     def __len__(self):
         return len(self.people)
 
-    @staticmethod
-    def parse_config(
-        block: Optional[dict], geo_levels: Optional[FrozenSet[str]] = None
-    ) -> Tuple[Optional[PopulationConfig], PreflightReport]:
-        """Parse a `population` config block. Config is `None` if any problem.
+    display_name = "Population"
+    config_error = PopulationConfigError
+    config_key = "population"
 
-        `geo_levels` is the parsed geography's levels; `None` skips the
-        `explicit_batch` level-is-known check."""
-        report = PreflightReport()
-        if not block:
-            block = {}
-            report.warning(
-                "",
+    @classmethod
+    def parse(cls, reader: ConfigReader, context) -> PopulationConfig:
+        """Read a `population` block; `explicit_batch` `level` is checked against
+        `context[Geography]`."""
+        if not reader.keys():
+            reader.warning(
                 f"no population settings; defaults in use: type {DEFAULT_TYPE!r}, "
                 f"data_dir {DEFAULT_DATA_DIR!r}, files {DEFAULT_MALE_FILE!r} / "
-                f"{DEFAULT_FEMALE_FILE!r}",
+                f"{DEFAULT_FEMALE_FILE!r}"
             )
-        data_dir = _parse_data_dir(block, report)
-        population_type = _parse_type(block, report)
-        if population_type is None:
-            return None, report
-        _warn_unused_keys(block, population_type, report)
+        data_dir = _parse_data_dir(reader)
+        population_type = reader.one_of("type", VALID_TYPES, default=DEFAULT_TYPE)
+        if population_type is FAILED:
+            return PopulationConfig(data_dir=data_dir, type=FAILED)
+        _warn_unused_keys(reader, population_type)
 
         column_mapping = {}
         if population_type != "matrix":
-            column_mapping = _parse_column_mapping(block, report)
+            column_mapping = _parse_column_mapping(reader)
 
         filename = male_file = female_file = level = None
         if population_type == "explicit":
-            filename = block.get("filename")
-            if filename is None:
-                report.problem("filename", "not set; type 'explicit' needs it")
-            elif not _is_name(filename):
-                report.problem("filename", f"must be a path; got {filename!r}")
-            else:
-                filename = pr.check_data_files(report, "filename", filename, data_dir)
+            filename = _parse_explicit_filename(reader, data_dir)
         elif population_type == "matrix":
-            male_file = pr.check_data_files(
-                report,
-                "demographics_male_file",
-                block.get("demographics_male_file", DEFAULT_MALE_FILE),
-                data_dir,
+            male_file = reader.data_file(
+                "demographics_male_file", data_dir, default=DEFAULT_MALE_FILE
             )
-            female_file = pr.check_data_files(
-                report,
-                "demographics_female_file",
-                block.get("demographics_female_file", DEFAULT_FEMALE_FILE),
-                data_dir,
+            female_file = reader.data_file(
+                "demographics_female_file", data_dir, default=DEFAULT_FEMALE_FILE
             )
         else:  # explicit_batch
-            level = block.get("level")
-            if level is None:
-                report.problem("level", "not set; type 'explicit_batch' needs it")
-            else:
-                check_geo_level("level", level, PreflightContext(geo_levels=geo_levels), report)
-            _check_batch_data_dir(data_dir, report)
+            level = _parse_batch_level(reader, context)
+            _check_batch_data_dir(reader, data_dir)
 
-        if report.has_problems:
-            return None, report
-        population_config = PopulationConfig(
+        return PopulationConfig(
             data_dir=data_dir,
             type=population_type,
             column_mapping=column_mapping,
@@ -215,40 +204,21 @@ class PopulationManager:
             female_file=female_file,
             level=level,
         )
-        return population_config, report
-
-    @staticmethod
-    def preflight(
-        block: Optional[dict], geo_levels: Optional[FrozenSet[str]] = None
-    ) -> PreflightReport:
-        """Check a `population` config block without loading population data."""
-        _, report = PopulationManager.parse_config(block, geo_levels)
-        return report
 
     @classmethod
-    def from_config(cls, block: Optional[dict], geography) -> "PopulationManager":
-        """Build and load from a `population` block; `PopulationError` on any problem."""
-        population_config, report = cls.parse_config(block, frozenset(geography.levels))
-        report.raise_if_problems(
-            PopulationError, f"Population config has {len(report.problems)} problem(s):"
-        )
-        for finding in report.warnings:
-            logger.info(f"Population config warning: {finding.key}: {finding.message}")
-        population = cls(geography=geography, data_dir=population_config.data_dir)
-        if population_config.type == "explicit_batch":
+    def build(cls, parsed: PopulationConfig, *, geography) -> "PopulationManager":
+        """Load the population the parsed block names onto the live `geography`."""
+        population = cls(geography=geography, data_dir=parsed.data_dir)
+        if parsed.type == "explicit_batch":
             population.load_batch_explicit_from_csv(
-                data_dir=population_config.data_dir,
-                column_mapping=population_config.column_mapping,
-                level=population_config.level,
+                data_dir=parsed.data_dir, column_mapping=parsed.column_mapping, level=parsed.level
             )
-        elif population_config.type == "explicit":
+        elif parsed.type == "explicit":
             population.load_explicit_from_csv(
-                filename=population_config.filename, column_mapping=population_config.column_mapping
+                filename=parsed.filename, column_mapping=parsed.column_mapping
             )
         else:  # matrix
-            population.load_demographics_from_csv(
-                population_config.male_file, population_config.female_file
-            )
+            population.load_demographics_from_csv(parsed.male_file, parsed.female_file)
             population.generate_population()
         return population
 

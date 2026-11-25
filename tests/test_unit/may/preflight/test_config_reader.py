@@ -653,6 +653,14 @@ def test_data_file_blank_absent(tmp_path):
     ]
 
 
+def test_data_file_default_is_found_and_checked(tmp_path):
+    write(tmp_path / "a.csv", "x")
+    reader, report = reader_over({})
+    assert reader.data_file("found", str(tmp_path), default="a.csv") == [str(tmp_path / "a.csv")]
+    assert reader.data_file("missing", str(tmp_path), default="b.csv") is FAILED
+    assert problems(report) == [("block.missing", f"not found: {tmp_path / 'b.csv'}")]
+
+
 # --- domain-free -----------------------------------------------------------------------
 
 

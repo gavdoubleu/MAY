@@ -374,7 +374,8 @@ class ConfigReader:
 
     def data_file(self, key, data_dir, default=_REQUIRED, give=None):
         """Paths of the data file(s) `key` names: one path or a list, relative ones under
-        `data_dir`, each must exist. A failed `data_dir` checks the shape only."""
+        `data_dir`, each must exist. A failed `data_dir` checks the shape only. A default
+        is found and checked as if written."""
 
         def convert(raw, key_path):
             try:
@@ -392,7 +393,7 @@ class ConfigReader:
                 self._record(key_path, str(error))
                 return FAILED
 
-        return self._read(key, default, give, convert)
+        return self._read(key, default, give, convert, convert_default=True)
 
     def value(self, key=_WHOLE_VALUE, default=None):
         """Raw value at `key` (or this whole place), recording nothing; `FAILED` when inert."""

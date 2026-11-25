@@ -13,6 +13,7 @@ from may.world import World
 from may.social_networks import SocialNetworkBuilder
 from may.preflight.preflight_coordinator import run_preflight
 from may.preflight.context import ConfigContext
+from may.geography import geography as geography_module
 from may.preflight.report import PreflightError
 from may.utils import path_resolver as pr
 from may.utils import build_profile as bp
@@ -81,6 +82,16 @@ def parse_args(argv=None):
         help="Check the config and exit (0 if clean, 1 on problems) without building or writing anything."
     )
     return parser.parse_args(argv)
+
+
+def _geography_context(config) -> ConfigContext:
+    """A context holding the parsed geography, for stages that read it.
+
+    Temporary: phase 11 has create_world consume the preflight context instead. Reads the
+    stage class from its module so a patched `Geography` in tests leaves it real."""
+    geography_stage = geography_module.Geography
+    geography_config, _ = geography_stage.preflight(config.get("geography", {}), ConfigContext())
+    return ConfigContext(results={geography_stage: geography_config})
 
 
 def main(args=None):
@@ -153,7 +164,9 @@ def main(args=None):
     logger.info("Loading population...")
     with bp.stage("population_load", "pipeline"):
         try:
-            population = PopulationManager.from_config(config.get("population") or {}, geo)
+            population = PopulationManager.from_config(
+                config.get("population", {}), _geography_context(config), geography=geo
+            )
         except PopulationError as e:
             logger.error(f"Population loading failed: {e}")
             sys.exit(1)

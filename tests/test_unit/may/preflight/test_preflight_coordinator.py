@@ -607,23 +607,34 @@ def test_population_not_mapping_is_problem(tmp_path):
     config["population"] = "matrix"
     report = check_world_config(config)
     assert [(finding.key, finding.message) for finding in report.problems] == [
-        ("population", "must be a mapping; got scalar (str)")
+        ("population", "must be a mapping; got text 'matrix'")
     ]
 
 
-@pytest.mark.parametrize("population_block", [None, {}], ids=["absent", "empty"])
-def test_absent_population_is_defaults_warning(tmp_path, monkeypatch, population_block):
+@pytest.mark.parametrize("absent", [True, False], ids=["absent", "empty"])
+def test_absent_population_is_defaults_warning(tmp_path, monkeypatch, absent):
     default_population_dir = tmp_path / "data" / "population"
     default_population_dir.mkdir(parents=True)
     for name in ("demographics_male.csv", "demographics_female.csv"):
         (default_population_dir / name).write_text("")
     monkeypatch.chdir(tmp_path)
     config, _ = geography_config(tmp_path, VALID_GEOGRAPHY)
-    config["population"] = population_block
+    config["population"] = {}
+    if absent:
+        del config["population"]
     report = check_world_config(config)
     assert report.problems == []
     assert keys(report.warnings) == ["population"]
     assert "defaults in use" in report.warnings[0].message
+
+
+def test_blank_population_is_problem(tmp_path):
+    config, _ = geography_config(tmp_path, VALID_GEOGRAPHY)
+    config["population"] = None
+    report = check_world_config(config)
+    assert [(finding.key, finding.message) for finding in report.problems] == [
+        ("population", "left blank; give a value")
+    ]
 
 
 BATCH_POPULATION_UNKNOWN_LEVEL = {"type": "explicit_batch", "level": "LSOA"}
