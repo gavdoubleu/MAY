@@ -141,7 +141,9 @@ class ConfigReader:
             if default is _REQUIRED:
                 self._record(key_path, f"not set; give {noun}")
                 return FAILED
-            return convert(default, key_path) if convert_default else default
+            if default is None or not convert_default:
+                return default
+            return convert(default, key_path)
         raw = self._value[key]
         if raw is None:
             if default is _REQUIRED:
@@ -177,7 +179,8 @@ class ConfigReader:
     # --- navigation --------------------------------------------------------------------
 
     def section(self, key, default=_REQUIRED, give=None) -> "ConfigReader":
-        """Reader over the mapping at `key`; inert when it is failed or required and absent."""
+        """Reader over the mapping at `key`; inert when it is failed or required and absent;
+        None when absent with `default=None`."""
 
         def convert(raw, key_path):
             if not isinstance(raw, dict):
@@ -207,7 +210,9 @@ class ConfigReader:
         return self._read(key, default, give, convert, convert_default=True)
 
     def entries(self, key, default=_REQUIRED, give=None):
-        """Name → reader for a mapping of mappings; whole-number names read as text."""
+        """Name → reader for a mapping of mappings; whole-number names read as text.
+
+        A name not text, or the same as an earlier one once read as text, is a problem, left out."""
 
         def convert(raw, key_path):
             if not isinstance(raw, dict):
@@ -216,7 +221,12 @@ class ConfigReader:
             entry_parent = self._reader_at(raw, key_path)
             for name, entry in raw.items():
                 entry_path = entry_parent._child_path(name)
-                if isinstance(entry, dict):
+                if not isinstance(name, str) and not _is_whole_number(name):
+                    hint = _QUOTE_HINT if isinstance(name, (bool, float)) else None
+                    self._record(entry_path, "entry name " + _wrong_type("text", name, hint))
+                elif str(name) in readers:
+                    self._record(entry_path, "named twice; give each entry a different name")
+                elif isinstance(entry, dict):
                     readers[str(name)] = self._reader_at(entry, entry_path)
                 else:
                     self._wrong(entry_path, "a mapping", entry)
@@ -235,11 +245,14 @@ class ConfigReader:
 
         Found absolute as written, else in the working dir, else under the data dir
         (`data_dir=` or this reader's). Every failure is one problem at `key` and gives
-        an inert reader. A failed data dir gives an inert reader with nothing recorded."""
+        an inert reader. A failed data dir gives an inert reader with nothing recorded.
+        Absent with `default=None` gives None."""
         key_path = self._child_path(key)
-        written_path = self.text(key, default=default, give=give)
+        written_path = self.name(key, default=default, give=give)
         if data_dir is _WHOLE_VALUE:
             data_dir = self._data_dir
+        if written_path is None:
+            return None
         if written_path is FAILED or data_dir is FAILED:
             return self._reader_at(_INERT, key_path)
         config = self._load_config_file(written_path, data_dir, key_path)

@@ -318,6 +318,13 @@ def test_absent_optional_section_is_empty_reader():
     assert problems(report) == []
 
 
+
+@pytest.mark.parametrize("method", ["section", "items", "entries"])
+def test_navigation_absent_default_none_is_none_silently(method):
+    reader, report = reader_over({})
+    assert getattr(reader, method)("key", default=None) is None
+    assert problems(report) == []
+
 # --- items / entries / keys ------------------------------------------------------------
 
 
@@ -357,6 +364,33 @@ def test_entries_by_name_int_name_as_text_bad_left_out():
     assert entries["2021"].whole_number("size") == 4
     assert problems(report) == [("block.types.bad", "must be a mapping; got a whole number 5")]
 
+
+
+def test_entries_names_same_as_text_is_problem_first_kept():
+    reader, report = reader_over({"types": {1: {"size": 3}, "1": {"size": 4}}})
+    entries = reader.entries("types")
+    assert list(entries) == ["1"]
+    assert entries["1"].whole_number("size") == 3
+    assert problems(report) == [
+        ("block.types.1", "named twice; give each entry a different name")
+    ]
+
+
+@pytest.mark.parametrize(
+    "name, shown",
+    [
+        (True, f"true; {QUOTE_HINT}"),
+        (2.5, f"a number 2.5; {QUOTE_HINT}"),
+        (None, "null"),
+    ],
+)
+def test_entries_name_not_text_is_problem_left_out(name, shown):
+    reader, report = reader_over({"types": {name: {"size": 3}, "school": {"size": 4}}})
+    entries = reader.entries("types")
+    assert list(entries) == ["school"]
+    assert problems(report) == [
+        (f"block.types.{name}", f"entry name must be text; got {shown}")
+    ]
 
 def test_entries_blank_wrong_type_absent():
     reader, report = reader_over({"blank": None, "list": [1]})
@@ -639,3 +673,15 @@ def test_reader_has_no_domain_imports():
     assert may_imports <= {
         "may.preflight.report", "may.utils", "may.utils.path_resolver", "may.utils.yaml_loader"
     }
+
+
+def test_config_file_absent_default_none_is_none_silently(tmp_path):
+    reader, report = reader_over({}, data_dir=str(tmp_path))
+    assert reader.config_file("config", default=None) is None
+    assert problems(report) == []
+
+
+def test_config_file_empty_path_is_problem(tmp_path):
+    reader, report = reader_over({"config": ""}, data_dir=str(tmp_path))
+    assert reader.config_file("config").failed
+    assert problems(report) == [("block.config", "must not be empty; give a value")]
