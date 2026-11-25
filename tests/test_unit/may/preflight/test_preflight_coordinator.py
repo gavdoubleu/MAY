@@ -689,3 +689,29 @@ def test_bad_geography_skips_venue_level_check(tmp_path, geography_block):
     (tmp_path / "venues" / "pubs_M1.csv").write_text("")
     report = check_world_config(config)
     assert not any(key.startswith("venues") for key in keys(report.problems))
+
+
+def test_attribute_step_geo_level_is_checked_against_the_parsed_geography(venues_dir, tmp_path):
+    """The attribute step reads the geography the coordinator parsed: an unknown level is a problem."""
+    (tmp_path / "geo.csv").write_text("geo_unit,W\nA,1\n")
+    attribute_path = tmp_path / "attributes.yaml"
+    attribute_path.write_text(
+        CONSTANT_ATTRIBUTE.read_text()
+        + f"data_sources:\n  geo:\n    format: multi_key\n    files:\n"
+        f"      - path: {tmp_path / 'geo.csv'}\n        destination_level: LGU\n"
+    )
+    (venues_dir / "venues.yaml").write_text(SCHOOL_VENUES)
+    (venues_dir / "schools.csv").write_text("geo_unit\nA\n")
+    config = {
+        "venues": {"data_dir": str(venues_dir), "config_file": "venues.yaml"},
+        "serialization": {"enabled": False},
+        "geography": VALID_GEOGRAPHY,
+        "population": VALID_POPULATION,
+        "timeline": {"enabled": True, "steps": [{"type": "attribute", "config": str(attribute_path)}]},
+    }
+
+    report = check_world_config(config)
+
+    assert keys(report.problems) == [
+        f"timeline.steps[1].config ({attribute_path}): data_sources.geo.files[1].destination_level"
+    ]

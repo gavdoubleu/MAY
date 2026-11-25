@@ -9,7 +9,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from may import timeline
+from may.geography.geography import Geography
 from may.preflight.context import ConfigContext
+from tests.test_unit.may.config_contexts import geography_context
 
 
 # An allocation strategy that passes preflight.
@@ -47,6 +49,30 @@ def test_attribute_step_builds_its_config_and_assigns_attributes_into_the_world(
     (config_path, _), _ = from_config.call_args
     assert config_path.endswith("age.yaml")
     from_config.return_value.assign_attributes.assert_called_once_with(world)
+
+
+def test_a_config_stage_step_is_built_from_the_given_context_and_world_config():
+    world = MagicMock()
+    world_config = timeline_config({"type": "attribute", "config": "age.yaml"})
+    given_context = geography_context()
+
+    with patch.object(timeline.AttributeAssignmentConfig, "from_config") as from_config:
+        timeline.run_timeline(world, world_config, given_context)
+
+    (_, step_context), keywords = from_config.call_args
+    assert step_context[Geography] is given_context[Geography]
+    assert step_context.world_config["timeline"] == world_config["timeline"]
+    assert keywords["key_path"] == "timeline.steps[1].config"
+
+
+def test_without_a_context_a_step_sees_the_geography_as_unknown():
+    world = MagicMock()
+
+    with patch.object(timeline.AttributeAssignmentConfig, "from_config") as from_config:
+        timeline.run_timeline(world, timeline_config({"type": "attribute", "config": "age.yaml"}))
+
+    (_, step_context), _ = from_config.call_args
+    assert step_context[Geography] is None
 
 
 def test_distributor_step_builds_the_distributor_and_allocates_into_the_world():

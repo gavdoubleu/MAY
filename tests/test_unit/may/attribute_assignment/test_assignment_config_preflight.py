@@ -1,6 +1,7 @@
 """
-`AttributeAssignmentConfig.preflight` reports every problem in an attribute YAML without
-loading its data; `from_config` parses the same way and raises on the same problems.
+`AttributeAssignmentConfig` is a config stage whose config is an attribute YAML path:
+`preflight` reports every problem without loading its data; `from_config` raises on the
+same ones, then builds from the loaded mapping without reading the file again.
 """
 import builtins
 import glob
@@ -10,15 +11,21 @@ import pytest
 import yaml
 
 from may.attribute_assignment import AttributeAssignmentConfig, AttributeAssignmentError
-from may.preflight.context import PreflightContext
+from may.attribute_assignment import assignment_config as assignment_config_module
+from may.attribute_assignment.assignment_config import AttributeConfigError, ParsedAttributeConfig
+from may.preflight.config_stage import ConfigError
 from may.utils import path_resolver as pr
+from tests.test_unit.may.config_contexts import geography_context
 
-KNOWN_GEOGRAPHY = PreflightContext(geo_levels=frozenset({"SGU", "MGU", "LGU"}))
+KNOWN_GEOGRAPHY = geography_context()
+UNKNOWN_GEOGRAPHY = geography_context(levels=None)
+KEY_PATH = "timeline.steps[2].config"
 RULE_KEY = "assignment_rules.Family.rules[1].assignment"
 
 
 def keys(findings):
-    return [finding.key for finding in findings]
+    """Finding keys with the file prefix taken off; a finding at the naming key stays whole."""
+    return [finding.key.split("): ", 1)[1] if "): " in finding.key else finding.key for finding in findings]
 
 
 def valid_config(tmp_path):
@@ -62,7 +69,8 @@ def write(tmp_path, config, name="attributes.yaml"):
 
 
 def preflight(tmp_path, config, context=KNOWN_GEOGRAPHY):
-    return AttributeAssignmentConfig.preflight(write(tmp_path, config), context)
+    _, report = AttributeAssignmentConfig.preflight(write(tmp_path, config), context, key_path=KEY_PATH)
+    return report
 
 
 def first_assignment(config):
@@ -76,10 +84,31 @@ def test_a_valid_file_has_no_findings(tmp_path):
     assert report.warnings == []
 
 
-def test_a_missing_file_is_a_problem(tmp_path):
-    report = AttributeAssignmentConfig.preflight(str(tmp_path / "absent.yaml"), KNOWN_GEOGRAPHY)
+def test_a_valid_file_gives_its_mapping_and_found_path(tmp_path):
+    path = write(tmp_path, valid_config(tmp_path))
 
-    assert keys(report.problems) == ["config"]
+    parsed, _ = AttributeAssignmentConfig.preflight(path, KNOWN_GEOGRAPHY, key_path=KEY_PATH)
+
+    assert parsed.config_path == path
+    assert parsed.config_mapping["attributes"] == [{"name": "ethnicity"}]
+
+
+def test_a_missing_file_is_a_problem_at_the_naming_key(tmp_path):
+    _, report = AttributeAssignmentConfig.preflight(
+        str(tmp_path / "absent.yaml"), KNOWN_GEOGRAPHY, key_path=KEY_PATH
+    )
+
+    assert keys(report.problems) == [KEY_PATH]
+
+
+def test_findings_are_keyed_under_the_found_file(tmp_path):
+    config = valid_config(tmp_path)
+    config["step"]["assignment_level"] = "household"
+    path = write(tmp_path, config)
+
+    _, report = AttributeAssignmentConfig.preflight(path, KNOWN_GEOGRAPHY, key_path=KEY_PATH)
+
+    assert [finding.key for finding in report.problems] == [f"{KEY_PATH} ({path}): step.assignment_level"]
 
 
 def test_the_retired_attribute_block_is_a_problem(tmp_path):
@@ -92,10 +121,14 @@ def test_the_retired_attribute_block_is_a_problem(tmp_path):
     assert "retired" in report.problems[0].message
 
 
-@pytest.mark.parametrize("attributes", [None, [], {"name": "ethnicity"}], ids=["absent", "empty", "mapping"])
+@pytest.mark.parametrize("attributes", ["absent", None, [], {"name": "ethnicity"}],
+                         ids=["absent", "blank", "empty", "mapping"])
 def test_attributes_must_be_a_non_empty_list(tmp_path, attributes):
     config = valid_config(tmp_path)
-    config["attributes"] = attributes
+    if attributes == "absent":
+        del config["attributes"]
+    else:
+        config["attributes"] = attributes
 
     assert keys(preflight(tmp_path, config).problems) == ["attributes"]
 
@@ -434,7 +467,25 @@ def test_geo_levels_are_not_checked_while_unknown(tmp_path):
     config = valid_config(tmp_path)
     geo_file(config)["destination_level"] = "LAD"
 
-    assert preflight(tmp_path, config, PreflightContext()).problems == []
+    assert preflight(tmp_path, config, UNKNOWN_GEOGRAPHY).problems == []
+
+
+def test_whole_number_attribute_and_source_names_are_read_as_text(tmp_path):
+    config = valid_config(tmp_path)
+    config["attributes"] = [{"name": 7}]
+    config["required_attributes"] = [{"name": 8}]
+    config["data_sources"][5] = config["data_sources"].pop("geo")
+    first_assignment(config)["data_source"] = 5
+    path = write(tmp_path, config)
+
+    parsed, report = AttributeAssignmentConfig.preflight(path, KNOWN_GEOGRAPHY, key_path=KEY_PATH)
+
+    assert report.problems == []
+    mapping = parsed.config_mapping
+    assert mapping["attributes"][0]["name"] == "7"
+    assert mapping["required_attributes"][0]["name"] == "8"
+    assert "5" in mapping["data_sources"]
+    assert first_assignment(mapping)["data_source"] == "5"
 
 
 def test_several_problems_in_one_file_are_all_reported(tmp_path):
@@ -464,32 +515,82 @@ def test_data_files_are_not_opened(tmp_path, monkeypatch):
         return real_open(file, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "open", recording_open)
-    AttributeAssignmentConfig.preflight(path, KNOWN_GEOGRAPHY)
+    AttributeAssignmentConfig.preflight(path, KNOWN_GEOGRAPHY, key_path=KEY_PATH)
 
     assert not [name for name in opened if name.endswith(".csv")]
+
+
+def from_config(path, context=KNOWN_GEOGRAPHY):
+    return AttributeAssignmentConfig.from_config(path, context, key_path=KEY_PATH)
 
 
 def test_from_config_raises_on_a_problem_preflight_reports(tmp_path):
     config = valid_config(tmp_path)
     first_assignment(config)["strategy"] = "probabilistc"
 
-    with pytest.raises(AttributeAssignmentError, match="strategy"):
-        AttributeAssignmentConfig.from_config(write(tmp_path, config), {})
+    with pytest.raises(AttributeConfigError, match="strategy") as raised:
+        from_config(write(tmp_path, config))
+
+    assert isinstance(raised.value, AttributeAssignmentError)
+    assert isinstance(raised.value, ConfigError)
+    assert str(raised.value).startswith("Attribute config cannot be used: 1 problem.")
+
+
+def test_from_config_raises_on_an_unknown_geo_level(tmp_path):
+    config = valid_config(tmp_path)
+    geo_file(config)["destination_level"] = "LAD"
+
+    with pytest.raises(AttributeConfigError, match="destination_level"):
+        from_config(write(tmp_path, config))
 
 
 def test_from_config_builds_a_valid_file(tmp_path):
-    built = AttributeAssignmentConfig.from_config(write(tmp_path, valid_config(tmp_path)), {})
+    built = from_config(write(tmp_path, valid_config(tmp_path)))
 
     assert built.attribute_name == "ethnicity"
 
 
-def test_the_built_config_assigns_its_attributes_into_the_world(tmp_path):
+def test_the_file_is_loaded_once(tmp_path, monkeypatch):
     path = write(tmp_path, valid_config(tmp_path))
+    loads = []
+    real_load = pr.find_config_file
+
+    def counting_find(*args, **kwargs):
+        loads.append(args)
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(pr, "find_config_file", counting_find)
+    from_config(path)
+
+    assert len(loads) == 1
+
+
+def test_build_reads_no_file(tmp_path, monkeypatch):
+    parsed = ParsedAttributeConfig(config_mapping=valid_config(tmp_path), config_path="nowhere/attributes.yaml")
+
+    def no_reading(*args, **kwargs):
+        raise AssertionError("build read a file")
+
+    monkeypatch.setattr(assignment_config_module, "load_yaml", no_reading, raising=False)
+    monkeypatch.setattr(pr, "resolve", no_reading)
+
+    built = AttributeAssignmentConfig.build(parsed)
+
+    assert built.attribute_name == "ethnicity"
+    assert str(built.config_path) == "nowhere/attributes.yaml"
+
+
+def test_from_yaml_is_gone():
+    assert not hasattr(AttributeAssignmentConfig, "from_yaml")
+
+
+def test_the_built_config_assigns_its_attributes_into_the_world(tmp_path):
     world = MagicMock()
 
-    AttributeAssignmentConfig.from_config(path, {}).assign_attributes(world)
+    built = from_config(write(tmp_path, valid_config(tmp_path)))
+    built.assign_attributes(world)
 
-    world.assign_attributes.assert_called_once_with(path)
+    world.assign_attributes.assert_called_once_with(built)
 
 
 @pytest.fixture
@@ -504,7 +605,9 @@ def scenario_roots():
 def test_shipped_attribute_configs_pass(path, scenario_roots):
     scenario_roots("data")
 
-    assert AttributeAssignmentConfig.preflight(path, PreflightContext()).problems == []
+    _, report = AttributeAssignmentConfig.preflight(path, UNKNOWN_GEOGRAPHY, key_path=KEY_PATH)
+
+    assert report.problems == []
 
 
 @pytest.mark.parametrize("value", [None, "primary_adult", {"name": "primary_adult"}])

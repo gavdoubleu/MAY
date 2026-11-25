@@ -8,6 +8,7 @@ Simplified attribute assignment configuration:
 - Cleaner, more user-friendly configuration format
 """
 
+import copy
 import logging
 from collections import defaultdict
 from typing import Dict, List, Any, Optional
@@ -19,11 +20,10 @@ from may.attribute_assignment.strategies import (
     raise_on_invalid_assignment,
     validate_assignment_config,
 )
-from may.preflight.config_file import load_config_mapping
-from may.preflight.context import PreflightContext, check_geo_level
-from may.preflight.report import PreflightReport, config_entry, not_list_message, not_mapping_message
-from may.utils import path_resolver as pr
-from may.utils.yaml_loader import load_yaml
+from may.geography.geography import check_geo_level
+from may.preflight.config_reader import FAILED
+from may.preflight.config_stage import ConfigError, ConfigStage
+from may.preflight.report import PreflightReport
 
 logger = logging.getLogger("may.attribute_assignment.config")
 
@@ -433,21 +433,39 @@ class AttributeAssignmentError(Exception):
     value) aborts the run."""
 
 
-class AttributeAssignmentConfig:
+class AttributeConfigError(ConfigError, AttributeAssignmentError):
+    """An attribute config cannot be used; the message lists every problem."""
+
+
+@dataclass(frozen=True)
+class ParsedAttributeConfig:
+    """An attribute config that passed every check: its mapping and where it was found."""
+    config_mapping: Dict[str, Any]
+    config_path: str
+
+
+class AttributeAssignmentConfig(ConfigStage):
     """
-    Configuration loader for attribute assignment.
+    Configuration for attribute assignment.
 
     Simplified configuration system:
     - Roles map to subsets
     - Structures use matching_rules
     - Assignment rules organized by structure
+
+    A timeline step stage: its config is an attribute YAML path; the parsed result is
+    the loaded mapping plus the found path.
     """
 
-    def __init__(self, config_path: Path):
-        """Load configuration from YAML."""
-        self.config_path = Path(pr.resolve(str(config_path)))
+    display_name = "Attribute"
+    config_error = AttributeConfigError
+    config_is_file = True
 
-        self.raw_config = load_yaml(self.config_path)
+    def __init__(self, config_mapping: Dict[str, Any], config_path):
+        """Build from a loaded mapping; `config_path` is only named in messages and logs."""
+        self.config_path = Path(config_path)
+
+        self.raw_config = config_mapping
 
         # Parse sections
         self.attributes = self._parse_attributes()
@@ -973,43 +991,19 @@ class AttributeAssignmentConfig:
         return person_rules.rules[0]
 
     @classmethod
-    def from_yaml(cls, config_path: Path) -> "AttributeAssignmentConfig":
-        """Load configuration from YAML file."""
-        return cls(config_path)
+    def parse(cls, reader, context):
+        """The checked mapping, whole-number names read as text, and the found path."""
+        _check_config(reader, context)
+        return ParsedAttributeConfig(_with_names_as_text(reader.value()), reader.found_path)
 
     @classmethod
-    def parse_config(cls, config_path, context=None):
-        """Parse an attribute YAML into its mapping, or `None` if any problem.
-
-        Data files are checked to exist, never opened. `context`, when given, holds
-        the geo levels known to this step."""
-        report = PreflightReport()
-        config = load_config_mapping(config_path, report)
-        if config is None:
-            return None, report
-        _check_config(config, context or PreflightContext(), report)
-        if report.has_problems:
-            return None, report
-        return config, report
-
-    @classmethod
-    def preflight(cls, config_path, context):
-        """Check an attribute YAML without loading its data."""
-        _, report = cls.parse_config(config_path, context)
-        return report
-
-    @classmethod
-    def from_config(cls, config_path, world_config=None):
-        """Build from an attribute YAML; `AttributeAssignmentError` on any problem."""
-        _, report = cls.parse_config(config_path)
-        report.raise_if_problems(
-            AttributeAssignmentError, f"Attribute config {config_path} cannot be used."
-        )
-        return cls(config_path)
+    def build(cls, parsed, **live):
+        """The config from its parsed mapping; reads no file."""
+        return cls(parsed.config_mapping, parsed.config_path)
 
     def assign_attributes(self, world):
         """Assign this config's attributes to everyone in `world`."""
-        world.assign_attributes(str(self.config_path))
+        world.assign_attributes(self)
 
 
 ASSIGNMENT_LEVELS = ("person", "person_by_residence")
@@ -1020,159 +1014,111 @@ CSV_FORMATS = (
 )
 
 
-def _check_config(config, context, report):
+RETIRED_ATTRIBUTE_BLOCK = (
+    "the top-level 'attribute:' block is retired. Declare the produced attribute(s) "
+    "as an 'attributes:' list and step config under 'step:'."
+)
+ATTRIBUTES_EXAMPLE = "a list of the produced attribute(s), e.g. `attributes:\\n  - name: ethnicity`"
+
+
+def _check_config(reader, context):
     """Every check an attribute YAML gets before its data is loaded."""
-    _check_attributes(config, report)
-    step = config_entry(config, "step", "step", report)
-    if step is not None and not isinstance(step, dict):
-        report.problem("step", not_mapping_message(step))
-    elif step:
-        level = step.get("assignment_level", "person_by_residence")
-        if level not in ASSIGNMENT_LEVELS:
-            report.problem("step.assignment_level", (
-                f"unknown value {level!r}; expected one of {list(ASSIGNMENT_LEVELS)}"
-            ))
-    _named_entries(
-        "required_attributes", config_entry(config, "required_attributes", "required_attributes", report), report
-    )
-    source_names = _check_data_sources(config, context, report)
-    _check_assignment_rules(config_entry(config, "assignment_rules", "assignment_rules", report), source_names, report)
-    venue_rules = config_entry(config, "venue_assignment_rules", "venue_assignment_rules", report)
-    for position, rule in _mappings("venue_assignment_rules", venue_rules, report):
-        _check_assignment(
-            f"venue_assignment_rules[{position}].assignment", rule.get("assignment", {}), source_names, report
-        )
+    if "attribute" in reader.keys():
+        reader.problem(RETIRED_ATTRIBUTE_BLOCK, at="attribute")
+    _check_attributes(reader)
+    step = reader.section("step", default={})
+    step.one_of("assignment_level", ASSIGNMENT_LEVELS, default="person_by_residence")
+    _check_names(reader.items("required_attributes", default=None))
+    source_names = _check_data_sources(reader, context)
+    _check_assignment_rules(reader, source_names)
+    venue_rules = reader.items("venue_assignment_rules", default=None)
+    for rule in [] if venue_rules is None or venue_rules is FAILED else venue_rules:
+        _forward(rule, _assignment_problems(rule.value("assignment", {}), source_names))
 
 
-def _check_attributes(config, report):
-    if "attribute" in config:
-        report.problem("attribute", (
-            "the top-level 'attribute:' block is retired. Declare the produced attribute(s) "
-            "as an 'attributes:' list and step config under 'step:'."
-        ))
-    attributes = config.get("attributes")
-    if not attributes or not isinstance(attributes, list):
-        report.problem("attributes", (
-            "needs a list declaring the produced attribute(s), e.g. "
-            "`attributes:\\n  - name: ethnicity`"
-        ))
+def _check_attributes(reader):
+    attribute_readers = reader.items("attributes", give=ATTRIBUTES_EXAMPLE)
+    if attribute_readers is FAILED:
         return
-    _named_entries("attributes", attributes, report)
+    if reader.value("attributes") == []:
+        reader.problem(f"is empty; give {ATTRIBUTES_EXAMPLE}", at="attributes")
+    _check_names(attribute_readers)
 
 
-def _mappings(key, items, report):
-    """`(position, item)` for each mapping in a list, counted from 1; anything else is a problem."""
-    if items is None:
-        return []
-    if not isinstance(items, list):
-        report.problem(key, not_list_message(items))
-        return []
-    mappings = []
-    for position, item in enumerate(items, start=1):
-        if isinstance(item, dict):
-            mappings.append((position, item))
-        else:
-            report.problem(f"{key}[{position}]", not_mapping_message(item))
-    return mappings
+def _check_names(entry_readers):
+    """Each entry of a list read by `items` carries a `name`."""
+    if entry_readers is None or entry_readers is FAILED:
+        return
+    for entry in entry_readers:
+        entry.name("name", give="an attribute name")
 
 
-def _named_entries(key, items, report):
-    """`_mappings`, each of which must carry a `name`."""
-    entries = _mappings(key, items, report)
-    for position, entry in entries:
-        if not entry.get("name"):
-            report.problem(f"{key}[{position}].name", "not set")
-    return entries
-
-
-def _section(key, section, report):
-    """The mapping under `key`, `{}` when absent; a non-mapping is a problem and reads as `{}`."""
-    if section is None:
-        return {}
-    if not isinstance(section, dict):
-        report.problem(key, not_mapping_message(section))
-        return {}
-    return section
-
-
-def _check_data_sources(config, context, report):
+def _check_data_sources(reader, context):
     """Each source's type, format and files; the declared source names (`None` if unreadable)."""
-    data_sources = config_entry(config, "data_sources", "data_sources", report)
-    if data_sources is None and "data_sources" in config:
-        # Left blank: the names rules refer to are unknown, so references go unchecked.
+    source_readers = reader.entries("data_sources", default={})
+    if source_readers is FAILED:
+        # The names rules refer to are unknown, so references go unchecked.
         return None
-    if data_sources is not None and not isinstance(data_sources, dict):
-        report.problem("data_sources", not_mapping_message(data_sources))
-        return None
-    data_sources = data_sources or {}
-    for name, source in data_sources.items():
-        key = f"data_sources.{name}"
-        if not isinstance(source, dict):
-            report.problem(key, not_mapping_message(source))
+    for source in source_readers.values():
+        source_type = source.one_of("type", DATA_SOURCE_TYPES, default="csv_lookup")
+        if source_type is FAILED or source_type == "constant":
             continue
-        source_type = source.get("type", "csv_lookup")
-        if source_type not in DATA_SOURCE_TYPES:
-            report.problem(f"{key}.type", (
-                f"unknown value {source_type!r}; expected one of {list(DATA_SOURCE_TYPES)}"
-            ))
-            continue
-        if source_type == "constant":
-            continue
-        data_format = source.get("format")
-        if data_format not in CSV_FORMATS:
-            report.problem(f"{key}.format", (
-                f"needs an explicit format, one of {sorted(CSV_FORMATS)}; got {data_format!r}"
-            ))
-        for position, file_config in _mappings(f"{key}.files", config_entry(source, "files", f"{key}.files", report), report):
-            _check_data_file(f"{key}.files[{position}]", file_config, context, report)
-    return set(data_sources)
+        source.one_of("format", CSV_FORMATS, give=f"an explicit format, one of {', '.join(sorted(CSV_FORMATS))}")
+        file_readers = source.items("files", default=None)
+        for file_reader in [] if file_readers is None or file_readers is FAILED else file_readers:
+            _check_data_file(file_reader, context)
+    return {str(name) for name in reader.value("data_sources", {})}
 
 
-def _check_data_file(key, file_config, context, report):
+def _check_data_file(file_reader, context):
     """A data file exists (not opened) and the geo levels it names are known."""
-    path = file_config.get("path")
-    if not path:
-        report.problem(f"{key}.path", "not set")
-    elif not Path(pr.resolve(str(path))).exists():
-        report.problem(f"{key}.path", f"data file not found: {pr.resolve(str(path))}")
-    level_keys = [("destination_level", file_config.get("destination_level"))]
-    unit_column = file_config.get("geographical_unit_column")
-    if isinstance(unit_column, dict):
-        level_keys.append(("geographical_unit_column.level", unit_column.get("level")))
-    key_columns = file_config.get("key_columns")
+    path = file_reader.path("path", give="a data file path")
+    if path == "":
+        file_reader.problem("must not be empty; give a data file path", at="path")
+    elif path is not FAILED and not Path(path).exists():
+        file_reader.problem(f"data file not found: {path}", at="path")
+    check_geo_level(file_reader, "destination_level", context)
+    if isinstance(file_reader.value("geographical_unit_column"), dict):
+        check_geo_level(file_reader.section("geographical_unit_column"), "level", context)
+    key_columns = file_reader.value("key_columns")
     if isinstance(key_columns, dict):
+        columns_reader = file_reader.section("key_columns")
         for column, column_config in key_columns.items():
             if isinstance(column_config, dict):
-                level_keys.append((f"key_columns.{column}.level", column_config.get("level")))
-    for level_key, level in level_keys:
-        check_geo_level(f"{key}.{level_key}", level, context, report)
+                check_geo_level(columns_reader.section(column), "level", context)
 
 
-def _check_assignment_rules(assignment_rules, source_names, report):
+def _check_assignment_rules(reader, source_names):
     """Each structure's rule assignments, then whether its cross-role references can be ordered."""
-    for structure_name, structure in _section("assignment_rules", assignment_rules, report).items():
-        structure_key = f"assignment_rules.{structure_name}"
-        if not isinstance(structure, dict):
-            report.problem(structure_key, not_mapping_message(structure))
+    structure_readers = reader.entries("assignment_rules", default={})
+    if structure_readers is FAILED:
+        return
+    for structure in structure_readers.values():
+        rule_readers = structure.items("rules", default=None)
+        if rule_readers is None or rule_readers is FAILED:
             continue
-        problems_before = len(report.problems)
-        rules_key = f"{structure_key}.rules"
-        rules = _mappings(rules_key, config_entry(structure, "rules", rules_key, report), report)
-        for position, rule in rules:
-            _check_assignment(
-                f"{structure_key}.rules[{position}].assignment", rule.get("assignment", {}), source_names, report
-            )
-            _check_role_references(f"{structure_key}.rules[{position}]", rule, report)
+        rules_readable = len(rule_readers) == len(structure.value("rules"))
+        for rule in rule_readers:
+            problems = _assignment_problems(rule.value("assignment", {}), source_names)
+            _check_role_references(rule.value(), problems)
+            _forward(rule, problems)
+            rules_readable = rules_readable and not problems.has_problems
         # A malformed assignment has no dependable references, so ordering is not
         # checked on top of it.
-        if len(report.problems) > problems_before:
+        if not rules_readable:
             continue
         role_dependencies = [
-            (rule.get("role"), set(_extract_role_dependencies(rule.get("assignment", {}))))
-            for _, rule in rules
+            (rule.value("role"), set(_extract_role_dependencies(rule.value("assignment", {}))))
+            for rule in rule_readers
         ]
         for message in role_dependency_problems(role_dependencies):
-            report.problem(structure_key, message)
+            structure.problem(message)
+
+
+def _forward(rule_reader, problems):
+    """Record `problems`, keyed from the rule, at the rule's place in the config."""
+    for finding in problems.problems:
+        rule_reader.problem(finding.message, at=finding.key)
 
 
 def _check_role_name(key, name, report):
@@ -1181,18 +1127,20 @@ def _check_role_name(key, name, report):
         report.problem(key, f"must be a role name; got {name!r}")
 
 
-def _check_role_references(rule_key, rule, report):
-    """The rule's `role` and every role its assignment reads are names (or a list of names)."""
+def _check_role_references(rule, report):
+    """The rule's `role` and every role its assignment reads are names (or a list of names).
+
+    Keys are from the rule."""
     role = rule.get("role")
     if isinstance(role, list):
         for position, name in enumerate(role, start=1):
-            _check_role_name(f"{rule_key}.role[{position}]", name, report)
+            _check_role_name(f"role[{position}]", name, report)
     else:
-        _check_role_name(f"{rule_key}.role", role, report)
+        _check_role_name("role", role, report)
     assignment = rule.get("assignment")
     if not isinstance(assignment, dict):
         return
-    key = f"{rule_key}.assignment"
+    key = "assignment"
     _check_role_name(f"{key}.partner_role", assignment.get("partner_role"), report)
     inherit_from = assignment.get("inherit_from")
     if isinstance(inherit_from, dict):
@@ -1219,21 +1167,66 @@ def _check_role_references(rule_key, rule, report):
             ))
 
 
-def _check_assignment(key, assignment, source_names, report):
-    """One assignment block, and that each `data_source` it names is declared."""
-    problems_before = len(report.problems)
+def _assignment_problems(assignment, source_names):
+    """Problems in one assignment block, keyed from its rule, and that each `data_source`
+    it names is declared; a whole-number source name is read as text."""
+    report = PreflightReport()
+    key = "assignment"
     validate_assignment_config(assignment, report, key)
-    if len(report.problems) > problems_before or source_names is None:
-        return
+    if report.has_problems or source_names is None:
+        return report
     named_sources = [(f"{key}.data_source", assignment.get("data_source"))]
     for position, entry in enumerate(assignment.get("logic") or [], start=1):
         then = entry.get("then")
         if isinstance(then, dict):
             named_sources.append((f"{key}.logic[{position}].then.data_source", then.get("data_source")))
     for source_key, source_name in named_sources:
+        source_name = _text_if_whole_number(source_name)
         if source_name is not None and not isinstance(source_name, str):
             report.problem(source_key, f"must be a data source name; got {source_name!r}")
         elif source_name is not None and source_name not in source_names:
             report.problem(source_key, (
                 f"unknown data source {source_name!r}; declared: {sorted(source_names)}"
             ))
+    return report
+
+
+def _text_if_whole_number(value):
+    return str(value) if isinstance(value, int) and not isinstance(value, bool) else value
+
+
+def _mappings_in(value):
+    """The mappings in a list, skipping anything else; nothing when not a list."""
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _assignments(config):
+    """Every assignment mapping, structure rules then venue rules; tolerates bad shapes,
+    since the parsed result of a config with problems is discarded."""
+    structures = config.get("assignment_rules")
+    rules = []
+    for structure in structures.values() if isinstance(structures, dict) else []:
+        if isinstance(structure, dict):
+            rules += _mappings_in(structure.get("rules"))
+    rules += _mappings_in(config.get("venue_assignment_rules"))
+    return [rule["assignment"] for rule in rules if isinstance(rule.get("assignment"), dict)]
+
+
+def _with_names_as_text(config):
+    """A copy of the config with whole-number attribute and data source names as text, so
+    names and the references to them match."""
+    config = copy.deepcopy(config)
+    for key in ("attributes", "required_attributes"):
+        for entry in _mappings_in(config.get(key)):
+            if "name" in entry:
+                entry["name"] = _text_if_whole_number(entry["name"])
+    if isinstance(config.get("data_sources"), dict):
+        config["data_sources"] = {
+            _text_if_whole_number(name): source for name, source in config["data_sources"].items()
+        }
+    for assignment in _assignments(config):
+        logic = _mappings_in(assignment.get("logic"))
+        for block in [assignment] + [entry["then"] for entry in logic if isinstance(entry.get("then"), dict)]:
+            if "data_source" in block:
+                block["data_source"] = _text_if_whole_number(block["data_source"])
+    return config

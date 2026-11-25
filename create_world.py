@@ -200,7 +200,7 @@ def main(args=None):
     logger.info(world)
 
     try:
-        run_timeline(world, config)
+        run_timeline(world, config, _geography_context(config))
     except TimelineError:
         # Already logged by the failing step.
         sys.exit(1)

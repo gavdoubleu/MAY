@@ -47,7 +47,9 @@ def check_world_config(config: dict) -> PreflightReport:
         households=household_config,
         households_block_present=bool(config.get("households")),
     )
-    return PreflightReport.merge(report, timeline.preflight(config.get("timeline"), timeline_context))
+    return PreflightReport.merge(
+        report, timeline.preflight(config.get("timeline"), timeline_context, config_context=context)
+    )
 
 
 def run_preflight(config: dict) -> PreflightReport:

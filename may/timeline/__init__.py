@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from may.attribute_assignment import AttributeAssignmentConfig, AttributeAssignmentError
+from may.geography.geography import Geography
 from may.preflight.config_stage import ConfigStage
 from may.preflight.context import ConfigContext
 from may.preflight.report import PreflightReport, not_list_message, not_mapping_message
@@ -87,6 +88,17 @@ def _is_config_stage(step_class):
     return isinstance(step_class, type) and issubclass(step_class, ConfigStage)
 
 
+def _step_context(config_context, world_config=None):
+    """The context config stage steps read: `config_context`'s results with `world_config`.
+
+    Without one, the geography counts as failed, so geo levels go unchecked. Temporary
+    until the timeline stage (phase 11) passes its own context."""
+    if config_context is None:
+        config_context = ConfigContext(results={Geography: None})
+    results = {stage: config_context[stage] for stage in config_context.stages()}
+    return ConfigContext(world_config=world_config, results=results)
+
+
 def _parse_timeline(timeline_block, households_block_present):
     """The runnable steps of a timeline block, with a report of its structure problems.
 
@@ -156,21 +168,21 @@ def _parse_step(position, raw_step, report):
     return _ParsedStep(position_key, prefix, step_type, pr.resolve(config_file))
 
 
-def preflight(timeline_block, context):
+def preflight(timeline_block, context, config_context=None):
     """Check a timeline block and every step's config, without building anything.
 
-    Step findings are keyed `timeline.steps[N] (<file>): <key>`, N counted from 1; a
+    Config stage steps read `config_context` (see `_step_context`). Step findings are keyed `timeline.steps[N] (<file>): <key>`, N counted from 1; a
     config stage step's `timeline.steps[N].config (<found file>): <key>`."""
     steps, report = _parse_timeline(timeline_block, context.households_block_present)
-    step_reports = [_preflight_step(step, context) for step in steps]
+    step_context = _step_context(config_context)
+    step_reports = [_preflight_step(step, context, step_context) for step in steps]
     return PreflightReport.merge(report, *step_reports)
 
 
-def _preflight_step(step, context):
+def _preflight_step(step, context, step_context):
     step_class = TIMELINE_STEPS[step.step_type].step_class
     if _is_config_stage(step_class):
-        # Config stage steps ignore the old context until the timeline stage passes theirs.
-        _, report = step_class.preflight(step.config_path, ConfigContext(), key_path=step.config_key_path)
+        _, report = step_class.preflight(step.config_path, step_context, key_path=step.config_key_path)
         return report
     return step_class.preflight(step.config_path, context).under(step.prefix)
 
@@ -183,8 +195,10 @@ def step_label(step_type, step_config):
     return f"{step_type}:{os.path.splitext(os.path.basename(step_config))[0]}"
 
 
-def run_timeline(world, world_config):
+def run_timeline(world, world_config, config_context=None):
     """Run the world config's timeline steps in the order they are written.
+
+    Config stage steps are built from `config_context` (see `_step_context`).
 
     Raises `TimelineError` on the same structure problems `preflight` reports, so a
     build that skipped preflight still stops with the same named problem."""
@@ -204,29 +218,28 @@ def run_timeline(world, world_config):
     logger.info("SIMULATION TIMELINE")
     logger.info("=" * 60)
 
+    step_context = _step_context(config_context, world_config)
     for step in steps:
         # Steps of one type are told apart by their config file, since a
         # timeline runs a dozen distributors through the same code path.
         with bp.stage(step_label(step.step_type, step.config_path), step.step_type, detail=step.config_path):
             logger.info("")
             logger.info(f"[{step.step_type.replace('_', ' ').upper()}] {step.config_path}")
-            _run_step(TIMELINE_STEPS[step.step_type], step, world, world_config)
+            _run_step(TIMELINE_STEPS[step.step_type], step, world, world_config, step_context)
 
 
-def _build_step(entry, step, world_config):
+def _build_step(entry, step, world_config, step_context):
     if _is_config_stage(entry.step_class):
-        return entry.step_class.from_config(
-            step.config_path, ConfigContext(world_config=world_config), key_path=step.config_key_path
-        )
+        return entry.step_class.from_config(step.config_path, step_context, key_path=step.config_key_path)
     return entry.step_class.from_config(step.config_path, world_config)
 
 
-def _run_step(entry, step, world, world_config):
+def _run_step(entry, step, world, world_config, step_context):
     """Build and run one step, raising `TimelineError` on failure. An expected error
     already says what went wrong, so only an unexpected one carries a traceback."""
     step_type, config_path = step.step_type, step.config_path
     try:
-        built_step = _build_step(entry, step, world_config)
+        built_step = _build_step(entry, step, world_config, step_context)
         getattr(built_step, entry.run)(world)
     except entry.expected_errors as error:
         message = f"Timeline step {step_type!r} failed for {config_path}: {error}"

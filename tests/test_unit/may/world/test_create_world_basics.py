@@ -7,6 +7,7 @@ import numba as nb
 import pytest
 from unittest.mock import patch, MagicMock
 import create_world
+from may.geography.geography import Geography
 from create_world import set_random_seed, main
 from may.utils import path_resolver as pr
 
@@ -130,8 +131,9 @@ def test_main_hands_the_world_and_its_config_to_run_timeline(tmp_path):
         pr._resolver = old
         create_world.bp._recorder = None
 
-    world, world_config = run_timeline.call_args.args
+    world, world_config, config_context = run_timeline.call_args.args
     assert world is world_class.return_value
+    assert Geography in config_context
     assert world_config["timeline"]["steps"] == [{"type": "attribute", "config": str(CONSTANT_ATTRIBUTE)}]
 
 

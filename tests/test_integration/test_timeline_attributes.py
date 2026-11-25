@@ -64,6 +64,11 @@ def fully_formed_world(geography, population_manager, venue_manager, household_d
         household_distributor=household_distributor
     )
 
+def built_config(config_path):
+    """The attribute config built as the timeline builds it, geography unknown."""
+    return AttributeAssignmentConfig.from_config(config_path, geography_context(levels=None), key_path="attribute")
+
+
 def test_timeline_routing_and_geo_preload(fully_formed_world, test_dir, caplog):
     """
     Test routing configuration via `world.assign_attributes()` wrappers and geo_units preload.
@@ -80,7 +85,7 @@ def test_timeline_routing_and_geo_preload(fully_formed_world, test_dir, caplog):
     # half-assigned attribute. The wrapper still routes by assignment_level and
     # preloads geo_units before the guard fires.
     with pytest.raises(AttributeAssignmentError, match="unassigned"):
-        fully_formed_world.assign_attributes(config_path)
+        fully_formed_world.assign_attributes(built_config(config_path))
 
     # Routing reached the assigner: the classifiable people DID get assigned
     # before the end-of-run guard aborted (proves execution, not just the raise).
@@ -92,7 +97,7 @@ def test_person_assignment_filters(fully_formed_world, test_dir):
     Test `_passes_filters` correctly blocking assignments based on defined `min/max` bounds in yaml.
     """
     config_path = os.path.join(test_dir, "attributes", "test_attribute_config.yaml")
-    config = AttributeAssignmentConfig.from_yaml(config_path)
+    config = built_config(config_path)
     data_manager = DataSourceManager(config)
     assigner = AttributeAssigner(config, data_manager)
     
@@ -114,7 +119,7 @@ def test_person_by_residence_dependencies(fully_formed_world, test_dir):
     Test Topological Graph Sorting: Roles with inherited dependencies correctly resolve backwards when sorted.
     """
     config_path = os.path.join(test_dir, "attributes", "test_attribute_config.yaml")
-    config = AttributeAssignmentConfig.from_yaml(config_path)
+    config = built_config(config_path)
     data_manager = DataSourceManager(config)
     assigner = AttributeAssigner(config, data_manager)
     
@@ -141,7 +146,7 @@ def test_person_by_residence_flat_assignment(fully_formed_world, test_dir):
     Test 'other residences' logic assigns blanket strategies rather than building structural dependency trees.
     """
     config_path = os.path.join(test_dir, "attributes", "test_attribute_config.yaml")
-    config = AttributeAssignmentConfig.from_yaml(config_path)
+    config = built_config(config_path)
     data_manager = DataSourceManager(config)
     assigner = AttributeAssigner(config, data_manager)
     

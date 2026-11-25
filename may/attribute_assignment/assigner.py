@@ -13,7 +13,7 @@ logger = logging.getLogger("may.attribute_assignment.assigner")
 
 def assign_attributes(
     venue_manager,
-    config_path: str,
+    config: AttributeAssignmentConfig,
     geo_units: Optional[set] = None,
     geo_units_by_level: Optional[Dict[str, set]] = None,
 ) -> Dict[str, Any]:
@@ -22,7 +22,7 @@ def assign_attributes(
 
     Args:
         venue_manager: VenueManager with households and venues
-        config_path: Path to YAML configuration file
+        config: The built attribute assignment config
         geo_units: Optional set of geo unit codes to preload data for
         geo_units_by_level: The same names split by hierarchy level. Sources that
             declare the level their values live at match against one level only.
@@ -30,9 +30,6 @@ def assign_attributes(
     Returns:
         Assignment statistics dictionary
     """
-    # Load configuration
-    config = AttributeAssignmentConfig.from_yaml(config_path)
-
     # Initialize data manager
     data_manager = DataSourceManager(config)
 
@@ -47,7 +44,7 @@ def assign_attributes(
             data_manager.load_all()
     except (FileNotFoundError, RuntimeError, ValueError, KeyError) as e:
         raise AttributeAssignmentError(
-            f"could not load data sources for '{config_path}': {e}"
+            f"could not load data sources for '{config.config_path}': {e}"
         ) from e
 
     # Create assigner and run

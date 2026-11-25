@@ -177,7 +177,7 @@ class World:
 
         return stats
 
-    def assign_attributes(self, config_path: str, geo_units: Optional[Set[str]] = None):
+    def assign_attributes(self, attribute_config, geo_units: Optional[Set[str]] = None):
         """
         Assign attributes to all people in the world.
 
@@ -185,7 +185,7 @@ class World:
         (e.g., ethnicity) to all people based on YAML configuration.
 
         Args:
-            config_path: Path to attribute assignment YAML config file
+            attribute_config: The built `AttributeAssignmentConfig`
             geo_units: Optional set of geo unit codes to preload data for
 
         Returns:
@@ -225,7 +225,7 @@ class World:
         # Run attribute assignment
         stats = assign_attributes(
             venue_manager=self.venues,
-            config_path=config_path,
+            config=attribute_config,
             geo_units=geo_units,
             geo_units_by_level=geo_units_by_level,
         )

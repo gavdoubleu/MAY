@@ -59,7 +59,7 @@ def _plant(scenario_copy, relative_path, mutate):
 
 
 # Steps migrated to config stages key findings at `config`, after the found file.
-STAGE_STEP_TYPES = {"child_creator"}
+STAGE_STEP_TYPES = {"attribute", "child_creator"}
 
 
 def _planted_key(step_type, scenario_copy, relative_path, step_number, key):
