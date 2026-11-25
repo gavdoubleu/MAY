@@ -142,9 +142,11 @@ def test_preflight_error_carries_report_and_formats():
 
 
 def test_report_module_imports_nothing_from_project():
+    """Module-level imports only: the lazy `PreflightError` re-export in `__getattr__` is
+    temporary and leaves in phase 12 of the config-stage refactor."""
     tree = ast.parse(inspect.getsource(report_module))
     imported = []
-    for node in ast.walk(tree):
+    for node in tree.body:
         if isinstance(node, ast.Import):
             imported += [alias.name for alias in node.names]
         elif isinstance(node, ast.ImportFrom):

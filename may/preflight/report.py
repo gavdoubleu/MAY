@@ -13,7 +13,7 @@ class Finding:
     message: str
 
 
-def _count(number: int, noun: str) -> str:
+def counted(number: int, noun: str) -> str:
     return f"{number} {noun}" if number == 1 else f"{number} {noun}s"
 
 
@@ -95,7 +95,7 @@ class PreflightReport:
         key = f"{prefix}{sep}{finding.key}" if finding.key else prefix
         return Finding(key, finding.message)
 
-    def _body(self) -> str:
+    def body(self) -> str:
         sections = []
         for title, findings in (("Problems", self.problems), ("Warnings", self.warnings)):
             if findings:
@@ -107,21 +107,24 @@ class PreflightReport:
         if not self.problems and not self.warnings:
             return "Preflight passed."
         header = (
-            f"Preflight found {_count(len(self.problems), 'problem')}, "
-            f"{_count(len(self.warnings), 'warning')}."
+            f"Preflight found {counted(len(self.problems), 'problem')}, "
+            f"{counted(len(self.warnings), 'warning')}."
         )
-        return f"{header}\n\n{self._body()}"
+        return f"{header}\n\n{self.body()}"
 
     def raise_if_problems(self, error_class: type, header: str) -> None:
         """Raise `error_class(header + body)`, with `.report` set, if any problems."""
         if not self.has_problems:
             return
-        error = error_class(f"{header}\n\n{self._body()}")
+        error = error_class(f"{header}\n\n{self.body()}")
         error.report = self
         raise error
 
 
-class PreflightError(Exception):
-    def __init__(self, report: PreflightReport):
-        self.report = report
-        super().__init__(report.format())
+def __getattr__(name):
+    # Temporary: `PreflightError` moved to `config_stage`; lazy to avoid an import cycle.
+    if name == "PreflightError":
+        from may.preflight.config_stage import PreflightError
+
+        return PreflightError
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
