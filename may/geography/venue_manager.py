@@ -1,16 +1,15 @@
 import glob
 import logging
 import pandas as pd
-import yaml
 import os
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from .venue import Venue
-from may.preflight.context import PreflightContext, check_geo_level
-from may.preflight.report import PreflightReport, not_mapping_message
+from may.geography.geography import check_geo_level
+from may.preflight.config_reader import FAILED, ConfigReader
+from may.preflight.config_stage import ConfigError, ConfigStage
 from may.utils import path_resolver as pr
-from may.utils.yaml_loader import invalid_yaml_message, load_yaml, unreadable_file_message
 
 logger = logging.getLogger("venuemanager")
 
@@ -18,81 +17,75 @@ DEFAULT_DATA_DIR = "data/venues"
 DEFAULT_CONFIG_FILE = "venues_config.yaml"
 
 
-def _check_bool(report: PreflightReport, key: str, mapping: dict, name: str) -> None:
-    if name in mapping and not isinstance(mapping[name], bool):
-        report.problem(key, f"must be true or false; got {mapping[name]!r}")
+def _parse_data_dir(reader: ConfigReader):
+    """Resolved data dir, default when absent; `FAILED` if not a path or empty."""
+    data_dir = reader.path("data_dir", default=DEFAULT_DATA_DIR)
+    if data_dir == "":
+        reader.problem("must not be empty; give a path, or remove the key to use the default", at="data_dir")
+        return FAILED
+    return data_dir
 
 
-def _check_venue_type(report: PreflightReport, type_key: str, type_config, context) -> None:
-    if not isinstance(type_config, dict):
-        report.problem(type_key, f"must be a mapping; got {type_config!r}")
-        return
-    for flag in ("enabled", "batch_mode"):
-        _check_bool(report, f"{type_key}.{flag}", type_config, flag)
-    if type_config.get("filter_column") and not type_config.get("filter_values"):
-        report.warning(f"{type_key}.filter_values", "not set; filter_column ignored")
-    if type_config.get("filter_values") and not type_config.get("filter_column"):
-        report.warning(f"{type_key}.filter_column", "not set; filter_values ignored")
-    if type_config.get("enabled", True) is False:
-        # Never loaded, so its file, pattern and level are not needed.
-        return
-    filename = type_config.get("filename")
-    if not filename:
-        report.problem(f"{type_key}.filename", "not set; type is enabled")
-    if type_config.get("batch_mode") is True and filename:
-        if not isinstance(filename, str):
-            report.problem(
-                f"{type_key}.filename",
-                f"batch_mode takes one pattern, not a list; got {filename!r}",
-            )
-        elif "{unit}" not in filename:
-            report.problem(
-                f"{type_key}.filename",
-                f"batch_mode pattern must contain '{{unit}}'; got {filename!r}",
-            )
-    level_key = f"{type_key}.level"
-    if type_config.get("batch_mode") is not True:
-        if "level" in type_config:
-            report.warning(level_key, "unused; batch_mode is not true")
-    elif type_config.get("level") is None:
-        report.problem(level_key, "not set; batch_mode needs the geo level {unit} names")
-    else:
-        check_geo_level(level_key, type_config["level"], context, report)
+def _warn_unpaired_filter(type_reader: ConfigReader) -> None:
+    if type_reader.value("filter_column") and not type_reader.value("filter_values"):
+        type_reader.warning("not set; filter_column ignored", at="filter_values")
+    if type_reader.value("filter_values") and not type_reader.value("filter_column"):
+        type_reader.warning("not set; filter_values ignored", at="filter_column")
 
 
-def _check_batch_files(report: PreflightReport, type_key: str, type_config, data_dir: str) -> None:
-    """An enabled batch type's pattern must match a file for some unit; units are
+def _parse_batch_pattern(type_reader: ConfigReader, data_dir):
+    """The one `{unit}` file pattern; it must match a file for some unit. Units are
     unknown before the geography loads, so `{unit}` matches anything."""
-    if not (
-        isinstance(type_config, dict)
-        and type_config.get("enabled", True) is not False
-        and type_config.get("batch_mode") is True
-    ):
-        return
-    pattern = type_config.get("filename")
-    if not isinstance(pattern, str) or "{unit}" not in pattern:
-        return  # Its own problem, from `_check_venue_type`.
+    raw = type_reader.value("filename")
+    if isinstance(raw, list):
+        type_reader.problem(f"batch_mode takes one pattern, not a list; got {raw!r}", at="filename")
+        return FAILED
+    pattern = type_reader.name("filename", give="a file pattern containing {unit}")
+    if pattern is FAILED:
+        return FAILED
+    if "{unit}" not in pattern:
+        type_reader.problem(f"batch_mode pattern must contain '{{unit}}'; got {pattern!r}", at="filename")
+        return FAILED
+    if data_dir is FAILED:
+        return pattern
     unit_glob = "*".join(glob.escape(part) for part in pattern.split("{unit}"))
     if not glob.glob(os.path.join(glob.escape(data_dir), unit_glob)):
-        report.problem(
-            f"{type_key}.filename",
-            f"pattern {pattern!r} matched no files in {os.path.abspath(data_dir)}",
+        type_reader.problem(
+            f"pattern {pattern!r} matched no files in {os.path.abspath(data_dir)}", at="filename"
         )
+        return FAILED
+    return pattern
 
 
-def _loads_from_file(type_config) -> bool:
-    """An enabled non-batch type with a filename: its files are read whole."""
-    return (
-        isinstance(type_config, dict)
-        and type_config.get("enabled", True) is not False
-        and type_config.get("batch_mode") is not True
-        and bool(type_config.get("filename"))
-    )
+def _parse_venue_type(type_reader: ConfigReader, data_dir, context):
+    """`(type config, file paths)`: the written mapping with a batch type's pattern and level
+    as text; paths of an enabled non-batch type's files, else None."""
+    type_config = dict(type_reader.value())
+    enabled = type_reader.true_or_false("enabled", default=True)
+    batch_mode = type_reader.true_or_false("batch_mode", default=False)
+    _warn_unpaired_filter(type_reader)
+    if enabled is not True or batch_mode is FAILED:
+        # Disabled types are never loaded; failed flags leave their needs unknown.
+        return type_config, None
+    if batch_mode is False:
+        if "level" in type_reader.keys():
+            type_reader.warning("unused; batch_mode is not true", at="level")
+        paths = type_reader.data_file("filename", data_dir, give="a path or a list of paths")
+        return type_config, None if paths is FAILED else paths
+    type_config["filename"] = _parse_batch_pattern(type_reader, data_dir)
+    level = type_reader.name("level", give="the geo level {unit} names")
+    if level is not FAILED:
+        level = check_geo_level(type_reader, "level", context)
+    type_config["level"] = level
+    return type_config, None
 
 
 @dataclass(frozen=True)
 class VenueConfig:
-    """Parsed venue config block and YAML file; checked by `VenueManager.parse_config`."""
+    """Parsed `venues` block and its YAML file; read by `VenueManager.parse`.
+
+    `venue_types` maps each type name (as text) to its written mapping; a batch type's
+    `filename` and `level` are text. Fields of a block with problems may be `FAILED`."""
 
     data_dir: str
     config_path: str
@@ -107,7 +100,11 @@ class VenueError(Exception):
     PopulationError: the engine works on complete data or fails loudly."""
 
 
-class VenueManager:
+class VenueConfigError(ConfigError, VenueError):
+    """The `venues` config block cannot be used; `.report` holds the findings."""
+
+
+class VenueManager(ConfigStage):
     """
     Manages venues and their relationship to geographical units.
     """
@@ -453,110 +450,43 @@ class VenueManager:
 
         logger.info(f"Created {venues_created} {venue_type} venues")
 
-    @staticmethod
-    def parse_config(
-        block: dict, geo_levels=None
-    ) -> Tuple[Optional[VenueConfig], PreflightReport]:
-        """Parse a `venues` config block and its YAML file. Config is `None` if any problem.
-        Batch `level`s are checked against `geo_levels` when given."""
-        report = PreflightReport()
-        context = PreflightContext(geo_levels=geo_levels)
-        for path_key in ("data_dir", "config_file"):
-            path_value = block.get(path_key)
-            if path_value is not None and not isinstance(path_value, str):
-                report.problem(path_key, f"must be a path; got {path_value!r}")
-        if report.has_problems:
-            return None, report
-        # A blank key (`data_dir:` with no value) falls back to the default.
-        data_dir = pr.resolve(block.get("data_dir") or DEFAULT_DATA_DIR)
-        try:
-            config_path = pr.find_config_file(
-                block.get("config_file") or DEFAULT_CONFIG_FILE, data_dir
-            )
-        except pr.ConfigFileNotFoundError as error:
-            report.problem("config_file", str(error))
-            return None, report
-        try:
-            config = load_yaml(config_path)
-        except yaml.YAMLError as error:
-            report.problem("config_file", invalid_yaml_message(config_path, error))
-            return None, report
-        except (OSError, UnicodeDecodeError) as error:
-            report.problem("config_file", unreadable_file_message(config_path, error))
-            return None, report
-        if config is None:
-            report.problem("config_file", f"{config_path} is empty")
-            return None, report
-        file_key = f"config_file ({config_path})"
-        if not isinstance(config, dict):
-            report.problem(file_key, not_mapping_message(config))
-            return None, report
-        venue_types_key = f"{file_key}: venue_types"
-        # A blank `venue_types:` (every type commented out) loads no venues.
-        venue_types = config.get("venue_types")
-        if venue_types is None and "venue_types" in config:
-            venue_types = {}
-        if "venue_types" not in config:
-            report.problem(venue_types_key, "not set")
-        elif not isinstance(venue_types, dict):
-            report.problem(venue_types_key, not_mapping_message(venue_types))
-        venue_paths = {}
-        if isinstance(venue_types, dict):
-            for venue_type, type_config in venue_types.items():
-                type_key = f"{venue_types_key}.{venue_type}"
-                _check_venue_type(report, type_key, type_config, context)
-                _check_batch_files(report, type_key, type_config, data_dir)
-                if _loads_from_file(type_config):
-                    paths = pr.check_data_files(
-                        report, f"{type_key}.filename", type_config["filename"], data_dir
-                    )
-                    if paths is not None:
-                        venue_paths[venue_type] = paths
-        # A blank `settings:` (every setting commented out) uses the defaults.
-        settings = config.get("settings")
-        if settings is None:
-            settings = {}
-        if not isinstance(settings, dict):
-            report.problem(f"{file_key}: settings", not_mapping_message(settings))
-        else:
-            _check_bool(
-                report,
-                f"{file_key}: settings.filter_by_geography",
-                settings,
-                "filter_by_geography",
-            )
-        if report.has_problems:
-            return None, report
-        venue_config = VenueConfig(
-            data_dir=data_dir,
-            config_path=config_path,
-            venue_types=venue_types,
-            filter_by_geography=settings.get("filter_by_geography"),
-            venue_paths=venue_paths,
-        )
-        return venue_config, report
-
-    @staticmethod
-    def preflight(block: dict, geo_levels=None) -> PreflightReport:
-        """Check a `venues` config block and its YAML file without loading venues."""
-        _, report = VenueManager.parse_config(block, geo_levels)
-        return report
+    display_name = "Venue"
+    config_error = VenueConfigError
+    config_key = "venues"
 
     @classmethod
-    def from_config(cls, block: dict, geography) -> "VenueManager":
-        """Build a VenueManager from a `venues` config block; `VenueError` on any problem."""
-        venue_config, report = cls.parse_config(block, frozenset(geography.levels))
-        report.raise_if_problems(
-            VenueError, f"Venue config has {len(report.problems)} problem(s):"
+    def parse(cls, reader: ConfigReader, context) -> VenueConfig:
+        """Read a `venues` block and its YAML file; batch `level`s are checked against
+        `context[Geography]`."""
+        data_dir = _parse_data_dir(reader)
+        file_reader = reader.config_file("config_file", data_dir=data_dir, default=DEFAULT_CONFIG_FILE)
+        type_readers = file_reader.entries("venue_types", give="a mapping of venue types")
+        venue_types = venue_paths = FAILED
+        if type_readers is not FAILED:
+            venue_types, venue_paths = {}, {}
+            for venue_type, type_reader in type_readers.items():
+                type_config, paths = _parse_venue_type(type_reader, data_dir, context)
+                venue_types[venue_type] = type_config
+                if paths is not None:
+                    venue_paths[venue_type] = paths
+        settings_reader = file_reader.section("settings", default={})
+        return VenueConfig(
+            data_dir=data_dir,
+            config_path=file_reader.found_path,
+            venue_types=venue_types,
+            filter_by_geography=settings_reader.true_or_false("filter_by_geography", default=None),
+            venue_paths=venue_paths,
         )
-        for finding in report.warnings:
-            logger.info(f"Venue config warning: {finding.key}: {finding.message}")
-        logger.info(f"Loading venue configuration from {venue_config.config_path}")
+
+    @classmethod
+    def build(cls, parsed: VenueConfig, *, geography) -> "VenueManager":
+        """Load the venues the parsed block names onto the live `geography`."""
+        logger.info(f"Loading venue configuration from {parsed.config_path}")
         settings = {}
-        if venue_config.filter_by_geography is not None:
-            settings["filter_by_geography"] = venue_config.filter_by_geography
-        venue_manager = cls(geography, data_dir=venue_config.data_dir, **settings)
-        venue_manager._load(venue_config)
+        if parsed.filter_by_geography is not None:
+            settings["filter_by_geography"] = parsed.filter_by_geography
+        venue_manager = cls(geography, data_dir=parsed.data_dir, **settings)
+        venue_manager._load(parsed)
         return venue_manager
 
     def load_venue_type_from_csv(

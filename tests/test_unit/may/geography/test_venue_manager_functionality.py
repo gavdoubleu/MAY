@@ -11,6 +11,7 @@ import logging
 import pandas as pd
 import pytest
 
+from tests.test_unit.may.config_contexts import geography_context
 from may.geography import Geography
 from may.geography.venue_manager import VenueManager, VenueError
 
@@ -233,7 +234,9 @@ class TestResidenceHelpers:
             "    is_residence: false\n"
         )
         vm = VenueManager.from_config(
-            {"data_dir": str(venues_dir), "config_file": "config.yaml"}, geo
+            {"data_dir": str(venues_dir), "config_file": "config.yaml"},
+            geography_context(levels=geo.levels),
+            geography=geo,
         )
         return vm
 

@@ -59,6 +59,15 @@ def _is_whole_number(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _whole_numbers_as_text(spec):
+    """A data-file spec with whole-number paths (alone or in a list) read as text."""
+    if _is_whole_number(spec):
+        return str(spec)
+    if isinstance(spec, list):
+        return [str(item) if _is_whole_number(item) else item for item in spec]
+    return spec
+
+
 def _shown(value) -> str:
     """A value as a message shows it: its YAML term, with the value for scalars."""
     if value is None:
@@ -96,6 +105,12 @@ class ConfigReader:
         self._data_dir = data_dir
         # A config file's own keys follow its path after `: `, not `.`.
         self._file_root = False
+        self._found_path = None
+
+    @property
+    def found_path(self):
+        """Where a `config_file` reader's file was found; None for any other reader."""
+        return self._found_path
 
     @property
     def failed(self) -> bool:
@@ -261,6 +276,7 @@ class ConfigReader:
         found_path, mapping = config
         file_reader = ConfigReader(mapping, f"{key_path} ({found_path})", self._report, data_dir)
         file_reader._file_root = True
+        file_reader._found_path = found_path
         return file_reader
 
     def _load_config_file(self, written_path, data_dir, key_path):
@@ -374,10 +390,11 @@ class ConfigReader:
 
     def data_file(self, key, data_dir, default=_REQUIRED, give=None):
         """Paths of the data file(s) `key` names: one path or a list, relative ones under
-        `data_dir`, each must exist. A failed `data_dir` checks the shape only. A default
-        is found and checked as if written."""
+        `data_dir`, each must exist; whole numbers read as text. A failed `data_dir` checks
+        the shape only. A default is found and checked as if written."""
 
         def convert(raw, key_path):
+            raw = _whole_numbers_as_text(raw)
             try:
                 pr.as_path_list(raw, key_path)
             except pr.DataFileSpecError:

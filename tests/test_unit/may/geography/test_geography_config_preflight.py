@@ -220,11 +220,16 @@ def test_hierarchy_file_blank_is_problem(working_dir):
 
 @pytest.mark.parametrize(
     "bad_path, shown",
-    [("", "text ''"), (3, "a whole number 3"), ([], "a list"), (["a.csv", 3], "a list"), ({"a": "b"}, "a mapping")],
+    [("", "text ''"), (True, "true"), ([], "a list"), (["a.csv", 2.5], "a list"), ({"a": "b"}, "a mapping")],
 )
 def test_hierarchy_file_not_a_path_is_problem(working_dir, bad_path, shown):
     message = assert_single_problem(clean_block(hierarchy_file=bad_path), "hierarchy_file")
     assert message == f"must be a path or a non-empty list of paths; got {shown}"
+
+
+def test_whole_number_hierarchy_file_read_as_text(working_dir):
+    message = assert_single_problem(clean_block(hierarchy_file=1911), "hierarchy_file")
+    assert message == f"not found: {data_path(working_dir, '1911')}"
 
 
 def test_hierarchy_file_missing_on_disk_is_problem(working_dir):
@@ -278,7 +283,7 @@ def test_coord_files_whole_number_level_is_read_as_text(working_dir):
     "bad_path, message",
     [
         (None, "left blank; give a path or a list of paths"),
-        (3, "must be a path or a non-empty list of paths; got a whole number 3"),
+        (2.5, "must be a path or a non-empty list of paths; got a number 2.5"),
         ([], "must be a path or a non-empty list of paths; got a list"),
         (["a.csv", None], "must be a path or a non-empty list of paths; got a list"),
     ],

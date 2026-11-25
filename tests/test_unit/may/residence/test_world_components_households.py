@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from tests.test_unit.may.config_contexts import geography_context
 from may.geography import Geography
 from may.population.population import PopulationManager
 from may.geography.venue_manager import VenueManager
@@ -29,7 +30,9 @@ def geography():
 @pytest.fixture
 def venue_manager(geography):
     vm = VenueManager.from_config(
-        {"data_dir": "tests/test_data/micro_world/venues", "config_file": "test_venues_config.yaml"}, geography
+        {"data_dir": "tests/test_data/micro_world/venues", "config_file": "test_venues_config.yaml"},
+        geography_context(levels=geography.levels),
+        geography=geography,
     )
     return vm
 

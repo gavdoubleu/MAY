@@ -527,6 +527,20 @@ def test_config_file_success_reads_inner_keys(tmp_path):
     ]
 
 
+def test_config_file_reader_carries_found_path(tmp_path):
+    write(tmp_path / "step.yaml", "a: 1\n")
+    reader, _ = reader_over({"config": "step.yaml"}, data_dir=str(tmp_path))
+    step = reader.config_file("config")
+    assert step.found_path == os.path.join(str(tmp_path), "step.yaml")
+    assert step.section("a", default={}).found_path is None
+    assert reader.found_path is None
+
+
+def test_config_file_failed_reader_has_no_found_path(tmp_path):
+    reader, _ = reader_over({"config": "missing.yaml"}, data_dir=str(tmp_path))
+    assert reader.config_file("config").found_path is None
+
+
 def test_config_file_problem_directly_under_file(tmp_path):
     write(tmp_path / "step.yaml", "a: null\n")
     reader, report = reader_over({"config": str(tmp_path / "step.yaml")})
@@ -623,7 +637,7 @@ def test_data_file_missing(tmp_path):
 
 @pytest.mark.parametrize(
     "spec, shown",
-    [([], "a list"), (3, "a whole number 3"), (["a.csv", 2], "a list"), ({"a": 1}, "a mapping")],
+    [([], "a list"), (True, "true"), (["a.csv", 2.5], "a list"), ({"a": 1}, "a mapping")],
 )
 def test_data_file_bad_shape(tmp_path, spec, shown):
     reader, report = reader_over({"file": spec})
@@ -633,12 +647,21 @@ def test_data_file_bad_shape(tmp_path, spec, shown):
     ]
 
 
+def test_data_file_whole_numbers_read_as_text(tmp_path):
+    write(tmp_path / "2021", "x")
+    write(tmp_path / "7", "x")
+    reader, report = reader_over({"one": 2021, "many": ["7", 2021]})
+    assert reader.data_file("one", str(tmp_path)) == [str(tmp_path / "2021")]
+    assert reader.data_file("many", str(tmp_path)) == [str(tmp_path / "7"), str(tmp_path / "2021")]
+    assert problems(report) == []
+
+
 def test_data_file_failed_data_dir_checks_shape_only(tmp_path):
-    reader, report = reader_over({"good": "nowhere.csv", "bad": 3})
+    reader, report = reader_over({"good": "nowhere.csv", "bad": {"a": 1}})
     assert reader.data_file("good", FAILED) is FAILED
     assert reader.data_file("bad", FAILED) is FAILED
     assert problems(report) == [
-        ("block.bad", "must be a path or a non-empty list of paths; got a whole number 3")
+        ("block.bad", "must be a path or a non-empty list of paths; got a mapping")
     ]
 
 

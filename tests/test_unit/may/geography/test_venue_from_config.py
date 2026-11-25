@@ -3,8 +3,10 @@ import logging
 import pytest
 
 from may.geography import Geography
-from may.geography.venue_manager import VenueError, VenueManager
+from may.geography.venue_manager import VenueConfigError, VenueError, VenueManager
+from may.preflight.config_stage import ConfigError
 from may.utils import path_resolver
+from tests.test_unit.may.config_contexts import geography_context
 
 
 @pytest.fixture(autouse=True)
@@ -30,6 +32,12 @@ def venues_dir(tmp_path):
     return directory
 
 
+def from_config(block, geography):
+    return VenueManager.from_config(
+        block, geography_context(levels=geography.levels), geography=geography
+    )
+
+
 def block_for(venues_dir, config_text):
     (venues_dir / "venues.yaml").write_text(config_text)
     return {"data_dir": str(venues_dir), "config_file": "venues.yaml"}
@@ -42,20 +50,25 @@ def test_problems_raise_venue_error_with_every_line(loaded_geography, venues_dir
         "  school:\n"
         "    enabled: 'yes'\n"
         "    filename: schools.csv\n"
+        "  gym:\n"
+        "    filename: gyms.csv\n"
         "  pub:\n"
         "    enabled: true\n",
     )
-    with pytest.raises(VenueError) as raised:
-        VenueManager.from_config(block, loaded_geography)
+    with pytest.raises(VenueConfigError) as raised:
+        from_config(block, loaded_geography)
+    assert isinstance(raised.value, ConfigError) and isinstance(raised.value, VenueError)
     message = str(raised.value)
-    assert message.startswith("Venue config has 3 problem(s):")
-    assert "venue_types.school.enabled" in message
-    assert "venue_types.school.filename: not found" in message
-    assert "venue_types.pub.filename" in message
+    assert message.startswith("Venue config cannot be used: 3 problems.")
+    assert ": venue_types.school.enabled" in message
+    assert ": venue_types.school.filename" not in message  # failed `enabled`: skipped
+    assert ": venue_types.gym.filename: not found" in message
+    assert ": venue_types.pub.filename" in message
+    assert "venues.config_file (" in message
     assert len(raised.value.report.problems) == 3
 
 
-def test_warnings_are_logged_at_info(loaded_geography, venues_dir, caplog):
+def test_warnings_are_logged_at_warning(loaded_geography, venues_dir, caplog):
     block = block_for(
         venues_dir,
         "venue_types:\n"
@@ -63,12 +76,12 @@ def test_warnings_are_logged_at_info(loaded_geography, venues_dir, caplog):
         "    enabled: false\n"
         "    filter_column: phase\n",
     )
-    with caplog.at_level(logging.INFO, logger="venuemanager"):
-        VenueManager.from_config(block, loaded_geography)
+    with caplog.at_level(logging.INFO, logger="may.geography.venue_manager"):
+        from_config(block, loaded_geography)
     warning_records = [
         record for record in caplog.records if "venue_types.school.filter_values" in record.getMessage()
     ]
-    assert [record.levelno for record in warning_records] == [logging.INFO]
+    assert [record.levelno for record in warning_records] == [logging.WARNING]
     assert "not set; filter_column ignored" in warning_records[0].getMessage()
 
 
@@ -84,7 +97,7 @@ def test_single_file_type_is_loaded(loaded_geography, venues_dir):
         "  school:\n"
         "    filename: schools.csv\n",
     )
-    venue_manager = VenueManager.from_config(block, loaded_geography)
+    venue_manager = from_config(block, loaded_geography)
     assert venue_names(venue_manager, "school") == ["Alpha", "Beta"]
 
 
@@ -99,7 +112,7 @@ def test_batch_type_loads_one_file_per_unit_present(loaded_geography, venues_dir
         "    level: MGU\n"
         "    filename: 'pubs_{unit}.csv'\n",
     )
-    venue_manager = VenueManager.from_config(block, loaded_geography)
+    venue_manager = from_config(block, loaded_geography)
     assert venue_names(venue_manager, "pub") == ["Anchor", "Crown"]
 
 
@@ -112,8 +125,8 @@ def test_batch_type_matching_no_files_raises(loaded_geography, venues_dir):
         "    level: MGU\n"
         "    filename: 'pubs_{unit}.csv'\n",
     )
-    with pytest.raises(VenueError, match="matched no files"):
-        VenueManager.from_config(block, loaded_geography)
+    with pytest.raises(VenueConfigError, match="matched no files"):
+        from_config(block, loaded_geography)
 
 
 
@@ -129,7 +142,7 @@ def test_batch_type_expands_unit_over_its_own_level(loaded_geography, venues_dir
         "    level: LGU\n"
         "    filename: 'pubs_{unit}.csv'\n",
     )
-    venue_manager = VenueManager.from_config(block, loaded_geography)
+    venue_manager = from_config(block, loaded_geography)
     assert venue_names(venue_manager, "pub") == ["Anchor", "Crown"]
 
 
@@ -142,8 +155,8 @@ def test_batch_level_unknown_to_loaded_geography_raises(loaded_geography, venues
         "    level: LSOA\n"
         "    filename: 'pubs_{unit}.csv'\n",
     )
-    with pytest.raises(VenueError, match="unknown geo level 'LSOA'"):
-        VenueManager.from_config(block, loaded_geography)
+    with pytest.raises(VenueConfigError, match="unknown geo level 'LSOA'"):
+        from_config(block, loaded_geography)
 
 def test_filter_keeps_only_matching_rows(loaded_geography, venues_dir):
     (venues_dir / "schools.csv").write_text(
@@ -157,7 +170,7 @@ def test_filter_keeps_only_matching_rows(loaded_geography, venues_dir):
         "    filter_column: phase\n"
         "    filter_values: [primary]\n",
     )
-    venue_manager = VenueManager.from_config(block, loaded_geography)
+    venue_manager = from_config(block, loaded_geography)
     assert venue_names(venue_manager, "school") == ["Alpha"]
 
 
@@ -170,9 +183,27 @@ def test_dtype_reads_column_as_named_type(loaded_geography, venues_dir):
         "    filename: schools.csv\n"
         "    dtype: {code: str}\n",
     )
-    venue_manager = VenueManager.from_config(block, loaded_geography)
+    venue_manager = from_config(block, loaded_geography)
     [school] = venue_manager.get_venues_by_type("school")
     assert school.properties["code"] == "007"
+
+
+def test_build_takes_live_geography(loaded_geography, venues_dir):
+    (venues_dir / "schools.csv").write_text("name,geo_unit\nAlpha,SGU_001\n")
+    block = block_for(venues_dir, "venue_types:\n  school:\n    filename: schools.csv\n")
+    parsed, _ = VenueManager.preflight(block, geography_context(levels=loaded_geography.levels))
+    venue_manager = VenueManager.build(parsed, geography=loaded_geography)
+    assert venue_manager.geography is loaded_geography
+    assert venue_manager.data_dir == str(venues_dir)
+    assert venue_names(venue_manager, "school") == ["Alpha"]
+
+
+def test_whole_number_type_name_loads_as_text(loaded_geography, venues_dir):
+    (venues_dir / "schools.csv").write_text("name,geo_unit\nAlpha,SGU_001\n")
+    block = block_for(venues_dir, "venue_types:\n  1911:\n    filename: schools.csv\n")
+    venue_manager = from_config(block, loaded_geography)
+    assert venue_names(venue_manager, "1911") == ["Alpha"]
+    assert "1911" in venue_manager.venue_configs
 
 
 def test_settings_filter_by_geography_overrides_default(loaded_geography, venues_dir):
@@ -182,17 +213,17 @@ def test_settings_filter_by_geography_overrides_default(loaded_geography, venues
         "settings:\n"
         "  filter_by_geography: false\n",
     )
-    assert VenueManager.from_config(block, loaded_geography).filter_by_geography is False
+    assert from_config(block, loaded_geography).filter_by_geography is False
 
 
 def test_unset_filter_by_geography_keeps_default(loaded_geography, venues_dir):
     block = block_for(venues_dir, "venue_types: {}\n")
-    assert VenueManager.from_config(block, loaded_geography).filter_by_geography is True
+    assert from_config(block, loaded_geography).filter_by_geography is True
 
 
 def test_empty_venue_types_loads_no_venues(loaded_geography, venues_dir):
     block = block_for(venues_dir, "venue_types: {}\n")
-    assert VenueManager.from_config(block, loaded_geography).get_all_venues_list() == []
+    assert from_config(block, loaded_geography).get_all_venues_list() == []
 
 
 def test_disabled_type_config_is_recorded(loaded_geography, venues_dir):
@@ -203,7 +234,7 @@ def test_disabled_type_config_is_recorded(loaded_geography, venues_dir):
         "    enabled: false\n"
         "    is_residence: true\n",
     )
-    venue_manager = VenueManager.from_config(block, loaded_geography)
+    venue_manager = from_config(block, loaded_geography)
     assert venue_manager.is_residence_type("household") is True
     assert venue_manager.get_venues_by_type("household") == []
 

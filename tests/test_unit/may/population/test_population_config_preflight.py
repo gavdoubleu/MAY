@@ -223,7 +223,7 @@ def test_data_dir_whole_number_is_read_as_text(working_dir):
 
 
 def test_failed_data_dir_checks_file_shape_only():
-    population_config, report = parse(matrix_block(data_dir=["a"], demographics_male_file=3))
+    population_config, report = parse(matrix_block(data_dir=["a"], demographics_male_file={"a": 1}))
     assert population_config is None
     assert [finding.key for finding in report.problems] == [
         "population.data_dir",

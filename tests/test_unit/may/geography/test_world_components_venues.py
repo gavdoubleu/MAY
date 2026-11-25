@@ -2,6 +2,7 @@ import pytest
 from may.geography import Geography
 from may.geography.venue_manager import VenueManager
 from may.geography.venue import Venue
+from tests.test_unit.may.config_contexts import geography_context
 
 @pytest.fixture
 def loaded_geography():
@@ -31,7 +32,9 @@ def test_venue_manager_load_from_yaml(loaded_geography):
     - is_residence mapping
     """
     vm = VenueManager.from_config(
-        {"data_dir": "tests/test_data/micro_world/venues", "config_file": "test_venues_config.yaml"}, loaded_geography
+        {"data_dir": "tests/test_data/micro_world/venues", "config_file": "test_venues_config.yaml"},
+        geography_context(levels=loaded_geography.levels),
+        geography=loaded_geography,
     )
 
     # Check households

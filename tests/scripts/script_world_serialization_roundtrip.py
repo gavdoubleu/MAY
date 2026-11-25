@@ -27,6 +27,7 @@ from may.serialization import SerialisationConfig
 from may.world import World, setup_households
 
 import pytest
+from tests.test_unit.may.config_contexts import geography_context
 pytestmark = pytest.mark.skip(reason="CommandLine script, not a Pytest suite")
 
 # Set up logging
@@ -79,7 +80,7 @@ def create_world(config_path):
     # Load venues
     logger.info("Loading venues...")
     venue_config = config.get("venues") or {}
-    venues = VenueManager.from_config(venue_config, geo)
+    venues = VenueManager.from_config(venue_config, geography_context(levels=geo.levels), geography=geo)
     logger.info(f"Venues loaded: {sum(len(d) for d in venues.venues_by_type_and_id.values())} venues")
 
     # Load population

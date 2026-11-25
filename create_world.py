@@ -153,7 +153,9 @@ def main(args=None):
     logger.info("Loading venues...")
     with bp.stage("venues_load", "pipeline"):
         try:
-            venues = VenueManager.from_config(config.get("venues") or {}, geo)
+            venues = VenueManager.from_config(
+                config.get("venues", {}), _geography_context(config), geography=geo
+            )
         except VenueError as e:
             logger.error(f"Venue loading failed: {e}")
             sys.exit(1)

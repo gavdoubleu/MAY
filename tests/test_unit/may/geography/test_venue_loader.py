@@ -10,6 +10,7 @@ import os
 import pandas as pd
 import pytest
 
+from tests.test_unit.may.config_contexts import geography_context
 from may.geography import Geography
 from may.geography.venue_manager import VenueManager, VenueError
 
@@ -172,7 +173,9 @@ def test_missing_csv_fails_loud(loaded_geography, tmp_path):
 
     with pytest.raises(VenueError, match="field.csv"):
         VenueManager.from_config(
-            {"data_dir": str(venues_dir), "config_file": "test_venues_config.yaml"}, loaded_geography
+            {"data_dir": str(venues_dir), "config_file": "test_venues_config.yaml"},
+            geography_context(levels=loaded_geography.levels),
+            geography=loaded_geography,
         )
 
 
@@ -245,7 +248,9 @@ def test_venue_type_metadata_propagates_to_venues(loaded_geography, tmp_path):
     )
 
     vm = VenueManager.from_config(
-        {"data_dir": str(venues_dir), "config_file": "test_venues_config.yaml"}, loaded_geography
+        {"data_dir": str(venues_dir), "config_file": "test_venues_config.yaml"},
+        geography_context(levels=loaded_geography.levels),
+        geography=loaded_geography,
     )
 
     dorms = vm.get_venues_by_type('student_dorms')
@@ -280,7 +285,9 @@ def test_total_venues_log_reflects_true_count_with_collisions(loaded_geography, 
 
     with caplog.at_level(logging.INFO, logger='venuemanager'):
         vm = VenueManager.from_config(
-            {"data_dir": str(venues_dir), "config_file": "test_venues_config.yaml"}, loaded_geography
+            {"data_dir": str(venues_dir), "config_file": "test_venues_config.yaml"},
+            geography_context(levels=loaded_geography.levels),
+            geography=loaded_geography,
         )
 
     total_lines = [r.message for r in caplog.records if 'Total venues created' in r.message]
@@ -306,7 +313,9 @@ def test_total_venues_log_no_parenthetical_when_no_collisions(loaded_geography, 
 
     with caplog.at_level(logging.INFO, logger='venuemanager'):
         vm = VenueManager.from_config(
-            {"data_dir": str(venues_dir), "config_file": "test_venues_config.yaml"}, loaded_geography
+            {"data_dir": str(venues_dir), "config_file": "test_venues_config.yaml"},
+            geography_context(levels=loaded_geography.levels),
+            geography=loaded_geography,
         )
 
     total_lines = [r.message for r in caplog.records if 'Total venues created' in r.message]

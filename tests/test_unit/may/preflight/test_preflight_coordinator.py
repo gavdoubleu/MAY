@@ -148,8 +148,8 @@ def test_serialization_absent_is_problem(venues_dir, tmp_path):
 @pytest.mark.parametrize(
     "block_name, block_value, expected_message",
     [
-        ("venues", "configs/venues_config.yaml", "must be a mapping; got scalar (str)"),
-        ("venues", ["a"], "must be a mapping; got sequence (list)"),
+        ("venues", "configs/venues_config.yaml", "must be a mapping; got text 'configs/venues_config.yaml'"),
+        ("venues", ["a"], "must be a mapping; got a list"),
         ("serialization", "schema.yaml", "must be a mapping; got scalar (str)"),
         ("serialization", ["a"], "must be a mapping; got sequence (list)"),
     ],
@@ -635,6 +635,40 @@ def test_blank_population_is_problem(tmp_path):
     assert [(finding.key, finding.message) for finding in report.problems] == [
         ("population", "left blank; give a value")
     ]
+
+
+def test_blank_venues_is_problem(tmp_path):
+    config, _ = geography_config(tmp_path, VALID_GEOGRAPHY)
+    config["venues"] = None
+    report = check_world_config(config)
+    assert [(finding.key, finding.message) for finding in report.problems] == [
+        ("venues", "left blank; give a value")
+    ]
+
+
+def with_batch_venues(tmp_path, config, level):
+    venues_dir = tmp_path / "venues"
+    (venues_dir / "pubs_M1.csv").write_text("geo_unit\n")
+    (venues_dir / "venues.yaml").write_text(
+        f"venue_types:\n  pub:\n    batch_mode: true\n    level: {level}\n    filename: 'pubs_{{unit}}.csv'\n"
+    )
+
+
+def test_venue_batch_level_unknown_to_geography_is_problem(tmp_path):
+    config, _ = geography_config(tmp_path, VALID_GEOGRAPHY)
+    with_batch_venues(tmp_path, config, "LSOA")
+    report = check_world_config(config)
+    assert keys(report.problems) == [
+        f"venues.config_file ({tmp_path / 'venues' / 'venues.yaml'}): venue_types.pub.level"
+    ]
+    assert "['MGU', 'SGU']" in report.problems[0].message
+
+
+def test_venue_batch_level_unchecked_when_geography_failed(tmp_path):
+    config, _ = geography_config(tmp_path, {})
+    with_batch_venues(tmp_path, config, "LSOA")
+    report = check_world_config(config)
+    assert keys(report.problems) == ["geography.levels", "geography.hierarchy_file"]
 
 
 BATCH_POPULATION_UNKNOWN_LEVEL = {"type": "explicit_batch", "level": "LSOA"}

@@ -8,6 +8,7 @@ from may.residence.household_distributor import HouseholdDistributor
 from may.attribute_assignment.assigner import assign_attributes, AttributeAssigner, AttributeAssignmentError
 from may.attribute_assignment.assignment_config import AttributeAssignmentConfig
 from may.attribute_assignment.data_sources import DataSourceManager
+from tests.test_unit.may.config_contexts import geography_context
 
 @pytest.fixture
 def test_dir():
@@ -22,7 +23,9 @@ def geography(test_dir):
 @pytest.fixture
 def venue_manager(geography, test_dir):
     vm = VenueManager.from_config(
-        {"data_dir": os.path.join(test_dir, "venues"), "config_file": "test_venues_config.yaml"}, geography
+        {"data_dir": os.path.join(test_dir, "venues"), "config_file": "test_venues_config.yaml"},
+        geography_context(levels=geography.levels),
+        geography=geography,
     )
     return vm
 
