@@ -41,6 +41,7 @@ env/
 .claude/
 CLAUDE.md
 CONTEXT.md
+CONTEXT-MAP.md
 docs/adr/
 docs/handoff/
 
