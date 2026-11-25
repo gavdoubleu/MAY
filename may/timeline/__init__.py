@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from typing import Any
 
 from may.attribute_assignment import AttributeAssignmentConfig, AttributeAssignmentError
+from may.preflight.config_stage import ConfigStage
+from may.preflight.context import ConfigContext
 from may.preflight.report import PreflightReport, not_list_message, not_mapping_message
 from may.residence.allocation_strategy import AllocationStrategy
 from may.residence.household_distributor import HouseholdError
@@ -25,7 +27,8 @@ class TimelineError(Exception):
 class TimelineStep:
     """What the timeline needs to check and run one step type.
 
-    ``step_class`` has ``preflight(config_path, context) -> PreflightReport`` and
+    ``step_class`` is a ``ConfigStage`` whose config is the step file, or (not yet
+    migrated) has ``preflight(config_path, context) -> PreflightReport`` and
     ``from_config(config_path, world_config)``; ``run`` names the method of the built
     object that runs the step on the world. ``expected_errors`` are failures the entry
     point reports in its own words, so they are logged without a traceback.
@@ -69,9 +72,19 @@ TIMELINE_STEPS = {
 
 @dataclass(frozen=True)
 class _ParsedStep:
+    position_key: str
     prefix: str
     step_type: str
     config_path: str
+
+    @property
+    def config_key_path(self):
+        """Where a config stage step keys its findings: the key naming its file."""
+        return f"{self.position_key}.config"
+
+
+def _is_config_stage(step_class):
+    return isinstance(step_class, type) and issubclass(step_class, ConfigStage)
 
 
 def _parse_timeline(timeline_block, households_block_present):
@@ -140,19 +153,26 @@ def _parse_step(position, raw_step, report):
         report.problem(f"{position_key}: config", f"must be set to a YAML file{hint}")
     if not (known_type and config_file):
         return None
-    return _ParsedStep(prefix, step_type, pr.resolve(config_file))
+    return _ParsedStep(position_key, prefix, step_type, pr.resolve(config_file))
 
 
 def preflight(timeline_block, context):
     """Check a timeline block and every step's config, without building anything.
 
-    Step findings are keyed `timeline.steps[N] (<file>): <key>`, N counted from 1."""
+    Step findings are keyed `timeline.steps[N] (<file>): <key>`, N counted from 1; a
+    config stage step's `timeline.steps[N].config (<found file>): <key>`."""
     steps, report = _parse_timeline(timeline_block, context.households_block_present)
-    step_reports = [
-        TIMELINE_STEPS[step.step_type].step_class.preflight(step.config_path, context).under(step.prefix)
-        for step in steps
-    ]
+    step_reports = [_preflight_step(step, context) for step in steps]
     return PreflightReport.merge(report, *step_reports)
+
+
+def _preflight_step(step, context):
+    step_class = TIMELINE_STEPS[step.step_type].step_class
+    if _is_config_stage(step_class):
+        # Config stage steps ignore the old context until the timeline stage passes theirs.
+        _, report = step_class.preflight(step.config_path, ConfigContext(), key_path=step.config_key_path)
+        return report
+    return step_class.preflight(step.config_path, context).under(step.prefix)
 
 
 def step_label(step_type, step_config):
@@ -190,14 +210,23 @@ def run_timeline(world, world_config):
         with bp.stage(step_label(step.step_type, step.config_path), step.step_type, detail=step.config_path):
             logger.info("")
             logger.info(f"[{step.step_type.replace('_', ' ').upper()}] {step.config_path}")
-            _run_step(TIMELINE_STEPS[step.step_type], step.step_type, step.config_path, world, world_config)
+            _run_step(TIMELINE_STEPS[step.step_type], step, world, world_config)
 
 
-def _run_step(entry, step_type, config_path, world, world_config):
+def _build_step(entry, step, world_config):
+    if _is_config_stage(entry.step_class):
+        return entry.step_class.from_config(
+            step.config_path, ConfigContext(world_config=world_config), key_path=step.config_key_path
+        )
+    return entry.step_class.from_config(step.config_path, world_config)
+
+
+def _run_step(entry, step, world, world_config):
     """Build and run one step, raising `TimelineError` on failure. An expected error
     already says what went wrong, so only an unexpected one carries a traceback."""
+    step_type, config_path = step.step_type, step.config_path
     try:
-        built_step = entry.step_class.from_config(config_path, world_config)
+        built_step = _build_step(entry, step, world_config)
         getattr(built_step, entry.run)(world)
     except entry.expected_errors as error:
         message = f"Timeline step {step_type!r} failed for {config_path}: {error}"

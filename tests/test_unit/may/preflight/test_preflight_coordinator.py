@@ -375,7 +375,7 @@ def test_timeline_step_problem_is_reported_with_step_prefix(venues_dir, tmp_path
     config, creator_path = child_creator_config(venues_dir, tmp_path, SCHOOL_VENUES, "school")
     creator_path.write_text("parent_venue_type: school\n")
     report = check_world_config(config)
-    assert keys(report.problems) == [f"timeline.steps[1] ({creator_path}): child_venue_type"]
+    assert keys(report.problems) == [f"timeline.steps[1].config ({creator_path}): child_venue_type"]
 
 
 def test_valid_child_creator_step_passes(venues_dir, tmp_path):
@@ -399,7 +399,7 @@ def test_broken_venues_and_broken_step_are_both_reported(venues_dir, tmp_path):
     report = check_world_config(config)
     assert keys(report.problems) == [
         "venues.config_file",
-        f"timeline.steps[1] ({creator_path}): child_venue_type",
+        f"timeline.steps[1].config ({creator_path}): child_venue_type",
     ]
 
 

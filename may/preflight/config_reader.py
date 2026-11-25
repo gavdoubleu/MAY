@@ -268,6 +268,18 @@ class ConfigReader:
             data_dir = self._data_dir
         if written_path is None:
             return None
+        return self._file_reader(key_path, written_path, data_dir)
+
+    def root_config_file(self, key_path: str, written_path, give=None) -> "ConfigReader":
+        """Reader over the YAML file `written_path` names, as if read by `config_file` at
+        absolute `key_path`: the path written as a step's whole config. Same report and data dir."""
+        if written_path is None:
+            self._record(key_path, f"left blank; give {give or _DEFAULT_NOUN}")
+            return self._reader_at(_INERT, key_path)
+        written_path = self._to_name(written_path, key_path, give or _DEFAULT_NOUN)
+        return self._file_reader(key_path, written_path, self._data_dir)
+
+    def _file_reader(self, key_path, written_path, data_dir) -> "ConfigReader":
         if written_path is FAILED or data_dir is FAILED:
             return self._reader_at(_INERT, key_path)
         config = self._load_config_file(written_path, data_dir, key_path)

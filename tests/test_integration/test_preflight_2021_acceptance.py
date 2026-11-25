@@ -58,6 +58,16 @@ def _plant(scenario_copy, relative_path, mutate):
     path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 
 
+# Steps migrated to config stages key findings at `config`, after the found file.
+STAGE_STEP_TYPES = {"child_creator"}
+
+
+def _planted_key(step_type, scenario_copy, relative_path, step_number, key):
+    if step_type in STAGE_STEP_TYPES:
+        return f"timeline.steps[{step_number}].config ({scenario_copy / relative_path}): {key}"
+    return f"timeline.steps[{step_number}] (${{config_root}}/{relative_path}): {key}"
+
+
 def test_a_finding_is_planted_for_every_step_type():
     assert set(PLANTED_FINDINGS) == set(TIMELINE_STEPS)
 
@@ -78,8 +88,8 @@ def test_every_planted_step_finding_is_reported_in_one_run(scenario_config, tmp_
 
     problem_keys = {finding.key for finding in report.problems}
     expected_keys = {
-        f"timeline.steps[{step_number}] (${{config_root}}/{relative_path}): {key}"
-        for relative_path, step_number, _, key in PLANTED_FINDINGS.values()
+        _planted_key(step_type, scenario_copy, relative_path, step_number, key)
+        for step_type, (relative_path, step_number, _, key) in PLANTED_FINDINGS.items()
     }
     assert expected_keys <= problem_keys
     assert len(report.problems) == len(PLANTED_FINDINGS)

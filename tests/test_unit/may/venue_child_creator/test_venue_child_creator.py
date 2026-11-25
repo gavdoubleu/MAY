@@ -8,6 +8,7 @@ from parent venues based on member grouping and capacity rules.
 import pytest
 from collections import defaultdict
 from may.venue_child_creator.venue_child_creator import VenueChildCreator
+from may.preflight.context import ConfigContext
 from may.population.subset import Subset
 
 
@@ -252,7 +253,7 @@ class TestFromConfig:
             "parent_venue_type: school\n"
             "child_venue_type: classroom\n"
         )
-        creator = VenueChildCreator.from_config(str(yaml_file), {})
+        creator = VenueChildCreator.from_config(str(yaml_file), ConfigContext(), key_path="config")
         assert creator.parent_venue_type == "school"
         assert creator.child_venue_type == "classroom"
         assert creator.child_max_size == 30  # default
@@ -280,7 +281,7 @@ class TestFromConfig:
             "    type: numerical\n"
             "    min: 18\n"
         )
-        creator = VenueChildCreator.from_config(str(yaml_file), {})
+        creator = VenueChildCreator.from_config(str(yaml_file), ConfigContext(), key_path="config")
         assert creator.group_by_attribute == "age"
         assert creator.child_max_size == 25
         assert creator.distribution_strategy == "fill"
@@ -297,7 +298,7 @@ class TestFromConfig:
             "child_venue_type: land\n"
             "exclude_subset_keys: [\"guest\"]\n"
         )
-        creator = VenueChildCreator.from_config(str(yaml_file), {})
+        creator = VenueChildCreator.from_config(str(yaml_file), ConfigContext(), key_path="config")
         assert creator.exclude_subset_keys == ["guest"]
         assert creator.include_subset_keys is None
 

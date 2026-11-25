@@ -1,7 +1,7 @@
 """Config stage: the one owner of preflight and from_config for every stage.
 
 A stage inherits `ConfigStage`, declares `display_name`, `config_error` and (block stages)
-`config_key`, and implements `parse(reader, context)` and `build(parsed, **live)`. The base
+`config_key` or (step stages whose config is a YAML file path) `config_is_file`, and implements `parse(reader, context)` and `build(parsed, **live)`. The base
 reads, nulls a result with problems, raises with one header wording, and logs warnings.
 Nothing here names a stage, a key or a domain error.
 """
@@ -51,6 +51,8 @@ class ConfigStage(ABC):
     display_name: str
     config_error: type
     config_key: Optional[str] = None
+    # True when the config is a path to a YAML file (a timeline step); the base loads it.
+    config_is_file: bool = False
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -79,12 +81,18 @@ class ConfigStage(ABC):
     ) -> Tuple[Any, PreflightReport]:
         """`(parsed result, report)`; the result is `None` when the report has any problem.
 
-        A blank or non-mapping `config` is one problem at the root key path."""
+        A blank or non-mapping `config` is one problem at the root key path. For a
+        `config_is_file` stage, `config` is the file's path and `key_path` the key naming it;
+        a file that cannot be loaded is one problem there."""
         root_key_path = key_path if key_path is not None else cls.config_key
         if root_key_path is None:
             raise TypeError(f"{cls.__name__} has no config_key; pass key_path")
         report = PreflightReport()
-        reader = ConfigReader({}, "", report).root_reader(root_key_path, config)
+        root = ConfigReader({}, "", report)
+        if cls.config_is_file:
+            reader = root.root_config_file(root_key_path, config, give="a path to a YAML file")
+        else:
+            reader = root.root_reader(root_key_path, config)
         if reader.failed:
             return None, report
         result = cls.parse(reader, context)

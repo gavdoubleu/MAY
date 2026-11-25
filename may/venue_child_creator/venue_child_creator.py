@@ -14,8 +14,8 @@ import logging
 import math
 from collections import defaultdict
 
-from may.preflight.config_file import load_config_mapping
-from may.preflight.report import PreflightReport, not_list_message, not_mapping_message
+from may.preflight.config_reader import FAILED
+from may.preflight.config_stage import ConfigError, ConfigStage
 from may.utils.attribute_access import get_attribute
 
 logger = logging.getLogger("venue_child_creator")
@@ -23,71 +23,59 @@ logger = logging.getLogger("venue_child_creator")
 DISTRIBUTION_STRATEGIES = ("even", "fill")
 MEMBER_FILTER_TYPES = ("numerical", "categorical")
 REQUIRED_KEYS = ("parent_venue_type", "child_venue_type")
-# Constructor keyword -> default when the YAML leaves the key out. The constructor
-# turns `None` into a fresh empty container.
-OPTIONAL_KEYS = {
+# Constructor keyword -> default when the YAML leaves the key out, for keys read as
+# written (no checks). The constructor turns `None` into a fresh empty container.
+UNCHECKED_KEYS = {
     "group_by_attribute": None,
-    "child_max_size": 30,
     "child_properties": None,
-    "distribution_strategy": "even",
     "balance_by": None,
     "attribute_mapping": None,
     "activity_map_key": None,
     "subset_key": None,
     "replace_parent_activity": True,
     "remove_from_parent": False,
-    "member_filters": None,
     "exclude_subset_keys": None,
     "include_subset_keys": None,
 }
 
 
 class VenueChildCreatorError(Exception):
-    """A child creator config cannot be built; the message lists every problem."""
+    """A child creator cannot be built or run."""
 
 
-def _check_member_filters(member_filters, report):
-    if not isinstance(member_filters, list):
-        report.problem("member_filters", not_list_message(member_filters))
-        return
-    for position, member_filter in enumerate(member_filters, start=1):
-        filter_key = f"member_filters[{position}]"
-        if not isinstance(member_filter, dict):
-            report.problem(filter_key, not_mapping_message(member_filter))
-            continue
-        if not member_filter.get("attribute"):
-            report.problem(f"{filter_key}.attribute", "not set")
-        filter_type = member_filter.get("type", "numerical")
-        if filter_type not in MEMBER_FILTER_TYPES:
-            report.problem(f"{filter_key}.type", (
-                f"unknown filter type {filter_type!r}; expected one of {list(MEMBER_FILTER_TYPES)}"
-            ))
+class ChildCreatorConfigError(ConfigError, VenueChildCreatorError):
+    """A child creator config cannot be used; the message lists every problem."""
 
 
-def _check_settings(settings, report):
-    """Value checks on the constructor settings; venue types are checked by the caller."""
-    for key in REQUIRED_KEYS:
-        value = settings[key]
-        if value is None or value == "":
-            report.problem(key, "not set; there is no default")
-        elif not isinstance(value, str):
-            report.problem(key, f"must be a venue type name; got {value!r}")
-    strategy = settings["distribution_strategy"]
-    if strategy not in DISTRIBUTION_STRATEGIES:
-        report.problem("distribution_strategy", (
-            f"unknown strategy {strategy!r}; expected one of {list(DISTRIBUTION_STRATEGIES)}"
-        ))
-    max_size = settings["child_max_size"]
-    # bool is an int subclass, so `true` would otherwise pass as 1.
-    if isinstance(max_size, bool) or not isinstance(max_size, int) or max_size < 1:
-        report.problem("child_max_size", f"must be a whole number of at least 1; got {max_size!r}")
-    if settings["member_filters"] is not None:
-        _check_member_filters(settings["member_filters"], report)
+def _read_member_filters(reader):
+    """The written `member_filters` list, or None when absent; a bad filter is a problem."""
+    filter_readers = reader.items("member_filters", default=None)
+    if filter_readers is None or filter_readers is FAILED:
+        return filter_readers
+    for filter_reader in filter_readers:
+        filter_reader.name("attribute", give="an attribute name")
+        filter_reader.one_of("type", MEMBER_FILTER_TYPES, default="numerical")
+    return reader.value("member_filters")
+
+
+def _read_settings(reader):
+    """Constructor settings from a child creator file; checked keys may read `FAILED`."""
+    settings = {key: reader.name(key, give="a venue type name") for key in REQUIRED_KEYS}
+    settings["distribution_strategy"] = reader.one_of(
+        "distribution_strategy", DISTRIBUTION_STRATEGIES, default="even"
+    )
+    max_size = reader.whole_number("child_max_size", default=30)
+    if max_size is not FAILED and max_size < 1:
+        reader.problem(f"must be at least 1; got {max_size}", at="child_max_size")
+    settings["child_max_size"] = max_size
+    settings["member_filters"] = _read_member_filters(reader)
+    settings.update({key: reader.value(key, default) for key, default in UNCHECKED_KEYS.items()})
     if settings["exclude_subset_keys"] is not None and settings["include_subset_keys"] is not None:
-        report.problem("include_subset_keys", "cannot be set together with exclude_subset_keys")
+        reader.problem("cannot be set together with exclude_subset_keys", at="include_subset_keys")
+    return settings
 
 
-class VenueChildCreator:
+class VenueChildCreator(ConfigStage):
     """
     Creates child venues dynamically based on parent venue occupancy.
 
@@ -95,7 +83,14 @@ class VenueChildCreator:
     - Groups people by specified attributes (e.g., age)
     - Creates child venues (e.g., classrooms) based on group sizes
     - Redistributes people from parent to child venues
+
+    A timeline step stage: its config is a child creator YAML path; the parsed result
+    is the constructor settings.
     """
+
+    display_name = "Child creator"
+    config_error = ChildCreatorConfigError
+    config_is_file = True
 
     def __init__(
         self,
@@ -193,34 +188,14 @@ class VenueChildCreator:
             "people_filtered_out": 0,
         }
 
-    @staticmethod
-    def parse_config(config_path):
-        """Parse a child creator YAML into constructor settings, or `None` if any problem."""
-        report = PreflightReport()
-        config = load_config_mapping(config_path, report)
-        if config is None:
-            return None, report
-        settings = {key: config.get(key) for key in REQUIRED_KEYS}
-        settings.update({key: config.get(key, default) for key, default in OPTIONAL_KEYS.items()})
-        _check_settings(settings, report)
-        if report.has_problems:
-            return None, report
-        return settings, report
-
-    @staticmethod
-    def preflight(config_path, context):
-        """Check a child creator YAML without building anything."""
-        _, report = VenueChildCreator.parse_config(config_path)
-        return report
+    @classmethod
+    def parse(cls, reader, context):
+        """Constructor settings read from the child creator file."""
+        return _read_settings(reader)
 
     @classmethod
-    def from_config(cls, config_path, world_config):
-        """Build from a child creator YAML; `VenueChildCreatorError` on any problem."""
-        logger.info(f"Loading VenueChildCreator config from {config_path}")
-        settings, report = cls.parse_config(config_path)
-        report.raise_if_problems(
-            VenueChildCreatorError, f"Child creator config {config_path} cannot be used."
-        )
+    def build(cls, settings, **live):
+        """The child creator from parsed settings."""
         instance = cls(**settings)
 
         logger.info(

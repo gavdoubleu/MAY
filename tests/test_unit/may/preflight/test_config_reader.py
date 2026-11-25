@@ -609,6 +609,41 @@ def test_config_file_failed_data_dir_is_inert_silently(tmp_path):
     assert problems(report) == []
 
 
+def test_root_config_file_reads_the_file_at_an_absolute_key_path(tmp_path):
+    write(tmp_path / "step.yaml", "k: null\n")
+    reader, report = reader_over({}, key_path="")
+    step = reader.root_config_file("timeline.steps[3].config", str(tmp_path / "step.yaml"))
+    found = str(tmp_path / "step.yaml")
+    assert step.key_path == f"timeline.steps[3].config ({found})"
+    assert step.found_path == found
+    step.text("k")
+    assert problems(report) == [
+        (f"timeline.steps[3].config ({found}): k", "left blank; give a value"),
+    ]
+
+
+def test_root_config_file_missing_file_is_one_problem_at_the_key_path(tmp_path):
+    path = str(tmp_path / "absent.yaml")
+    reader, report = reader_over({}, key_path="")
+    step = reader.root_config_file("step.config", path)
+    assert step.failed
+    assert problems(report) == [("step.config", f"not found; tried {path}")]
+
+
+@pytest.mark.parametrize(
+    "written, message",
+    [
+        (None, "left blank; give a value"),
+        ("", "must not be empty; give a value"),
+        (["a.yaml"], "must be text; got a list"),
+    ],
+)
+def test_root_config_file_bad_path_is_one_problem(written, message):
+    reader, report = reader_over({}, key_path="")
+    assert reader.root_config_file("step.config", written).failed
+    assert problems(report) == [("step.config", message)]
+
+
 # --- data_file -------------------------------------------------------------------------
 
 

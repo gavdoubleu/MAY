@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from may import timeline
+from may.preflight.context import ConfigContext
 
 
 # An allocation strategy that passes preflight.
@@ -65,8 +66,10 @@ def test_child_creator_step_creates_children_in_the_world():
     with patch.object(timeline.VenueChildCreator, "from_config") as from_config:
         timeline.run_timeline(world, timeline_config({"type": "child_creator", "config": "rooms.yaml"}))
 
-    (config_path, _world_config), _ = from_config.call_args
+    (config_path, context), keywords = from_config.call_args
     assert config_path.endswith("rooms.yaml")
+    assert isinstance(context, ConfigContext)
+    assert keywords == {"key_path": "timeline.steps[1].config"}
     from_config.return_value.create_children.assert_called_once_with(world)
 
 

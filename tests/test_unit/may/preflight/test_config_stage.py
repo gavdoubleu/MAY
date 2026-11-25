@@ -112,6 +112,22 @@ class Buggy(ConfigStage):
         return parsed
 
 
+class ReadsFile(ConfigStage):
+    """A step stage whose config is a path to a YAML file."""
+
+    display_name = "Reads file"
+    config_error = ToyConfigError
+    config_is_file = True
+
+    @classmethod
+    def parse(cls, reader, context):
+        return {"size": reader.whole_number("size"), "found": reader.found_path}
+
+    @classmethod
+    def build(cls, parsed, **live):
+        return parsed
+
+
 EMPTY = ConfigContext()
 
 
@@ -417,3 +433,38 @@ def test_no_import_cycle(module_order):
         text=True,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+# --- stages whose config is a file ------------------------------------------------------
+
+
+def test_file_stage_reads_the_file_its_config_names(tmp_path):
+    path = tmp_path / "step.yaml"
+    path.write_text("size: 3\n")
+
+    result, report = ReadsFile.preflight(str(path), EMPTY, key_path="timeline.steps[2].config")
+
+    assert result == {"size": 3, "found": str(path)}
+    assert report.problems == []
+
+
+def test_file_stage_findings_follow_the_found_file(tmp_path):
+    path = tmp_path / "step.yaml"
+    path.write_text("other: 1\n")
+
+    result, report = ReadsFile.preflight(str(path), EMPTY, key_path="timeline.steps[2].config")
+
+    assert result is None
+    assert keys(report.problems) == [f"timeline.steps[2].config ({path}): size"]
+
+
+def test_file_stage_missing_file_is_one_problem_at_the_naming_key(tmp_path):
+    result, report = ReadsFile.preflight(str(tmp_path / "absent.yaml"), EMPTY, key_path="step.config")
+
+    assert result is None
+    assert keys(report.problems) == ["step.config"]
+
+
+def test_file_stage_needs_a_key_path(tmp_path):
+    with pytest.raises(TypeError):
+        ReadsFile.preflight(str(tmp_path / "step.yaml"), EMPTY)
