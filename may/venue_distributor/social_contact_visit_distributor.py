@@ -12,7 +12,7 @@ import logging
 from pathlib import Path
 from typing import Dict, Any
 from may.preflight.config_file import load_config_mapping
-from may.preflight.report import PreflightReport
+from may.preflight.report import PreflightReport, config_entry
 from may.utils.yaml_loader import load_yaml
 
 from .base_distributor import BaseDistributor, DistributorConfigError
@@ -53,7 +53,7 @@ class SocialContactVisitDistributor:
             report.problem("max_contacts", f"must be a whole number, 1 or more; got {max_contacts!r}")
         eligibility = BaseDistributor._section(config, "eligibility", report)
         key = "eligibility.global_filters"
-        for position, rule in BaseDistributor._mappings(key, eligibility.get("global_filters"), report):
+        for position, rule in BaseDistributor._mappings(key, config_entry(eligibility, "global_filters", key, report), report):
             if not rule.get("attribute"):
                 report.problem(f"{key}[{position}].attribute", "not set")
             elif not any(condition in rule for condition in FILTER_CONDITIONS):

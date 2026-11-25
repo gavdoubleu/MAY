@@ -60,3 +60,27 @@ def test_distributor_from_yaml_raises_where_the_class_preflight_reports(tmp_path
 
     with pytest.raises(DistributorConfigError, match="allocation.strategy"):
         distributor_from_yaml(path)
+
+
+BLANK_SECTIONS = {
+    "venue_selection": "venue_type: school\nvenue_selection:\n",
+    "allocation": "venue_type: school\nallocation:\n",
+    "eligibility": "venue_type: school\neligibility:\n",
+    "eligibility.global_filters": "venue_type: school\neligibility:\n  global_filters:\n",
+    "special_cases": "venue_type: school\nspecial_cases:\n",
+}
+
+
+@pytest.mark.parametrize("key", BLANK_SECTIONS, ids=list(BLANK_SECTIONS))
+def test_a_section_left_blank_is_one_problem(tmp_path, key):
+    report = distributor_preflight(write(tmp_path, BLANK_SECTIONS[key]), NO_CONTEXT)
+
+    assert keys(report.problems) == [key]
+    assert "blank" in report.problems[0].message
+
+
+def test_distributor_from_yaml_raises_on_a_blank_section_instead_of_building(tmp_path):
+    path = write(tmp_path, BLANK_SECTIONS["venue_selection"])
+
+    with pytest.raises(DistributorConfigError, match="venue_selection: left blank"):
+        distributor_from_yaml(path)

@@ -278,6 +278,15 @@ def test_disabled_type_without_filename_is_valid(write_config):
     assert set(venue_config.venue_types) == {"pub"}
 
 
+def test_disabled_batch_type_skips_pattern_and_level_checks(write_config):
+    block = write_config(
+        "venue_types:\n  pub:\n    enabled: false\n    batch_mode: true\n    filename: pubs.csv\n"
+    )
+    venue_config, report = VenueManager.parse_config(block)
+    assert not report.problems
+    assert set(venue_config.venue_types) == {"pub"}
+
+
 def test_config_only_under_data_dir_is_found(working_dir):
     (working_dir / "data").mkdir()
     (working_dir / "data" / "venues.yaml").write_text("venue_types: {}\n")

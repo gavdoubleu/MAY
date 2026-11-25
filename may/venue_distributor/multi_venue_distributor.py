@@ -28,7 +28,7 @@ from .base_distributor import BaseDistributor, check_value
 from may.population import Subset
 from may.utils import path_resolver as pr
 from pathlib import Path
-from may.preflight.report import not_list_message, not_mapping_message
+from may.preflight.report import config_entry, not_list_message, not_mapping_message
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +116,9 @@ class MultiVenueDistributor(BaseDistributor):
             "column_template" in probability_column or "column_name" in probability_column
         ):
             report.problem(f"{key}.probability_column", "needs 'column_template' or 'column_name'")
-        for position, row_filter in cls._mappings(f"{key}.row_filters", participation_filter.get("row_filters"), report):
+        for position, row_filter in cls._mappings(
+            f"{key}.row_filters", config_entry(participation_filter, "row_filters", f"{key}.row_filters", report), report,
+        ):
             check_value(f"{key}.row_filters[{position}].match_type",
                         row_filter.get("match_type", "exact"), PARTICIPATION_MATCH_TYPES, report)
 

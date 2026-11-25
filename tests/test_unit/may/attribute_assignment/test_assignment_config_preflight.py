@@ -523,3 +523,34 @@ def test_an_exclude_that_is_not_a_list_is_a_problem(tmp_path, value):
                                                              "data_source": "geo", "exclude": value}}])
 
     assert keys(preflight(tmp_path, config).problems) == [f"{CHILD_KEY}.logic[1].then.exclude"]
+
+
+def _blank(config, path):
+    """Set the entry at dotted `path` to None, as a YAML key left blank."""
+    *parents, name = path.split(".")
+    container = config
+    for parent in parents:
+        container = container[parent]
+    container[name] = None
+
+
+@pytest.mark.parametrize("path", [
+    "step", "required_attributes", "data_sources", "assignment_rules",
+    "assignment_rules.Family.rules", "venue_assignment_rules",
+])
+def test_a_section_left_blank_is_one_problem(tmp_path, path):
+    config = valid_config(tmp_path)
+    config.setdefault("venue_assignment_rules", [])
+    _blank(config, path)
+
+    report = preflight(tmp_path, config)
+
+    assert keys(report.problems) == [path]
+    assert "blank" in report.problems[0].message
+
+
+def test_a_blank_data_source_files_list_is_a_problem(tmp_path):
+    config = valid_config(tmp_path)
+    config["data_sources"]["pair"]["files"] = None
+
+    assert keys(preflight(tmp_path, config).problems) == ["data_sources.pair.files"]

@@ -8,7 +8,7 @@ until init() is called, so bare paths continue to work unchanged.
 
 import os
 import re
-from typing import List, Optional
+from typing import List, Optional, Union
 
 _resolver: Optional["PathResolver"] = None
 
@@ -62,13 +62,14 @@ class ConfigFileNotFoundError(FileNotFoundError):
         super().__init__(f"not found; tried {', '.join(tried)}")
 
 
-def find_config_file(path: str, data_dir: Optional[str]) -> str:
+def find_config_file(path: Union[str, os.PathLike], data_dir: Optional[str]) -> str:
     """Find a config file: absolute as written; relative in working dir, then under data_dir.
 
     Returns the path as found. Raises ConfigFileNotFoundError listing every path tried.
     """
-    path = resolve(path)
-    data_dir = resolve(data_dir) if data_dir else data_dir
+    # A `Path` is taken as its text, so `${...}` roots resolve and the tried list joins.
+    path = resolve(str(path))
+    data_dir = resolve(str(data_dir)) if data_dir else data_dir
     tried = [path]
     if not os.path.isabs(path) and data_dir:
         tried.append(os.path.join(data_dir, path))

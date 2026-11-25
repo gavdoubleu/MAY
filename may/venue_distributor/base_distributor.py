@@ -7,7 +7,7 @@ from scipy.spatial import cKDTree
 import logging
 from may.preflight.config_file import load_config_mapping
 from may.preflight.context import PreflightContext, check_geo_level
-from may.preflight.report import PreflightReport, not_list_message, not_mapping_message
+from may.preflight.report import PreflightReport, config_entry, not_list_message, not_mapping_message
 from may.utils import path_resolver as pr
 from may.utils.attribute_access import _compile_attribute, get_attribute
 from may.utils.yaml_loader import load_yaml
@@ -117,18 +117,21 @@ class BaseDistributor:
         for key in ("venue_geo_level", "batch_geo_level"):
             check_geo_level(f"venue_selection.{key}", venue_selection.get(key), context, report)
         eligibility = cls._section(config, "eligibility", report)
-        cls._check_filters("eligibility.global_filters", eligibility.get("global_filters"), report)
         cls._check_filters(
-            "eligibility.attributes", eligibility.get("attributes"), report,
+            "eligibility.global_filters",
+            config_entry(eligibility, "global_filters", "eligibility.global_filters", report), report,
+        )
+        cls._check_filters(
+            "eligibility.attributes",
+            config_entry(eligibility, "attributes", "eligibility.attributes", report), report,
             name_key="name", default_type=None,
         )
-        priority = eligibility.get("priority_allocation")
+        priority = config_entry(eligibility, "priority_allocation", "eligibility.priority_allocation", report)
         if isinstance(priority, dict):
-            groups = priority.get("groups")
+            groups = config_entry(priority, "groups", "eligibility.priority_allocation.groups", report)
             for position, group in cls._mappings("eligibility.priority_allocation.groups", groups, report):
-                cls._check_filters(
-                    f"eligibility.priority_allocation.groups[{position}].filters", group.get("filters"), report
-                )
+                filters_key = f"eligibility.priority_allocation.groups[{position}].filters"
+                cls._check_filters(filters_key, config_entry(group, "filters", filters_key, report), report)
         elif priority is not None:
             report.problem("eligibility.priority_allocation", not_mapping_message(priority))
 
@@ -163,8 +166,8 @@ class BaseDistributor:
 
     @staticmethod
     def _section(config, key, report):
-        """The mapping under `key`, `{}` when absent; a non-mapping is a problem and reads as `{}`."""
-        section = config.get(key)
+        """The mapping under `key`, `{}` when absent; a blank or non-mapping is a problem and reads as `{}`."""
+        section = config_entry(config, key, key, report)
         if section is None:
             return {}
         if not isinstance(section, dict):

@@ -85,3 +85,18 @@ def test_miss_raises_with_both_tried_paths(working_dir, data_dir):
     assert error.path == "venues.yaml"
     assert error.tried == ["venues.yaml", joined]
     assert str(error) == f"not found; tried venues.yaml, {joined}"
+
+
+def test_a_path_object_miss_raises_not_found_naming_it(working_dir, data_dir):
+    from pathlib import Path
+
+    with pytest.raises(ConfigFileNotFoundError, match="missing.yaml") as caught:
+        find_config_file(Path("nope/missing.yaml"), data_dir)
+    assert caught.value.tried[0] == os.path.join("nope", "missing.yaml")
+
+
+def test_a_path_object_is_found_as_text(working_dir, data_dir):
+    from pathlib import Path
+
+    (working_dir / "venues.yaml").write_text("")
+    assert find_config_file(Path("venues.yaml"), data_dir) == "venues.yaml"

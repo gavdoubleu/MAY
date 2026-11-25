@@ -125,9 +125,28 @@ def test_numeric_file_codes_match_numeric_units(working_dir, numeric_geography_d
     assert list(geography.get_units_by_level("LGU")) == [6037]
 
 
+def test_numeric_codes_match_a_column_read_as_float(working_dir, numeric_geography_dir):
+    """A row blank at a level makes pandas read that column as float (6037.0); it is
+    dropped, but the column stays float."""
+    hierarchy = numeric_geography_dir / "hierarchy.csv"
+    hierarchy.write_text(hierarchy.read_text() + "999901,99999,\n")
+    block = numeric_block_for(
+        numeric_geography_dir, filter={"level": "LGU", "codes": [6037]}
+    )
+    geography = Geography.from_config(block)
+    assert len(geography.get_units_by_level("LGU")) == 1
+    assert len(geography.get_units_by_level("SGU")) == 2
+
+
+def test_a_missing_hierarchy_file_raises_geography_error(working_dir, geography_dir):
+    block = block_for(geography_dir, hierarchy_file="absent.csv")
+    with pytest.raises(GeographyError, match="absent.csv"):
+        Geography.from_config(block)
+
+
 def test_filter_matching_no_units_raises(working_dir, geography_dir):
     block = block_for(geography_dir, filter={"level": "LGU", "codes": ["Nowhere"]})
-    with pytest.raises(ValueError, match="matched no LGU units") as raised:
+    with pytest.raises(GeographyError, match="matched no LGU units") as raised:
         Geography.from_config(block)
     assert "Nowhere" in str(raised.value)
 

@@ -21,7 +21,7 @@ from may.attribute_assignment.strategies import (
 )
 from may.preflight.config_file import load_config_mapping
 from may.preflight.context import PreflightContext, check_geo_level
-from may.preflight.report import PreflightReport, not_list_message, not_mapping_message
+from may.preflight.report import PreflightReport, config_entry, not_list_message, not_mapping_message
 from may.utils import path_resolver as pr
 from may.utils.yaml_loader import load_yaml
 
@@ -1023,7 +1023,7 @@ CSV_FORMATS = (
 def _check_config(config, context, report):
     """Every check an attribute YAML gets before its data is loaded."""
     _check_attributes(config, report)
-    step = config.get("step")
+    step = config_entry(config, "step", "step", report)
     if step is not None and not isinstance(step, dict):
         report.problem("step", not_mapping_message(step))
     elif step:
@@ -1032,10 +1032,13 @@ def _check_config(config, context, report):
             report.problem("step.assignment_level", (
                 f"unknown value {level!r}; expected one of {list(ASSIGNMENT_LEVELS)}"
             ))
-    _named_entries("required_attributes", config.get("required_attributes"), report)
-    source_names = _check_data_sources(config.get("data_sources"), context, report)
-    _check_assignment_rules(config.get("assignment_rules"), source_names, report)
-    for position, rule in _mappings("venue_assignment_rules", config.get("venue_assignment_rules"), report):
+    _named_entries(
+        "required_attributes", config_entry(config, "required_attributes", "required_attributes", report), report
+    )
+    source_names = _check_data_sources(config, context, report)
+    _check_assignment_rules(config_entry(config, "assignment_rules", "assignment_rules", report), source_names, report)
+    venue_rules = config_entry(config, "venue_assignment_rules", "venue_assignment_rules", report)
+    for position, rule in _mappings("venue_assignment_rules", venue_rules, report):
         _check_assignment(
             f"venue_assignment_rules[{position}].assignment", rule.get("assignment", {}), source_names, report
         )
@@ -1092,8 +1095,12 @@ def _section(key, section, report):
     return section
 
 
-def _check_data_sources(data_sources, context, report):
+def _check_data_sources(config, context, report):
     """Each source's type, format and files; the declared source names (`None` if unreadable)."""
+    data_sources = config_entry(config, "data_sources", "data_sources", report)
+    if data_sources is None and "data_sources" in config:
+        # Left blank: the names rules refer to are unknown, so references go unchecked.
+        return None
     if data_sources is not None and not isinstance(data_sources, dict):
         report.problem("data_sources", not_mapping_message(data_sources))
         return None
@@ -1116,7 +1123,7 @@ def _check_data_sources(data_sources, context, report):
             report.problem(f"{key}.format", (
                 f"needs an explicit format, one of {sorted(CSV_FORMATS)}; got {data_format!r}"
             ))
-        for position, file_config in _mappings(f"{key}.files", source.get("files"), report):
+        for position, file_config in _mappings(f"{key}.files", config_entry(source, "files", f"{key}.files", report), report):
             _check_data_file(f"{key}.files[{position}]", file_config, context, report)
     return set(data_sources)
 
@@ -1149,7 +1156,8 @@ def _check_assignment_rules(assignment_rules, source_names, report):
             report.problem(structure_key, not_mapping_message(structure))
             continue
         problems_before = len(report.problems)
-        rules = _mappings(f"{structure_key}.rules", structure.get("rules", []), report)
+        rules_key = f"{structure_key}.rules"
+        rules = _mappings(rules_key, config_entry(structure, "rules", rules_key, report), report)
         for position, rule in rules:
             _check_assignment(
                 f"{structure_key}.rules[{position}].assignment", rule.get("assignment", {}), source_names, report

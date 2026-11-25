@@ -28,13 +28,16 @@ def _check_venue_type(report: PreflightReport, type_key: str, type_config, conte
         return
     for flag in ("enabled", "batch_mode"):
         _check_bool(report, f"{type_key}.{flag}", type_config, flag)
-    filename = type_config.get("filename")
-    if type_config.get("enabled", True) is not False and not filename:
-        report.problem(f"{type_key}.filename", "not set; type is enabled")
     if type_config.get("filter_column") and not type_config.get("filter_values"):
         report.warning(f"{type_key}.filter_values", "not set; filter_column ignored")
     if type_config.get("filter_values") and not type_config.get("filter_column"):
         report.warning(f"{type_key}.filter_column", "not set; filter_values ignored")
+    if type_config.get("enabled", True) is False:
+        # Never loaded, so its file, pattern and level are not needed.
+        return
+    filename = type_config.get("filename")
+    if not filename:
+        report.problem(f"{type_key}.filename", "not set; type is enabled")
     if type_config.get("batch_mode") is True and filename:
         if not isinstance(filename, str):
             report.problem(

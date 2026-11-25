@@ -6,6 +6,7 @@ from .geographical_unit import GeographicalUnit
 from may.preflight.report import PreflightReport, not_list_message, not_mapping_message
 from may.utils import path_resolver as pr
 from may.utils.stacked_input import (
+    StackedInputError,
     as_path_list,
     check_path_spec,
     load_stacked_csv,
@@ -19,7 +20,16 @@ DEFAULT_DATA_DIR = "data/geography"
 
 
 class GeographyError(Exception):
-    """Raised when the `geography` config block is invalid. Mirrors HouseholdError."""
+    """Raised when the `geography` config block is invalid or its data cannot be loaded.
+    Mirrors HouseholdError."""
+
+
+def _code_text(value) -> str:
+    """A unit code as text, as written in the CSV: a whole float (6037.0, read so
+    because its column had a blank) is written 6037."""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
 
 
 @dataclass(frozen=True)
@@ -249,7 +259,10 @@ class Geography:
             hierarchy_file=geography_config.hierarchy_file,
             coord_files=geography_config.coord_files,
         )
-        geography.load_from_csv()
+        try:
+            geography.load_from_csv()
+        except (ValueError, StackedInputError) as error:
+            raise GeographyError(f"Geography data cannot be loaded: {error}") from error
         return geography
 
     def load_from_csv(self):
@@ -317,7 +330,7 @@ class Geography:
             # Codes are text (from YAML or a file); pandas may read the column
             # as numbers, so match on its text form.
             filter_codes = {str(code) for code in filter_names}
-            column_as_text = hierarchy_df[filter_level].astype(str)
+            column_as_text = hierarchy_df[filter_level].map(_code_text)
             original_size = len(hierarchy_df)
             hierarchy_df = hierarchy_df[column_as_text.isin(filter_codes)]
 

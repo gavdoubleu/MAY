@@ -39,13 +39,29 @@ def not_list_message(value) -> str:
     return f"must be a list; got {yaml_term} ({type(value).__name__})"
 
 
+BLANK_MESSAGE = "left blank; give its settings or remove the key"
+
+
+def config_entry(container, name, key, report):
+    """`container[name]`, `None` when absent. A key left blank in YAML is a problem and
+    reads as absent: the code that builds from the config reads it with `.get(name, {})`,
+    which gives `None` for a blank key, not the default."""
+    value = container.get(name)
+    if value is None and name in container:
+        report.problem(key, BLANK_MESSAGE)
+    return value
+
+
 @dataclass
 class PreflightReport:
     problems: List[Finding] = field(default_factory=list)
     warnings: List[Finding] = field(default_factory=list)
 
     def problem(self, key: str, message: str) -> None:
-        self.problems.append(Finding(key, message))
+        """Record a problem; an exact duplicate (one block checked by two stages) is dropped."""
+        finding = Finding(key, message)
+        if finding not in self.problems:
+            self.problems.append(finding)
 
     def warning(self, key: str, message: str) -> None:
         self.warnings.append(Finding(key, message))

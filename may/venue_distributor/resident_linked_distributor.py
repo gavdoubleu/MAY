@@ -3,6 +3,7 @@ import random
 import time
 from typing import Dict, List
 from may.preflight.context import check_geo_level
+from may.preflight.report import config_entry
 from .base_distributor import BaseDistributor, check_value
 from ._allocation import VenueAllocation
 
@@ -35,8 +36,9 @@ class ResidentLinkedDistributor(BaseDistributor):
             ))
         check_geo_level("geography_level", config.get("geography_level"), context, report)
         visitor_eligibility = cls._section(config, "visitor_eligibility", report)
+        filters_key = "visitor_eligibility.global_filters"
         cls._check_filters(
-            "visitor_eligibility.global_filters", visitor_eligibility.get("global_filters"), report
+            filters_key, config_entry(visitor_eligibility, "global_filters", filters_key, report), report
         )
 
     def __init__(self, config_file: str = None, config_dict: Dict = None):

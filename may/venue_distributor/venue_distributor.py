@@ -20,6 +20,7 @@ from .probability import (
     ProbabilityConfigError,
     probability_cache_key,
 )
+from may.preflight.report import config_entry
 from may.utils import path_resolver as pr
 from may.utils.attribute_access import get_attribute
 from may.utils.stacked_input import StackedInputError, as_path_list, load_stacked_csv
@@ -82,7 +83,7 @@ class VenueDistributor(BaseDistributor):
                      venue_selection.get("consider_by", "count"), CONSIDER_BY, report)
         fallback = cls._section(config, "fallback", report)
         check_value("fallback.strategy", fallback.get("strategy", "skip"), FALLBACK_STRATEGIES, report)
-        for position, case in cls._mappings("special_cases", config.get("special_cases"), report):
+        for position, case in cls._mappings("special_cases", config_entry(config, "special_cases", "special_cases", report), report):
             cls._check_special_case(f"special_cases[{position}]", case, report)
         priority = cls._section(cls._section(config, "eligibility", report), "priority_allocation", report)
         if priority.get("enabled", False):
@@ -122,7 +123,7 @@ class VenueDistributor(BaseDistributor):
         rule = cls._section(case, "allocation_rule", report)
         rule_key = f"{key}.allocation_rule"
         strategy = rule.get("strategy")
-        match_by = rule.get("match_by")
+        match_by = config_entry(rule, "match_by", f"{rule_key}.match_by", report)
         # Allocation reads `strategy` or `match_by`, never both.
         if strategy and match_by:
             report.problem(rule_key, "sets both 'strategy' and 'match_by'; only one is applied, choose one")
