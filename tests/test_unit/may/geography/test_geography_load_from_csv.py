@@ -10,6 +10,7 @@ import logging
 import os
 
 import pytest
+from may.preflight.context import ConfigContext
 
 from may.geography import Geography
 
@@ -284,7 +285,7 @@ def test_from_config_passes_levels_filter_and_files_through(four_level_geo_dir):
         "filter": {"level": "LGU", "codes": ["L_keep1", "L_keep2"]},
     }
 
-    geo = Geography.from_config(block)
+    geo = Geography.from_config(block, ConfigContext())
     assert geo.levels == LEVELS_4
     assert geo.filters == {"level": "LGU", "codes": ["L_keep1", "L_keep2"]}
 

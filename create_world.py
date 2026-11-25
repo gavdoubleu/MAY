@@ -12,6 +12,7 @@ from may.serialization import SerialisationError, WorldSerializer
 from may.world import World
 from may.social_networks import SocialNetworkBuilder
 from may.preflight.preflight_coordinator import run_preflight
+from may.preflight.context import ConfigContext
 from may.preflight.report import PreflightError
 from may.utils import path_resolver as pr
 from may.utils import build_profile as bp
@@ -130,7 +131,7 @@ def main(args=None):
     # Setup geography from config and command-line arguments
     with bp.stage("geography_load", "pipeline"):
         try:
-            geo = Geography.from_config(config.get("geography") or {})
+            geo = Geography.from_config(config.get("geography", {}), ConfigContext())
         except GeographyError as e:
             logger.error(f"Geography loading failed: {e}")
             sys.exit(1)

@@ -1,3 +1,4 @@
+from may.preflight.context import ConfigContext
 import pytest
 from may.geography import Geography
 
@@ -14,7 +15,7 @@ def test_from_config_builds_and_loads():
         }
     }
     
-    geo = Geography.from_config(config["geography"])
+    geo = Geography.from_config(config["geography"], ConfigContext())
 
     assert isinstance(geo, Geography), "from_config must return a Geography instance"
     assert geo.data_dir == "tests/test_data/micro_world/geography", "Geography data_dir not correctly set from config"

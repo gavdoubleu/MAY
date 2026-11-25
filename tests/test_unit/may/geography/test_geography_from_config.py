@@ -2,7 +2,9 @@ import logging
 
 import pytest
 
-from may.geography.geography import Geography, GeographyError
+from may.geography.geography import Geography, GeographyConfigError, GeographyError
+from may.preflight.config_stage import ConfigError
+from may.preflight.context import ConfigContext
 from may.utils import path_resolver
 
 LEVELS = ["SGU", "MGU", "LGU"]
@@ -49,34 +51,35 @@ def block_for(geography_dir, **overrides):
     return block
 
 
-def test_problems_raise_geography_error_with_every_line(working_dir, geography_dir):
+def test_problems_raise_geography_config_error_with_every_line(working_dir, geography_dir):
     block = block_for(geography_dir, coord_files={"BOGUS": "x.csv"})
     del block["levels"]
     del block["hierarchy_file"]
-    with pytest.raises(GeographyError) as raised:
-        Geography.from_config(block)
+    with pytest.raises(GeographyConfigError) as raised:
+        Geography.from_config(block, ConfigContext())
+    assert isinstance(raised.value, ConfigError) and isinstance(raised.value, GeographyError)
     message = str(raised.value)
-    assert message.startswith("Geography config has 3 problem(s):")
-    assert "levels" in message
-    assert "hierarchy_file" in message
-    assert "coord_files.BOGUS: not found" in message
+    assert message.startswith("Geography config cannot be used: 3 problems.")
+    assert "geography.levels" in message
+    assert "geography.hierarchy_file" in message
+    assert "geography.coord_files.BOGUS: not found" in message
     assert len(raised.value.report.problems) == 3
 
 
-def test_warnings_are_logged_at_info(working_dir, geography_dir, caplog):
+def test_warnings_are_logged_at_warning(working_dir, geography_dir, caplog):
     block = block_for(geography_dir, filter={"codes": ["L_keep"]})
-    with caplog.at_level(logging.INFO, logger="geography"):
-        Geography.from_config(block)
+    with caplog.at_level(logging.INFO, logger="may.geography.geography"):
+        Geography.from_config(block, ConfigContext())
     warning_records = [
-        record for record in caplog.records if "filter.level" in record.getMessage()
+        record for record in caplog.records if "geography.filter.level" in record.getMessage()
     ]
-    assert [record.levelno for record in warning_records] == [logging.INFO]
+    assert [record.levelno for record in warning_records] == [logging.WARNING]
     assert "filter ignored" in warning_records[0].getMessage()
 
 
 def test_builds_and_loads_filtered_units(working_dir, geography_dir):
     block = block_for(geography_dir, filter={"level": "LGU", "codes": ["L_keep"]})
-    geography = Geography.from_config(block)
+    geography = Geography.from_config(block, ConfigContext())
     assert geography.levels == LEVELS
     assert list(geography.get_units_by_level("LGU")) == ["L_keep"]
     assert len(geography.get_units_by_level("SGU")) == 2
@@ -87,7 +90,7 @@ def test_builds_and_loads_filtered_units(working_dir, geography_dir):
 def test_filter_file_in_data_dir_is_used(working_dir, geography_dir):
     (geography_dir / "keep.txt").write_text("# kept LGUs\nL_keep\n")
     block = block_for(geography_dir, filter={"level": "LGU", "file": "keep.txt"})
-    geography = Geography.from_config(block)
+    geography = Geography.from_config(block, ConfigContext())
     assert list(geography.get_units_by_level("LGU")) == ["L_keep"]
 
 
@@ -112,7 +115,7 @@ def test_numeric_inline_codes_match_numeric_units(working_dir, numeric_geography
     block = numeric_block_for(
         numeric_geography_dir, filter={"level": "LGU", "codes": [6037]}
     )
-    geography = Geography.from_config(block)
+    geography = Geography.from_config(block, ConfigContext())
     assert list(geography.get_units_by_level("LGU")) == [6037]
     assert len(geography.get_units_by_level("SGU")) == 2
 
@@ -122,7 +125,7 @@ def test_numeric_file_codes_match_numeric_units(working_dir, numeric_geography_d
     block = numeric_block_for(
         numeric_geography_dir, filter={"level": "LGU", "file": "keep.txt"}
     )
-    geography = Geography.from_config(block)
+    geography = Geography.from_config(block, ConfigContext())
     assert list(geography.get_units_by_level("LGU")) == [6037]
 
 
@@ -134,7 +137,7 @@ def test_numeric_codes_match_a_column_read_as_float(working_dir, numeric_geograp
     block = numeric_block_for(
         numeric_geography_dir, filter={"level": "LGU", "codes": [6037]}
     )
-    geography = Geography.from_config(block)
+    geography = Geography.from_config(block, ConfigContext())
     assert len(geography.get_units_by_level("LGU")) == 1
     assert len(geography.get_units_by_level("SGU")) == 2
 
@@ -142,13 +145,13 @@ def test_numeric_codes_match_a_column_read_as_float(working_dir, numeric_geograp
 def test_a_missing_hierarchy_file_raises_geography_error(working_dir, geography_dir):
     block = block_for(geography_dir, hierarchy_file="absent.csv")
     with pytest.raises(GeographyError, match="absent.csv"):
-        Geography.from_config(block)
+        Geography.from_config(block, ConfigContext())
 
 
 def test_filter_matching_no_units_raises(working_dir, geography_dir):
     block = block_for(geography_dir, filter={"level": "LGU", "codes": ["Nowhere"]})
     with pytest.raises(GeographyError, match="matched no LGU units") as raised:
-        Geography.from_config(block)
+        Geography.from_config(block, ConfigContext())
     assert "Nowhere" in str(raised.value)
 
 
@@ -157,7 +160,7 @@ def test_unmatched_filter_codes_are_warned(working_dir, geography_dir, caplog):
         geography_dir, filter={"level": "LGU", "codes": ["L_keep", "Nowhere"]}
     )
     with caplog.at_level(logging.WARNING, logger="geography"):
-        geography = Geography.from_config(block)
+        geography = Geography.from_config(block, ConfigContext())
     assert list(geography.get_units_by_level("LGU")) == ["L_keep"]
     warnings = [
         record.getMessage()

@@ -524,11 +524,21 @@ def geography_config(tmp_path, geography_block, distributor_yaml="venue_type: sc
     }, distributor_path
 
 
-@pytest.mark.parametrize("geography_block", [None, {}], ids=["absent", "empty"])
-def test_geography_is_always_checked(tmp_path, geography_block):
-    config, _ = geography_config(tmp_path, geography_block)
+@pytest.mark.parametrize("absent", [True, False], ids=["absent", "empty"])
+def test_geography_is_always_checked(tmp_path, absent):
+    config, _ = geography_config(tmp_path, {})
+    if absent:
+        del config["geography"]
     report = check_world_config(config)
     assert keys(report.problems) == ["geography.levels", "geography.hierarchy_file"]
+
+
+def test_blank_geography_is_problem(tmp_path):
+    config, _ = geography_config(tmp_path, None)
+    report = check_world_config(config)
+    assert [(finding.key, finding.message) for finding in report.problems] == [
+        ("geography", "left blank; give a value")
+    ]
 
 
 def test_geography_problems_are_prefixed_with_geography(tmp_path):
@@ -548,7 +558,7 @@ def test_geography_not_mapping_is_problem(tmp_path):
     config, _ = geography_config(tmp_path, ["SGU"])
     report = check_world_config(config)
     assert [(finding.key, finding.message) for finding in report.problems] == [
-        ("geography", "must be a mapping; got sequence (list)")
+        ("geography", "must be a mapping; got a list")
     ]
 
 

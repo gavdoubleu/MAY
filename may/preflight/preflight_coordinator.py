@@ -7,7 +7,7 @@ from may import timeline
 from may.geography.geography import Geography
 from may.geography.venue_manager import VenueConfig, VenueManager
 from may.population.population import PopulationManager
-from may.preflight.context import PreflightContext
+from may.preflight.context import ConfigContext, PreflightContext
 from may.preflight.report import PreflightError, PreflightReport, not_mapping_message
 from may.residence.household_distributor import HouseholdDistributor
 from may.preflight.venue_property_gaps import venue_property_gaps
@@ -19,7 +19,6 @@ logger = logging.getLogger("preflight")
 def check_world_config(config: dict) -> PreflightReport:
     """Check a whole world config without loading data. Pure: no logging, no raising."""
     block_report = PreflightReport()
-    geography_block = _mapping_block(config, "geography", block_report)
     venues_block = _mapping_block(config, "venues", block_report)
     population_block = _mapping_block(config, "population", block_report)
     serialization_block = _mapping_block(config, "serialization", block_report)
@@ -28,13 +27,11 @@ def check_world_config(config: dict) -> PreflightReport:
         if _has_residence_step(config)
         else None
     )
-    geography_config = None
     venue_config = None
     household_config = None
-    report = block_report
-    if geography_block is not None:
-        geography_config, geography_report = Geography.parse_config(geography_block)
-        report = PreflightReport.merge(report, geography_report.under("geography", sep="."))
+    # Temporary adapter until the coordinator is a context-driven driver (phase 11).
+    geography_config, geography_report = Geography.preflight(config.get("geography", {}), ConfigContext())
+    report = PreflightReport.merge(block_report, geography_report)
     geo_levels = frozenset(geography_config.levels) if geography_config is not None else None
     if population_block is not None:
         population_report = PopulationManager.preflight(population_block, geo_levels)

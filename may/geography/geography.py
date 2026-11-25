@@ -1,9 +1,10 @@
 import logging
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from .geographical_unit import GeographicalUnit
-from may.preflight.report import PreflightReport, not_list_message, not_mapping_message
+from may.preflight.config_reader import FAILED, ConfigReader
+from may.preflight.config_stage import ConfigError, ConfigStage
 from may.utils import path_resolver as pr
 from may.utils.stacked_input import StackedInputError, load_stacked_csv
 from may.utils.yaml_loader import unreadable_file_message
@@ -18,6 +19,10 @@ class GeographyError(Exception):
     Mirrors HouseholdError."""
 
 
+class GeographyConfigError(ConfigError, GeographyError):
+    """The `geography` config block cannot be used; `.report` holds the findings."""
+
+
 def _code_text(value) -> str:
     """A unit code as text, as written in the CSV: a whole float (6037.0, read so
     because its column had a blank) is written 6037."""
@@ -28,7 +33,7 @@ def _code_text(value) -> str:
 
 @dataclass(frozen=True)
 class GeographyConfig:
-    """Parsed `geography` config block; checked by `Geography.parse_config`.
+    """Parsed `geography` config block; read by `Geography.parse`.
 
     Paths are `${...}`-resolved. `filters` is `{"level", "codes"}`, or `None` to load all."""
 
@@ -39,107 +44,124 @@ class GeographyConfig:
     filters: Optional[dict]
 
 
-def _is_name(value) -> bool:
-    return isinstance(value, str) and bool(value)
+def check_geo_level(reader: ConfigReader, key, context):
+    """The geo level at `key`, when set, must be a name; a known one once the geography parsed.
+
+    Returns the level, `None` when absent, `FAILED` when it has a problem. Raises
+    `StageNotParsed` when the context has no geography: a caller's mistake."""
+    geography_config = context[Geography]
+    level = reader.name(key, default=None, give="a geo level name")
+    if level is None or level is FAILED or geography_config is None:
+        return level
+    if level not in geography_config.levels:
+        reader.problem(
+            f"unknown geo level {level!r}; expected one of {sorted(geography_config.levels)}", at=key
+        )
+        return FAILED
+    return level
 
 
-def _parse_data_dir(block: dict, report: PreflightReport) -> Optional[str]:
-    """Resolved data dir; a blank key falls back to the default. `None` if not a path."""
-    data_dir = block.get("data_dir")
-    if data_dir is not None and not isinstance(data_dir, str):
-        report.problem("data_dir", f"must be a path; got {data_dir!r}")
-        return None
-    return pr.resolve(data_dir or DEFAULT_DATA_DIR)
+def _parse_data_dir(reader: ConfigReader):
+    """Resolved data dir, default when absent; `FAILED` if not a path or empty."""
+    data_dir = reader.path("data_dir", default=DEFAULT_DATA_DIR)
+    if data_dir == "":
+        reader.problem("must not be empty; give a path, or remove the key to use the default", at="data_dir")
+        return FAILED
+    return data_dir
 
 
-def _parse_levels(block: dict, report: PreflightReport) -> Optional[list]:
-    """The level labels, or `None` with a problem; checks needing levels then skip."""
-    levels = block.get("levels")
+def _parse_levels(reader: ConfigReader):
+    """The level labels, or `FAILED` with a problem; checks needing levels then skip."""
+    noun = "a list of level names"
+    levels = reader.names("levels", give=noun)
+    if levels is FAILED:
+        return FAILED
+    if len(levels) != len(reader.value("levels")):
+        return FAILED  # a bad item, already reported at its position
     if not levels:
-        report.problem("levels", "not set")
-        return None
-    if not isinstance(levels, list) or not all(_is_name(level) for level in levels):
-        report.problem("levels", f"must be a list of level names; got {levels!r}")
-        return None
+        reader.problem(f"must not be empty; give {noun}", at="levels")
+        return FAILED
     duplicates = sorted({level for level in levels if levels.count(level) > 1})
     if duplicates:
-        report.problem("levels", f"duplicate level names: {duplicates}")
-        return None
+        reader.problem(f"duplicate level names: {duplicates}", at="levels")
+        return FAILED
     return levels
 
 
-def _parse_coord_files(block: dict, levels, data_dir, report: PreflightReport) -> dict:
+def _level_text(level):
+    """A level as written in `coord_files`: a whole number is read as text."""
+    return str(level) if isinstance(level, int) and not isinstance(level, bool) else level
+
+
+def _parse_coord_files(reader: ConfigReader, levels, data_dir) -> dict:
     """Paths per level; only levels listed are checked. A level absent has no coordinates."""
-    coord_files = block.get("coord_files")
-    if coord_files is None:
-        return {}
-    if not isinstance(coord_files, dict):
-        report.problem("coord_files", not_mapping_message(coord_files))
-        return {}
+    coord_reader = reader.section("coord_files", default={})
     coord_paths = {}
-    for level, spec in coord_files.items():
-        key = f"coord_files.{level}"
-        if levels is not None and level not in levels:
-            report.problem(key, f"not a configured level; levels are {levels}")
+    written_levels = coord_reader.keys()
+    if written_levels is FAILED:
+        return FAILED
+    for written_level in written_levels:
+        level = _level_text(written_level)
+        if levels is not FAILED and level not in levels:
+            coord_reader.problem(f"not a configured level; levels are {levels}", at=written_level)
             continue
-        coord_paths[level] = pr.check_data_files(report, key, spec, data_dir)
+        coord_paths[level] = coord_reader.data_file(
+            written_level, data_dir, give="a path or a list of paths"
+        )
     return coord_paths
 
 
-def _parse_filter(filter_block, levels, data_dir, report: PreflightReport) -> Optional[dict]:
+def _parse_filter(reader: ConfigReader, levels, data_dir) -> Optional[dict]:
     """`{"level", "codes"}`, or `None` to load all units (with any warning why)."""
-    if filter_block is None:
+    filter_reader = reader.section("filter", default=None)
+    if filter_reader is None or filter_reader.failed:
         return None
-    if not isinstance(filter_block, dict):
-        report.problem("filter", not_mapping_message(filter_block))
-        return None
-    level = filter_block.get("level")
-    if level is not None and levels is not None and level not in levels:
-        report.problem(
-            "filter.level", f"{level!r} is not a configured level; levels are {levels}"
-        )
-    inline_codes = filter_block.get("codes")
-    if inline_codes is not None and not isinstance(inline_codes, list):
-        report.problem("filter.codes", not_list_message(inline_codes))
-        return None
-    codes_file = filter_block.get("file")
-    if codes_file and inline_codes:
-        report.warning("filter.codes", "ignored; filter.file is set")
-    if codes_file:
-        codes = _read_filter_file(codes_file, data_dir, report)
+    level = filter_reader.name("level", default=None, give="a level name")
+    if isinstance(level, str) and levels is not FAILED and level not in levels:
+        filter_reader.problem(f"{level!r} is not a configured level; levels are {levels}", at="level")
+    inline_codes = filter_reader.names("codes", default=None, give="a list of unit codes")
+    codes_file = filter_reader.name("file", default=None, give="a path")
+    if isinstance(codes_file, str) and isinstance(inline_codes, list) and inline_codes:
+        filter_reader.warning("ignored; filter.file is set", at="codes")
+    if codes_file is FAILED:
+        codes = FAILED
+    elif codes_file is not None:
+        codes = _read_filter_file(filter_reader, codes_file, data_dir)
+    elif inline_codes is not None:
+        codes = inline_codes
     else:
-        # YAML reads numeric codes as numbers; unit names are strings.
-        codes = [str(code) for code in inline_codes or []]
-    if not level:
-        if codes_file or inline_codes:
-            report.warning("filter.level", "not set; filter ignored, loads all units")
+        codes = []
+    if level is FAILED or codes is FAILED:
         return None
-    if codes is None:
+    if level is None:
+        if codes_file is not None or codes:
+            filter_reader.warning("not set; filter ignored, loads all units", at="level")
         return None
     if not codes:
-        report.warning("filter", "level set but no codes; loads all units")
+        filter_reader.warning("level set but no codes; loads all units")
         return None
     return {"level": level, "codes": codes}
 
 
-def _read_filter_file(codes_file, data_dir, report: PreflightReport) -> Optional[list]:
-    """Sorted codes in the filter file, found in the working dir then `data_dir`."""
-    if not isinstance(codes_file, str):
-        report.problem("filter.file", f"must be a path; got {codes_file!r}")
-        return None
+def _read_filter_file(filter_reader: ConfigReader, codes_file: str, data_dir):
+    """Sorted codes in the filter file, found in the working dir then `data_dir`.
+
+    `FAILED` with a problem; `FAILED` with none when the data dir failed."""
+    if data_dir is FAILED:
+        return FAILED
     try:
         found_path = pr.find_config_file(codes_file, data_dir)
     except pr.ConfigFileNotFoundError as error:
-        report.problem("filter.file", str(error))
-        return None
+        filter_reader.problem(str(error), at="file")
+        return FAILED
     try:
         return sorted(Geography.load_codes_from_file(found_path))
     except (OSError, UnicodeDecodeError) as error:
-        report.problem("filter.file", unreadable_file_message(found_path, error))
-        return None
+        filter_reader.problem(unreadable_file_message(found_path, error), at="file")
+        return FAILED
 
 
-class Geography:
+class Geography(ConfigStage):
     """
     Main geography container. Loads and manages hierarchical geographical units.
     Generic implementation that works with any geography structure.
@@ -204,57 +226,37 @@ class Geography:
             stripped_lines = (line.strip() for line in codes_file)
             return {line for line in stripped_lines if line and not line.startswith("#")}
 
-    @staticmethod
-    def parse_config(block: dict) -> Tuple[Optional[GeographyConfig], PreflightReport]:
-        """Parse a `geography` config block. Config is `None` if any problem."""
-        report = PreflightReport()
-        data_dir = _parse_data_dir(block, report)
-        levels = _parse_levels(block, report)
-        hierarchy_file = block.get("hierarchy_file")
-        if hierarchy_file is None or hierarchy_file == "":
-            report.problem("hierarchy_file", "not set")
-        else:
-            hierarchy_file = pr.check_data_files(report, "hierarchy_file", hierarchy_file, data_dir)
-        coord_files = _parse_coord_files(block, levels, data_dir, report)
-        load_all = block.get("load_all", False)
-        if not isinstance(load_all, bool):
-            report.problem("load_all", f"must be true or false; got {load_all!r}")
+    display_name = "Geography"
+    config_error = GeographyConfigError
+    config_key = "geography"
+
+    @classmethod
+    def parse(cls, reader: ConfigReader, context) -> GeographyConfig:
+        """Read a `geography` block. Fields of a block with problems may be `FAILED`."""
+        data_dir = _parse_data_dir(reader)
+        levels = _parse_levels(reader)
+        hierarchy_file = reader.data_file("hierarchy_file", data_dir, give="a path or a list of paths")
+        coord_files = _parse_coord_files(reader, levels, data_dir)
+        load_all = reader.true_or_false("load_all", default=False)
         # `load_all: true` ignores the filter, silently, so it is not checked.
-        filters = None
-        if load_all is not True:
-            filters = _parse_filter(block.get("filter"), levels, data_dir, report)
-        if report.has_problems:
-            return None, report
-        geography_config = GeographyConfig(
+        filters = None if load_all is True else _parse_filter(reader, levels, data_dir)
+        return GeographyConfig(
             data_dir=data_dir,
             levels=levels,
             hierarchy_file=hierarchy_file,
             coord_files=coord_files,
             filters=filters,
         )
-        return geography_config, report
-
-    @staticmethod
-    def preflight(block: dict) -> PreflightReport:
-        """Check a `geography` config block without loading geography data."""
-        _, report = Geography.parse_config(block)
-        return report
 
     @classmethod
-    def from_config(cls, block: dict) -> "Geography":
-        """Build and load from a `geography` block; `GeographyError` on any problem."""
-        geography_config, report = cls.parse_config(block)
-        report.raise_if_problems(
-            GeographyError, f"Geography config has {len(report.problems)} problem(s):"
-        )
-        for finding in report.warnings:
-            logger.info(f"Geography config warning: {finding.key}: {finding.message}")
+    def build(cls, parsed: GeographyConfig) -> "Geography":
+        """Load the geography the parsed block names; `GeographyError` if its data cannot load."""
         geography = cls(
-            data_dir=geography_config.data_dir,
-            levels=geography_config.levels,
-            filters=geography_config.filters,
-            hierarchy_file=geography_config.hierarchy_file,
-            coord_files=geography_config.coord_files,
+            data_dir=parsed.data_dir,
+            levels=parsed.levels,
+            filters=parsed.filters,
+            hierarchy_file=parsed.hierarchy_file,
+            coord_files=parsed.coord_files,
         )
         try:
             geography.load_from_csv()

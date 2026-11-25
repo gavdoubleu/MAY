@@ -21,6 +21,7 @@ import numba as nb
 from pathlib import Path
 
 from may.geography import Geography, VenueManager
+from may.preflight.context import ConfigContext
 from may.population import PopulationManager
 from may.serialization import SerialisationConfig
 from may.world import World, setup_households
@@ -72,7 +73,7 @@ def create_world(config_path):
         config = yaml.safe_load(f)
 
     # Setup geography
-    geo = Geography.from_config(config.get("geography") or {})
+    geo = Geography.from_config(config.get("geography", {}), ConfigContext())
     logger.info(f"Geography loaded: {len(geo.get_all_units())} units")
 
     # Load venues
