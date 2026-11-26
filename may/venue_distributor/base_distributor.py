@@ -113,6 +113,9 @@ class BaseDistributor:
     @classmethod
     def _check_config(cls, config, config_path, context, report):
         """Checks every distributor shares; subclasses extend with their own schema."""
+        for key in ("settings", "allocation", "validation"):
+            cls._section(config, key, report)
+        cls._section(cls._section(config, "allocation", report), "capacity_handling", report)
         venue_selection = cls._section(config, "venue_selection", report)
         for key in ("venue_geo_level", "batch_geo_level"):
             check_geo_level(f"venue_selection.{key}", venue_selection.get(key), context, report)
