@@ -289,7 +289,7 @@ assignment_rules:
           strategy: "partnership"
           data_source: "pair_probabilities"
           partner_role: "primary_adult"
-          marginal_source: "geo_distribution"
+          marginal_data_source: "geo_distribution"
 
       # Extra adults: Independent assignment
       - role: "extra_adult"
@@ -315,7 +315,7 @@ assignment_rules:
             - when: {unique_count_at_least: 2}
               then: "M"
               note: "W+A=M, W+B=M, A+O=M, M+W=M, etc."
-          marginal_source: "geo_distribution"
+          marginal_data_source: "geo_distribution"
 
       # Elderly: Reverse inheritance from primary_adult (parents of adults)
       - role: "primary_elder"
@@ -334,7 +334,7 @@ assignment_rules:
               then:
                 strategy: "probabilistic"
                 data_source: "geo_distribution"
-          marginal_source: "geo_distribution"
+          marginal_data_source: "geo_distribution"
 
       - role: "secondary_elder"
         priority: 6
@@ -382,7 +382,7 @@ assignment_rules:
           strategy: "partnership"
           data_source: "pair_probabilities"
           partner_role: "primary_adult"
-          marginal_source: "geo_distribution"
+          marginal_data_source: "geo_distribution"
 
       # Primary elder: Use geo distribution
       - role: "primary_elder"
@@ -399,7 +399,7 @@ assignment_rules:
           strategy: "partnership"
           data_source: "pair_probabilities"
           partner_role: "primary_elder"
-          marginal_source: "geo_distribution"
+          marginal_data_source: "geo_distribution"
 
   # INDEPENDENTS (no inheritance, no partnership)
 

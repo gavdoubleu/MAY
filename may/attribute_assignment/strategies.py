@@ -11,9 +11,9 @@ logger = logging.getLogger("may.attribute_assignment.strategies")
 # failing loudly on any other.
 STRATEGY_ALLOWED_KEYS: Dict[str, set] = {
     "probabilistic": {"strategy", "data_source"},
-    "partnership": {"strategy", "data_source", "partner_role", "marginal_source"},
-    "inheritance": {"strategy", "inherit_from", "logic", "marginal_source"},
-    "reverse_inheritance": {"strategy", "inherit_from", "logic", "marginal_source"},
+    "partnership": {"strategy", "data_source", "partner_role", "marginal_data_source"},
+    "inheritance": {"strategy", "inherit_from", "logic", "marginal_data_source"},
+    "reverse_inheritance": {"strategy", "inherit_from", "logic", "marginal_data_source"},
     "probabilistic_conditions": {
         "strategy",
         "data_source",
@@ -314,17 +314,17 @@ class AssignmentStrategy:
 
         This is explicit primary logic for the defined case where a strategy has
         nothing to condition on (e.g. inheritance with no parent values). The
-        marginal source is named by `marginal_source`; absence of that key means
+        marginal source is named by `marginal_data_source`; absence of that key means
         the case is not expected and is a hard error.
         """
-        marginal_source = self.config.get("marginal_source")
-        if not marginal_source:
+        marginal_data_source = self.config.get("marginal_data_source")
+        if not marginal_data_source:
             self._fail(
                 person,
-                "no value to condition on and no 'marginal_source' configured",
+                "no value to condition on and no 'marginal_data_source' configured",
             )
         strat = ProbabilisticStrategy(
-            {"strategy": "probabilistic", "data_source": marginal_source},
+            {"strategy": "probabilistic", "data_source": marginal_data_source},
             self.data_manager,
         )
         return strat.assign(person, household, context)

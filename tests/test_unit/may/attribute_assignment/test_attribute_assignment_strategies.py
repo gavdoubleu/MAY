@@ -404,7 +404,7 @@ class TestPartnershipStrategy:
             "strategy": "partnership",
             "data_source": "pair_probabilities",
             "partner_role": "primary_adult",
-            "marginal_source": "geo_distribution",
+            "marginal_data_source": "geo_distribution",
         }
         strategy = PartnershipStrategy(config, dm)
         context = {"attribute_name": "ethnicity"}  # no partner
@@ -423,7 +423,7 @@ class TestPartnershipStrategy:
             "strategy": "partnership",
             "data_source": "pair_probabilities",
             "partner_role": "primary_adult",
-            "marginal_source": "geo_distribution",
+            "marginal_data_source": "geo_distribution",
         }
         strategy = PartnershipStrategy(config, dm)
         partner = MinimalPerson(properties={})  # no ethnicity
@@ -514,14 +514,14 @@ class TestInheritanceStrategy:
         {"when": {"unique_count_at_least": 2}, "then": "M"},
     ]
 
-    def _make_strategy(self, logic=None, marginal_source=None):
+    def _make_strategy(self, logic=None, marginal_data_source=None):
         config = {
             "strategy": "inheritance",
             "inherit_from": {"roles": ["primary_adult", "secondary_adult"]},
             "logic": logic if logic is not None else self.ETHNICITY_LOGIC,
         }
-        if marginal_source:
-            config["marginal_source"] = marginal_source
+        if marginal_data_source:
+            config["marginal_data_source"] = marginal_data_source
         dm = SimpleDataManager(sources={"geo_distribution": SimpleGeoSource(fallback={"W": 1.0})})
         return InheritanceStrategy(config, dm)
 
@@ -590,19 +590,19 @@ class TestInheritanceStrategy:
         result = strategy.assign(MinimalPerson(), MinimalVenue(), context)
         assert result == "O"
 
-    # --- No parents → marginal (or raise if no marginal_source) ---
+    # --- No parents → marginal (or raise if no marginal_data_source) ---
 
-    def test_no_parents_without_marginal_source_raises(self):
-        """No parent values and no marginal_source → loud failure."""
+    def test_no_parents_without_marginal_data_source_raises(self):
+        """No parent values and no marginal_data_source → loud failure."""
         strategy = self._make_strategy()
         context = self._make_context(None, None)
-        with pytest.raises(RuntimeError, match="marginal_source"):
+        with pytest.raises(RuntimeError, match="marginal_data_source"):
             strategy.assign(MinimalPerson(), MinimalVenue(), context)
 
     def test_parents_exist_but_unassigned_raises(self):
         """
         Parents are in context but their ethnicity property is missing.
-        No marginal_source → loud failure.
+        No marginal_data_source → loud failure.
         """
         strategy = self._make_strategy()
         primary = MinimalPerson(properties={})
@@ -612,7 +612,7 @@ class TestInheritanceStrategy:
             "primary_adult_person": primary,
             "secondary_adult_person": secondary,
         }
-        with pytest.raises(RuntimeError, match="marginal_source"):
+        with pytest.raises(RuntimeError, match="marginal_data_source"):
             strategy.assign(MinimalPerson(), MinimalVenue(), context)
 
     # --- Logic block edge cases ---
@@ -693,14 +693,14 @@ class TestReverseInheritanceStrategy:
         },
     ]
 
-    def _make_strategy(self, logic, marginal_source=None):
+    def _make_strategy(self, logic, marginal_data_source=None):
         config = {
             "strategy": "reverse_inheritance",
             "inherit_from": {"role": "primary_adult"},
             "logic": logic,
         }
-        if marginal_source:
-            config["marginal_source"] = marginal_source
+        if marginal_data_source:
+            config["marginal_data_source"] = marginal_data_source
         geo_source = SimpleGeoSource(fallback={"W": 0.5, "A": 0.3, "B": 0.2})
         dm = SimpleDataManager(sources={"geo_distribution": geo_source})
         return ReverseInheritanceStrategy(config, dm)
@@ -733,13 +733,13 @@ class TestReverseInheritanceStrategy:
         )
         assert result in {"W", "A", "B"}
 
-    # --- Nothing to condition on → marginal (or raise without marginal_source) ---
+    # --- Nothing to condition on → marginal (or raise without marginal_data_source) ---
 
     def test_marginal_when_child_role_not_in_context(self):
         """No child role present → assign from marginal source."""
         strategy = self._make_strategy(
             self.REVERSE_LOGIC_PRIMARY,
-            marginal_source="geo_distribution",
+            marginal_data_source="geo_distribution",
         )
         context = {"attribute_name": "ethnicity"}  # no primary_adult_person
 
@@ -754,7 +754,7 @@ class TestReverseInheritanceStrategy:
     def test_marginal_when_child_has_no_attribute(self):
         strategy = self._make_strategy(
             self.REVERSE_LOGIC_PRIMARY,
-            marginal_source="geo_distribution",
+            marginal_data_source="geo_distribution",
         )
         adult = MinimalPerson(properties={})  # no ethnicity
         context = {"attribute_name": "ethnicity", "primary_adult_person": adult}
@@ -978,13 +978,13 @@ class TestStrategyDispatch:
 
 class TestNoFallbackMechanism:
     def test_marginal_assign_uses_configured_source(self):
-        """A 'nothing to condition on' case samples from marginal_source."""
+        """A 'nothing to condition on' case samples from marginal_data_source."""
         geo_source = SimpleGeoSource(fallback={"Z": 1.0})
         config = {
             "strategy": "partnership",
             "data_source": "pair_probabilities",
             "partner_role": "primary_adult",
-            "marginal_source": "geo_distribution",
+            "marginal_data_source": "geo_distribution",
         }
         dm = SimpleDataManager(sources={"geo_distribution": geo_source})
         strategy = PartnershipStrategy(config, dm)
@@ -998,20 +998,20 @@ class TestNoFallbackMechanism:
         )
         assert result == "Z"
 
-    def test_no_marginal_source_raises(self):
-        """No marginal_source for a 'nothing to condition on' case → raise."""
+    def test_no_marginal_data_source_raises(self):
+        """No marginal_data_source for a 'nothing to condition on' case → raise."""
         config = {
             "strategy": "partnership",
             "data_source": "pair_probabilities",
             "partner_role": "primary_adult",
-            # no 'marginal_source' key
+            # no 'marginal_data_source' key
         }
         dm = SimpleDataManager(sources={"geo_distribution": SimpleGeoSource(fallback={"DEFAULT": 1.0})})
         strategy = PartnershipStrategy(config, dm)
 
         geo = MinimalGeoUnit("E00001234")
         context = {"attribute_name": "ethnicity"}
-        with pytest.raises(RuntimeError, match="marginal_source"):
+        with pytest.raises(RuntimeError, match="marginal_data_source"):
             strategy.assign(
                 MinimalPerson(geographical_unit=geo),
                 MinimalVenue(geographical_unit=geo),
