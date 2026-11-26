@@ -6,8 +6,9 @@ up front rather than crashing the export after the build has been paid for.
 """
 
 import logging
+import os
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Union
 
 from may.preflight.config_reader import FAILED, ConfigReader
 from may.preflight.report import PreflightReport
@@ -35,12 +36,12 @@ class SerialisationConfig:
     output_settings: Dict = field(default_factory=dict)
 
     @classmethod
-    def from_file(cls, path: str) -> "SerialisationConfig":
+    def from_file(cls, path: Union[str, os.PathLike]) -> "SerialisationConfig":
         """Find, load and parse a schema file; `SerialisationError` listing every problem.
 
         Findings are keyed `schema` (the file) and `schema (<found path>): <section>`."""
         report = PreflightReport()
-        file_reader = ConfigReader({"schema": path}, "", report).config_file("schema", data_dir=None)
+        file_reader = ConfigReader({}, "", report).root_config_file("schema", path)
         schema = parse_schema(file_reader)
         report.raise_if_problems(
             SerialisationError, f"Serialisation schema {path} cannot be used:"

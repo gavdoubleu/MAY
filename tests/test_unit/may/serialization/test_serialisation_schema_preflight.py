@@ -204,6 +204,12 @@ class TestFromFile:
         assert isinstance(parsed, SerialisationConfig)
         assert parsed.population_properties
 
+    def test_path_object_reads_as_its_text(self, tmp_path):
+        path = tmp_path / "schema.yaml"
+        path.write_text("population: {properties: [age_band]}\n")
+        parsed = SerialisationConfig.from_file(path)
+        assert parsed.population_properties == ["age_band"]
+
     def test_raises_listing_every_problem(self, tmp_path):
         path = tmp_path / "schema.yaml"
         path.write_text("population: [ethnicity]\noutput: {compression_level: high}\n")
