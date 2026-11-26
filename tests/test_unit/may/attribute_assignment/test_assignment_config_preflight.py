@@ -5,6 +5,7 @@ same ones, then builds from the loaded mapping without reading the file again.
 """
 import builtins
 import glob
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -91,6 +92,15 @@ def test_a_valid_file_gives_its_mapping_and_found_path(tmp_path):
 
     assert parsed.config_path == path
     assert parsed.config_mapping["attributes"] == [{"name": "ethnicity"}]
+
+
+def test_a_path_object_reads_as_its_text(tmp_path):
+    path = write(tmp_path, valid_config(tmp_path))
+
+    parsed, report = AttributeAssignmentConfig.preflight(Path(path), KNOWN_GEOGRAPHY, key_path=KEY_PATH)
+
+    assert report.problems == []
+    assert parsed.config_path == path
 
 
 def test_a_missing_file_is_a_problem_at_the_naming_key(tmp_path):

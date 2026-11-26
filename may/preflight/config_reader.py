@@ -13,6 +13,7 @@ reader whose reads return `FAILED` and record nothing, so one mistake gives one 
 """
 
 import copy
+import os
 
 import yaml
 
@@ -287,10 +288,13 @@ class ConfigReader:
 
     def root_config_file(self, key_path: str, written_path, give=None) -> "ConfigReader":
         """Reader over the YAML file `written_path` names, as if read by `config_file` at
-        absolute `key_path`: the path written as a step's whole config. Same report and data dir."""
+        absolute `key_path`: the path written as a step's whole config. Same report and data dir.
+        A `Path` from code is taken as its text; a config value must be text."""
         if written_path is None:
             self._record(key_path, f"left blank; give {give or _DEFAULT_NOUN}")
             return self._reader_at(_INERT, key_path)
+        if isinstance(written_path, os.PathLike):
+            written_path = os.fspath(written_path)
         written_path = self._to_name(written_path, key_path, give or _DEFAULT_NOUN)
         return self._file_reader(key_path, written_path, self._data_dir)
 

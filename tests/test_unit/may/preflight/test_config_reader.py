@@ -630,6 +630,26 @@ def test_root_config_file_missing_file_is_one_problem_at_the_key_path(tmp_path):
     assert problems(report) == [("step.config", f"not found; tried {path}")]
 
 
+def test_root_config_file_reads_a_path_object_as_its_text(tmp_path):
+    write(tmp_path / "step.yaml", "k: 1\n")
+    found = str(tmp_path / "step.yaml")
+    reader, report = reader_over({}, key_path="")
+    step = reader.root_config_file("step.config", tmp_path / "step.yaml")
+    assert step.key_path == f"step.config ({found})"
+    assert step.found_path == found
+    assert step.whole_number("k") == 1
+    assert problems(report) == []
+
+
+def test_path_object_as_a_config_value_is_not_text(tmp_path):
+    write(tmp_path / "step.yaml", "k: 1\n")
+    reader, report = reader_over({"config": tmp_path / "step.yaml", "name": tmp_path})
+    assert reader.config_file("config").failed
+    assert reader.name("name") is FAILED
+    assert [key for key, _ in problems(report)] == ["block.config", "block.name"]
+    assert all(message.startswith("must be text; got PosixPath(") for _, message in problems(report))
+
+
 @pytest.mark.parametrize(
     "written, message",
     [
