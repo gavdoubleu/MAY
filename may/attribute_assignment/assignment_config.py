@@ -1033,6 +1033,16 @@ def _check_config(reader, context):
     venue_rules = reader.items("venue_assignment_rules", default=None)
     for rule in [] if venue_rules is None or venue_rules is FAILED else venue_rules:
         _forward(rule, _assignment_problems(rule, source_names))
+    _check_household_matching(reader)
+
+
+def _check_household_matching(reader):
+    """`roles` and `household_structures` are mappings of mappings; each structure's
+    `matching_rules` a list of mappings."""
+    reader.entries("roles", default={})
+    structure_readers = reader.entries("household_structures", default={})
+    for structure in [] if structure_readers is FAILED else structure_readers.values():
+        structure.items("matching_rules", default=None)
 
 
 def _check_attributes(reader):

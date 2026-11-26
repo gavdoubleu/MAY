@@ -749,10 +749,13 @@ def _blank(config, path):
 @pytest.mark.parametrize("path", [
     "step", "required_attributes", "data_sources", "assignment_rules",
     "assignment_rules.Family.rules", "venue_assignment_rules",
+    "roles", "household_structures", "household_structures.Family.matching_rules",
 ])
 def test_a_section_left_blank_is_one_problem(tmp_path, path):
     config = valid_config(tmp_path)
     config.setdefault("venue_assignment_rules", [])
+    config["roles"] = {"primary_adult": {"subsets": ["adult"]}}
+    config["household_structures"] = {"Family": {"matching_rules": [{"actual": ["A*"]}]}}
     _blank(config, path)
 
     report = preflight(tmp_path, config)
@@ -766,3 +769,18 @@ def test_a_blank_data_source_files_list_is_a_problem(tmp_path):
     config["data_sources"]["pair"]["files"] = None
 
     assert keys(preflight(tmp_path, config).problems) == ["data_sources.pair.files"]
+
+
+@pytest.mark.parametrize("key", ["roles", "household_structures"])
+def test_roles_or_household_structures_not_a_mapping_is_a_problem(tmp_path, key):
+    config = valid_config(tmp_path)
+    config[key] = ["primary_adult"]
+
+    assert keys(preflight(tmp_path, config).problems) == [key]
+
+
+def test_a_matching_rule_that_is_not_a_mapping_is_a_problem(tmp_path):
+    config = valid_config(tmp_path)
+    config["household_structures"] = {"Family": {"matching_rules": ["A*"]}}
+
+    assert keys(preflight(tmp_path, config).problems) == ["household_structures.Family.matching_rules[1]"]
