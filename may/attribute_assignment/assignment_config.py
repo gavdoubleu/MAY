@@ -1167,21 +1167,30 @@ def _check_role_references(rule, report):
             ))
 
 
+def _source_references(assignment, key="assignment"):
+    """Every source reference in an assignment as (key path, block, block key): its
+    `data_source` and `marginal_data_source`, and each `logic[].then.data_source`."""
+    references = [
+        (f"{key}.{block_key}", assignment, block_key)
+        for block_key in ("data_source", "marginal_data_source") if block_key in assignment
+    ]
+    for position, entry in enumerate(_mappings_in(assignment.get("logic")), start=1):
+        then = entry.get("then")
+        if isinstance(then, dict) and "data_source" in then:
+            references.append((f"{key}.logic[{position}].then.data_source", then, "data_source"))
+    return references
+
+
 def _assignment_problems(assignment, source_names):
-    """Problems in one assignment block, keyed from its rule, and that each `data_source`
-    it names is declared; a whole-number source name is read as text."""
+    """Problems in one assignment block, keyed from its rule, and that each source
+    reference names a declared data source; a whole-number source name is read as text."""
     report = PreflightReport()
     key = "assignment"
     validate_assignment_config(assignment, report, key)
     if report.has_problems or source_names is None:
         return report
-    named_sources = [(f"{key}.data_source", assignment.get("data_source"))]
-    for position, entry in enumerate(assignment.get("logic") or [], start=1):
-        then = entry.get("then")
-        if isinstance(then, dict):
-            named_sources.append((f"{key}.logic[{position}].then.data_source", then.get("data_source")))
-    for source_key, source_name in named_sources:
-        source_name = _text_if_whole_number(source_name)
+    for source_key, block, block_key in _source_references(assignment, key):
+        source_name = _text_if_whole_number(block[block_key])
         if source_name is not None and not isinstance(source_name, str):
             report.problem(source_key, f"must be a data source name; got {source_name!r}")
         elif source_name is not None and source_name not in source_names:
@@ -1225,8 +1234,6 @@ def _with_names_as_text(config):
             _text_if_whole_number(name): source for name, source in config["data_sources"].items()
         }
     for assignment in _assignments(config):
-        logic = _mappings_in(assignment.get("logic"))
-        for block in [assignment] + [entry["then"] for entry in logic if isinstance(entry.get("then"), dict)]:
-            if "data_source" in block:
-                block["data_source"] = _text_if_whole_number(block["data_source"])
+        for _, block, block_key in _source_references(assignment):
+            block[block_key] = _text_if_whole_number(block[block_key])
     return config

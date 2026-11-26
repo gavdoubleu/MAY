@@ -342,6 +342,44 @@ def test_an_undeclared_data_source_is_a_problem(tmp_path):
     assert "['geo', 'pair']" in report.problems[0].message
 
 
+PARTNER_KEY = "assignment_rules.Family.rules[2].assignment"
+
+
+def partner_assignment(config):
+    return config["assignment_rules"]["Family"]["rules"][1]["assignment"]
+
+
+def test_an_undeclared_marginal_data_source_is_a_problem(tmp_path):
+    config = valid_config(tmp_path)
+    partner_assignment(config)["marginal_data_source"] = "goe"
+
+    report = preflight(tmp_path, config)
+
+    assert keys(report.problems) == [f"{PARTNER_KEY}.marginal_data_source"]
+    assert "['geo', 'pair']" in report.problems[0].message
+
+
+@LIST_OR_MAPPING
+def test_a_marginal_data_source_that_is_a_list_or_mapping_is_a_problem(tmp_path, value):
+    config = valid_config(tmp_path)
+    partner_assignment(config)["marginal_data_source"] = value
+
+    assert keys(preflight(tmp_path, config).problems) == [f"{PARTNER_KEY}.marginal_data_source"]
+
+
+def test_whole_number_marginal_data_source_is_read_as_text(tmp_path):
+    config = valid_config(tmp_path)
+    config["data_sources"][2021] = config["data_sources"].pop("geo")
+    first_assignment(config)["data_source"] = 2021
+    partner_assignment(config)["marginal_data_source"] = 2021
+    path = write(tmp_path, config)
+
+    parsed, report = AttributeAssignmentConfig.preflight(path, KNOWN_GEOGRAPHY, key_path=KEY_PATH)
+
+    assert report.problems == []
+    assert partner_assignment(parsed.config_mapping)["marginal_data_source"] == "2021"
+
+
 def test_a_venue_assignment_rule_is_checked(tmp_path):
     config = valid_config(tmp_path)
     config["venue_assignment_rules"] = [{"venue_type": "care_home", "assignment": {"strategy": "nope"}}]
