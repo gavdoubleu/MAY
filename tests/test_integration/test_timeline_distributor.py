@@ -70,7 +70,6 @@ from may.venue_distributor.venue_distributor import VenueDistributor
 from may.venue_distributor.property_matching_distributor import PropertyMatchingDistributor
 from may.venue_distributor.multi_venue_distributor import MultiVenueDistributor
 from may.venue_distributor.resident_linked_distributor import ResidentLinkedDistributor
-from may.venue_distributor import distributor_from_yaml
 
 class MockVenue:
     def __init__(self, id, type, name, lat, lon):

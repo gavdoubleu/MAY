@@ -1,6 +1,6 @@
 import logging
 from typing import Dict
-from .base_distributor import BaseDistributor
+from .base_distributor import BaseDistributor, check_venue_type
 
 logger = logging.getLogger("property_matching_distributor")
 
@@ -17,21 +17,18 @@ class PropertyMatchingDistributor(BaseDistributor):
     REQUIRED_KEYS = ("mapping_key", "venue_property", "activity_name")
 
     @classmethod
-    def _check_config(cls, config, config_path, context, report):
-        super()._check_config(config, config_path, context, report)
+    def check_config(cls, reader, context):
+        super().check_config(reader, context)
         for key in cls.REQUIRED_KEYS:
-            if not config.get(key):
-                report.problem(key, "not set; there is no default")
+            reader.name(key)
         # Unset means 'household', which a residence block, not the venues config, may supply.
-        target_venue_type = config.get("target_venue_type")
-        if isinstance(target_venue_type, list):
-            for position, venue_type in enumerate(target_venue_type, start=1):
-                cls._check_venue_type(f"target_venue_type[{position}]", venue_type, report)
-        elif target_venue_type is not None:
-            cls._check_venue_type("target_venue_type", target_venue_type, report)
+        if isinstance(reader.value("target_venue_type"), list):
+            reader.names("target_venue_type")
+        else:
+            check_venue_type(reader, "target_venue_type", default="household")
 
-    def __init__(self, config_file: str = None, config_dict: Dict = None):
-        super().__init__(config_file, config_dict)
+    def __init__(self, config_dict: Dict, config_path=None):
+        super().__init__(config_dict, config_path)
 
         # Configuration
         target_type = self.config.get("target_venue_type", "household")

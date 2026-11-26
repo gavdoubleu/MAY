@@ -5,12 +5,11 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from scipy.spatial import cKDTree
 import logging
-from may.preflight.config_file import load_config_mapping
-from may.preflight.context import PreflightContext, check_geo_level
-from may.preflight.report import PreflightReport, config_entry, not_list_message, not_mapping_message
+from may.geography.geography import check_geo_level
+from may.preflight.config_reader import FAILED
+from may.preflight.config_stage import ConfigError
 from may.utils import path_resolver as pr
 from may.utils.attribute_access import _compile_attribute, get_attribute
-from may.utils.yaml_loader import load_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -22,12 +21,29 @@ _INTEGER_SLOT_ATTRIBUTES = frozenset({"age", "residence.id"})
 FILTER_TYPES = ("numerical", "categorical")
 
 
-def check_value(key, value, allowed, report):
-    """A closed-vocabulary value: anything outside `allowed` is a problem naming the valid ones.
+def each(readers):
+    """The readers an `items` read gave: none when absent or failed."""
+    return [] if readers is None or readers is FAILED else readers
 
-    A list or mapping is tested first, as it cannot be looked up in a set."""
-    if isinstance(value, (list, dict)) or value not in allowed:
-        report.problem(key, f"unknown value {value!r}; expected one of {sorted(allowed)}")
+
+def check_filters(filter_readers, name_key="attribute", default_type="numerical"):
+    """Each filter names what it reads and has a `type` the filtering code applies;
+    `default_type=None` makes `type` required."""
+    for rule in each(filter_readers):
+        rule.name(name_key, give="the attribute the filter reads")
+        if default_type is None:
+            rule.one_of("type", FILTER_TYPES)
+        else:
+            rule.one_of("type", FILTER_TYPES, default=default_type)
+
+
+def check_venue_type(reader, key, default=None):
+    """A venue type a distributor names: a name. Any name is accepted, since steps
+    (residence allocation, routes, child creators, ...) create venue types at runtime.
+    Required unless `default` is given."""
+    if default is None:
+        return reader.name(key, give="a venue type name")
+    return reader.name(key, default=default, give="a venue type name")
 
 
 def resolve_data_path(file_path, config_path):
@@ -44,7 +60,7 @@ def resolve_data_path(file_path, config_path):
     return str(full_path)
 
 
-class DistributorConfigError(ValueError):
+class DistributorConfigError(ConfigError, ValueError):
     """A distributor config cannot be built; the message lists every problem."""
 
 
@@ -54,23 +70,18 @@ class BaseDistributor:
     for configuration, spatial queries, and geographic management.
     """
 
-    def __init__(self, config_file: str = None, config_dict: Dict = None):
+    def __init__(self, config_dict: Dict, config_path=None):
         """
-        Initialize BaseDistributor.
+        Initialise BaseDistributor from a parsed config mapping; reads no file.
 
         Args:
-            config_file: Path to YAML config file
-            config_dict: Dictionary config (alternative to file)
+            config_dict: The distributor config mapping
+            config_path: Where the config file was found, for data paths written relative to it
         """
-        if config_file:
-            config_file = pr.resolve(str(config_file))
-            self.config = load_yaml(config_file)
-            self.config_path = Path(config_file)
-        elif config_dict:
-            self.config = config_dict
-            self.config_path = None
-        else:
-            raise ValueError("Must provide either config_file or config_dict")
+        if config_dict is None:
+            raise ValueError("Must provide config_dict")
+        self.config = config_dict
+        self.config_path = Path(config_path) if config_path is not None else None
 
         self.verbose = self.config.get("settings", {}).get("verbose", False)
 
@@ -97,108 +108,21 @@ class BaseDistributor:
         self.attribute_mappings = {}  # attr_name -> {value: int_index}
 
     @classmethod
-    def parse_config(cls, config_path, context=None):
-        """Parse a distributor YAML into its config mapping, or `None` if any problem.
-
-        `context`, when given, holds the venue types and geo levels known to this step."""
-        report = PreflightReport()
-        config = load_config_mapping(config_path, report)
-        if config is None:
-            return None, report
-        cls._check_config(config, config_path, context or PreflightContext(), report)
-        if report.has_problems:
-            return None, report
-        return config, report
-
-    @classmethod
-    def _check_config(cls, config, config_path, context, report):
-        """Checks every distributor shares; subclasses extend with their own schema."""
-        for key in ("settings", "allocation", "validation"):
-            cls._section(config, key, report)
-        cls._section(cls._section(config, "allocation", report), "capacity_handling", report)
-        venue_selection = cls._section(config, "venue_selection", report)
+    def check_config(cls, reader, context):
+        """Checks every distributor shares, recorded through `reader`; subclasses extend
+        with their own schema. Each section the constructor reads with `.get` must be a mapping."""
+        for key in ("settings", "validation"):
+            reader.section(key, default={})
+        reader.section("allocation", default={}).section("capacity_handling", default={})
+        venue_selection = reader.section("venue_selection", default={})
         for key in ("venue_geo_level", "batch_geo_level"):
-            check_geo_level(f"venue_selection.{key}", venue_selection.get(key), context, report)
-        eligibility = cls._section(config, "eligibility", report)
-        cls._check_filters(
-            "eligibility.global_filters",
-            config_entry(eligibility, "global_filters", "eligibility.global_filters", report), report,
-        )
-        cls._check_filters(
-            "eligibility.attributes",
-            config_entry(eligibility, "attributes", "eligibility.attributes", report), report,
-            name_key="name", default_type=None,
-        )
-        priority = config_entry(eligibility, "priority_allocation", "eligibility.priority_allocation", report)
-        if isinstance(priority, dict):
-            groups = config_entry(priority, "groups", "eligibility.priority_allocation.groups", report)
-            for position, group in cls._mappings("eligibility.priority_allocation.groups", groups, report):
-                filters_key = f"eligibility.priority_allocation.groups[{position}].filters"
-                cls._check_filters(filters_key, config_entry(group, "filters", filters_key, report), report)
-        elif priority is not None:
-            report.problem("eligibility.priority_allocation", not_mapping_message(priority))
-
-    @staticmethod
-    def _mappings(key, items, report):
-        """`(position, item)` for each mapping in a list, counted from 1; anything else is a problem."""
-        if items is None:
-            return []
-        if not isinstance(items, list):
-            report.problem(key, not_list_message(items))
-            return []
-        mappings = []
-        for position, item in enumerate(items, start=1):
-            if isinstance(item, dict):
-                mappings.append((position, item))
-            else:
-                report.problem(f"{key}[{position}]", not_mapping_message(item))
-        return mappings
-
-    @classmethod
-    def _check_filters(cls, key, filters, report, name_key="attribute", default_type="numerical"):
-        """Each filter names what it reads and has a `type` the filtering code applies."""
-        for position, rule in cls._mappings(key, filters, report):
-            rule_key = f"{key}[{position}]"
-            if not rule.get(name_key):
-                report.problem(f"{rule_key}.{name_key}", "not set")
-            rule_type = rule.get("type", default_type)
-            if rule_type not in FILTER_TYPES:
-                report.problem(f"{rule_key}.type", (
-                    f"unknown filter type {rule_type!r}; expected one of {list(FILTER_TYPES)}"
-                ))
-
-    @staticmethod
-    def _section(config, key, report):
-        """The mapping under `key`, `{}` when absent; a blank or non-mapping is a problem and reads as `{}`."""
-        section = config_entry(config, key, key, report)
-        if section is None:
-            return {}
-        if not isinstance(section, dict):
-            report.problem(key, not_mapping_message(section))
-            return {}
-        return section
-
-    @staticmethod
-    def _check_venue_type(key, venue_type, report):
-        """A venue type a distributor names: set and a name. Any name is accepted, since
-        steps (residence allocation, routes, child creators, ...) create venue types at runtime."""
-        if venue_type is None or venue_type == "":
-            report.problem(key, "not set; there is no default")
-        elif not isinstance(venue_type, str):
-            report.problem(key, f"must be a venue type name; got {venue_type!r}")
-
-    @classmethod
-    def preflight(cls, config_path, context):
-        """Check a distributor YAML without building anything."""
-        _, report = cls.parse_config(config_path, context)
-        return report
-
-    @classmethod
-    def from_config(cls, config_path, world_config=None):
-        """Build from a distributor YAML; `DistributorConfigError` on any problem."""
-        _, report = cls.parse_config(config_path)
-        report.raise_if_problems(DistributorConfigError, f"Distributor config {config_path} cannot be used.")
-        return cls(config_path)
+            check_geo_level(venue_selection, key, context)
+        eligibility = reader.section("eligibility", default={})
+        check_filters(eligibility.items("global_filters", default=None))
+        check_filters(eligibility.items("attributes", default=None), name_key="name", default_type=None)
+        priority = eligibility.section("priority_allocation", default={})
+        for group in each(priority.items("groups", default=None)):
+            check_filters(group.items("filters", default=None))
 
     def _pre_process_filters(self, filters: List[Dict]) -> List[Dict]:
         """Pre-process filters to avoid repeated path parsing."""

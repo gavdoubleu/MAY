@@ -2,7 +2,6 @@
 import logging
 import os
 from dataclasses import dataclass
-from types import SimpleNamespace
 from typing import Any
 
 from may.attribute_assignment import AttributeAssignmentConfig, AttributeAssignmentError
@@ -15,7 +14,7 @@ from may.residence.household_distributor import HouseholdError
 from may.utils import build_profile as bp
 from may.utils import path_resolver as pr
 from may.venue_child_creator import VenueChildCreator, VenueChildCreatorError
-from may.venue_distributor import DistributorConfigError, distributor_from_yaml, distributor_preflight
+from may.venue_distributor import DistributorConfigError, DistributorStep
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +40,6 @@ class TimelineStep:
     config_hint: str = ""
 
 
-# The distributor step dispatches on `distributor_type`, so its owner is a pair of
-# module functions rather than one class.
-_DISTRIBUTOR = SimpleNamespace(preflight=distributor_preflight, from_config=distributor_from_yaml)
-
-
 TIMELINE_STEPS = {
     "residence_allocation": TimelineStep(
         step_class=AllocationStrategy,
@@ -59,7 +53,7 @@ TIMELINE_STEPS = {
         expected_errors=(AttributeAssignmentError,),
     ),
     "distributor": TimelineStep(
-        step_class=_DISTRIBUTOR,
+        step_class=DistributorStep,
         run="allocate",
         expected_errors=(DistributorConfigError,),
     ),

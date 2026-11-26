@@ -1,12 +1,12 @@
 """
-`SocialContactVisitDistributor.preflight` reports every problem in a social contact visit
-YAML without building anything; `from_config` parses the same way and raises on the same problems.
+`SocialContactVisitDistributor.check_config` records every problem in a social contact visit
+YAML without building anything; `DistributorStep.from_config` raises on the same problems, then builds it.
 """
 import pytest
 
-from may.preflight.context import PreflightContext
 from may.venue_distributor import DistributorConfigError
 from may.venue_distributor.social_contact_visit_distributor import SocialContactVisitDistributor
+from tests.test_unit.may.venue_distributor.distributor_checks import check_config, from_config, keys, write
 
 VALID = (
     "distributor_type: social_contact_visit\n"
@@ -16,18 +16,8 @@ VALID = (
 )
 
 
-def keys(findings):
-    return [finding.key for finding in findings]
-
-
-def write(tmp_path, text, name="distributor.yaml"):
-    path = tmp_path / name
-    path.write_text(text)
-    return str(path)
-
-
 def preflight(path):
-    return SocialContactVisitDistributor.preflight(path, PreflightContext())
+    return check_config(SocialContactVisitDistributor, path)
 
 
 def test_a_valid_file_has_no_findings(tmp_path):
@@ -75,18 +65,21 @@ def test_several_problems_in_one_file_are_all_reported(tmp_path):
     assert sorted(keys(report.problems)) == ["eligibility.global_filters[1].attribute", "max_contacts", "source"]
 
 
+TYPE_LINE = "distributor_type: social_contact_visit\n"
+
+
 @pytest.mark.parametrize("text", [
     "",
-    "source: social_contacts\n",
-    "max_contacts: 0\n",
-    "eligibility:\n  global_filters:\n    - attribute: age\n",
+    TYPE_LINE + "source: social_contacts\n",
+    TYPE_LINE + "max_contacts: 0\n",
+    TYPE_LINE + "eligibility:\n  global_filters:\n    - attribute: age\n",
 ], ids=["empty", "source", "max_contacts", "no_condition"])
 def test_from_config_raises_where_preflight_reports_a_problem(tmp_path, text):
     path = write(tmp_path, text)
     report = preflight(path)
 
     with pytest.raises(DistributorConfigError) as excinfo:
-        SocialContactVisitDistributor.from_config(path, {})
+        from_config(path)
 
     assert report.problems
     for finding in report.problems:
@@ -94,6 +87,6 @@ def test_from_config_raises_where_preflight_reports_a_problem(tmp_path, text):
 
 
 def test_from_config_builds_a_valid_file(tmp_path):
-    distributor = SocialContactVisitDistributor.from_config(write(tmp_path, VALID), {})
+    distributor = from_config(write(tmp_path, VALID))
 
     assert distributor.max_contacts == 5

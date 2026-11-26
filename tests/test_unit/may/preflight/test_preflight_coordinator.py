@@ -533,7 +533,7 @@ def test_step_naming_unknown_geo_level_is_problem(tmp_path):
     config, distributor_path = geography_config(tmp_path, VALID_GEOGRAPHY, UNKNOWN_LEVEL_DISTRIBUTOR)
     report = check_world_config(config)
     assert keys(report.problems) == [
-        f"timeline.steps[1] ({distributor_path}): venue_selection.venue_geo_level"
+        f"timeline.steps[1].config ({distributor_path}): venue_selection.venue_geo_level"
     ]
     assert "['MGU', 'SGU']" in report.problems[0].message
 

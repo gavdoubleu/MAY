@@ -1,15 +1,16 @@
 """
-`RouteDistributor.preflight` reports every problem in a route distributor YAML without
-building anything; `from_config` parses the same way and raises on the same problems.
+`RouteDistributor.check_config` records every problem in a route distributor YAML without
+building anything; `DistributorStep.from_config` raises on the same problems, then builds it.
 """
 import glob
 
 import pytest
 
-from may.preflight.context import PreflightContext
 from may.utils import path_resolver as pr
 from may.venue_distributor import DistributorConfigError
 from may.venue_distributor.route_distributor import RouteDistributor
+from tests.test_unit.may.config_contexts import geography_context
+from tests.test_unit.may.venue_distributor.distributor_checks import UNKNOWN_GEOGRAPHY, check_config, from_config, keys, write
 
 SOURCES = (
     "origin_source:\n  type: ancestor\n  from: geographical_unit\n  level: MGU\n"
@@ -20,21 +21,11 @@ POOL = (
     "  min_duration_min: 5\n  max_duration_min: 60\n"
 )
 VALID = "distributor_type: route\nleg_venue_type: bus_line\n" + SOURCES + POOL
-KNOWN_GEOGRAPHY = PreflightContext(geo_levels=frozenset({"SGU", "MGU", "LGU"}))
+KNOWN_GEOGRAPHY = geography_context(levels=("SGU", "MGU", "LGU"))
 
 
-def keys(findings):
-    return [finding.key for finding in findings]
-
-
-def write(tmp_path, text, name="distributor.yaml"):
-    path = tmp_path / name
-    path.write_text(text)
-    return str(path)
-
-
-def preflight(path, context=PreflightContext()):
-    return RouteDistributor.preflight(path, context)
+def preflight(path, context=UNKNOWN_GEOGRAPHY):
+    return check_config(RouteDistributor, path, context)
 
 
 def table(tmp_path, extra=""):
@@ -127,7 +118,7 @@ def test_an_unknown_source_type_is_a_problem(tmp_path):
     report = preflight(write(tmp_path, text))
 
     assert keys(report.problems) == ["destination_source.type"]
-    assert "expected one of" in report.problems[0].message
+    assert "must be one of" in report.problems[0].message
 
 
 def test_a_source_that_is_not_a_mapping_is_a_problem(tmp_path):
@@ -161,7 +152,7 @@ def scenario_roots():
 def test_shipped_route_configs_pass(path, scenario_roots):
     scenario_roots("data")
 
-    assert RouteDistributor.preflight(path, PreflightContext()).problems == []
+    assert check_config(RouteDistributor, path).problems == []
 
 
 @pytest.mark.parametrize("text", [
@@ -172,10 +163,10 @@ def test_shipped_route_configs_pass(path, scenario_roots):
 ], ids=["empty", "pool_speed", "catchment", "missing_table"])
 def test_from_config_raises_where_preflight_reports_a_problem(tmp_path, text):
     path = write(tmp_path, text)
-    report = RouteDistributor.preflight(path, PreflightContext())
+    report = check_config(RouteDistributor, path)
 
     with pytest.raises(DistributorConfigError) as excinfo:
-        RouteDistributor.from_config(path, {})
+        from_config(path)
 
     assert report.problems
     for finding in report.problems:
@@ -183,7 +174,7 @@ def test_from_config_raises_where_preflight_reports_a_problem(tmp_path, text):
 
 
 def test_from_config_builds_a_valid_file(tmp_path):
-    distributor = RouteDistributor.from_config(write(tmp_path, VALID), {})
+    distributor = from_config(write(tmp_path, VALID))
 
     assert distributor.leg_venue_type == "bus_line"
 
@@ -203,7 +194,7 @@ def test_origin_source_without_level_is_a_problem(tmp_path):
     text = VALID.replace("from: geographical_unit\n  level: MGU\n", "from: geographical_unit\n")
     report = preflight(write(tmp_path, text), KNOWN_GEOGRAPHY)
 
-    assert [(finding.key, finding.message) for finding in report.problems] == [ORIGIN_LEVEL_PROBLEM]
+    assert list(zip(keys(report.problems), [finding.message for finding in report.problems])) == [ORIGIN_LEVEL_PROBLEM]
 
 
 def test_absent_origin_source_is_a_level_problem(tmp_path):
@@ -212,7 +203,7 @@ def test_absent_origin_source_is_a_level_problem(tmp_path):
     )
     report = preflight(write(tmp_path, text), KNOWN_GEOGRAPHY)
 
-    assert [(finding.key, finding.message) for finding in report.problems] == [ORIGIN_LEVEL_PROBLEM]
+    assert list(zip(keys(report.problems), [finding.message for finding in report.problems])) == [ORIGIN_LEVEL_PROBLEM]
 
 
 def test_property_origin_source_still_needs_a_level(tmp_path):
@@ -222,4 +213,4 @@ def test_property_origin_source_still_needs_a_level(tmp_path):
     )
     report = preflight(write(tmp_path, text), KNOWN_GEOGRAPHY)
 
-    assert [(finding.key, finding.message) for finding in report.problems] == [ORIGIN_LEVEL_PROBLEM]
+    assert list(zip(keys(report.problems), [finding.message for finding in report.problems])) == [ORIGIN_LEVEL_PROBLEM]

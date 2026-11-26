@@ -9,7 +9,7 @@ to venues based on flexible rules including:
 - Special case handling (e.g., boarding school students)
 """
 
-from .base_distributor import BaseDistributor, check_value, resolve_data_path
+from .base_distributor import BaseDistributor, check_venue_type, each, resolve_data_path
 from ._allocation import VenueAllocation
 from ._fallbacks import FALLBACK_STRATEGIES
 from ._matching import SELECT_VENUE_STRATEGIES
@@ -20,7 +20,7 @@ from .probability import (
     ProbabilityConfigError,
     probability_cache_key,
 )
-from may.preflight.report import config_entry
+from may.preflight.config_reader import FAILED
 from may.utils import path_resolver as pr
 from may.utils.attribute_access import get_attribute
 from may.utils.path_resolver import DataFileSpecError, as_path_list
@@ -33,7 +33,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# `capacity_proportional` is accepted only with `batch_by: geo_unit`; see `_check_config`.
+# `capacity_proportional` is accepted only with `batch_by: geo_unit`; see `check_config`.
 ALLOCATION_STRATEGIES = SELECT_VENUE_STRATEGIES
 WHEN_FULL = ("exclude", "overflow")
 BATCH_BY = ("geo_unit", "none")
@@ -58,92 +58,81 @@ class VenueDistributor(BaseDistributor):
     """
 
     @classmethod
-    def _check_config(cls, config, config_path, context, report):
-        super()._check_config(config, config_path, context, report)
-        cls._check_venue_type("venue_type", config.get("venue_type"), report)
-        allocation = cls._section(config, "allocation", report)
-        batch_by = allocation.get("batch_by", "geo_unit")
-        strategy = allocation.get("strategy", "random")
-        if strategy == "capacity_proportional":
-            if batch_by != "geo_unit":
-                report.problem("allocation.strategy", (
-                    "'capacity_proportional' is implemented only for batched allocation; "
-                    "set allocation.batch_by to 'geo_unit'"
-                ))
-        else:
-            check_value("allocation.strategy", strategy, ALLOCATION_STRATEGIES, report)
-        check_value("allocation.when_full", allocation.get("when_full", "exclude"), WHEN_FULL, report)
-        check_value("allocation.batch_by", batch_by, BATCH_BY, report)
-        capacity_handling = cls._section(allocation, "capacity_handling", report)
-        check_value("allocation.capacity_handling.if_missing",
-                     capacity_handling.get("if_missing", "ignore"), IF_MISSING, report)
-        check_value("allocation.capacity_handling.if_zero",
-                     capacity_handling.get("if_zero", "skip"), IF_ZERO, report)
-        venue_selection = cls._section(config, "venue_selection", report)
-        check_value("venue_selection.consider_by",
-                     venue_selection.get("consider_by", "count"), CONSIDER_BY, report)
-        fallback = cls._section(config, "fallback", report)
-        check_value("fallback.strategy", fallback.get("strategy", "skip"), FALLBACK_STRATEGIES, report)
-        for position, case in cls._mappings("special_cases", config_entry(config, "special_cases", "special_cases", report), report):
-            cls._check_special_case(f"special_cases[{position}]", case, report)
-        priority = cls._section(cls._section(config, "eligibility", report), "priority_allocation", report)
-        if priority.get("enabled", False):
-            for position, group in cls._mappings("eligibility.priority_allocation.groups", priority.get("groups"), report):
-                cls._check_probability_config(
-                    f"eligibility.priority_allocation.groups[{position}].probability_config",
-                    group.get("probability_config"), config_path, report,
-                )
+    def check_config(cls, reader, context):
+        super().check_config(reader, context)
+        check_venue_type(reader, "venue_type")
+        allocation = reader.section("allocation", default={})
+        batch_by = allocation.one_of("batch_by", BATCH_BY, default="geo_unit")
+        strategy = allocation.one_of(
+            "strategy", (*ALLOCATION_STRATEGIES, "capacity_proportional"), default="random"
+        )
+        if strategy == "capacity_proportional" and batch_by is not FAILED and batch_by != "geo_unit":
+            allocation.problem(
+                "'capacity_proportional' is implemented only for batched allocation; "
+                "set allocation.batch_by to 'geo_unit'",
+                at="strategy",
+            )
+        allocation.one_of("when_full", WHEN_FULL, default="exclude")
+        capacity_handling = allocation.section("capacity_handling", default={})
+        capacity_handling.one_of("if_missing", IF_MISSING, default="ignore")
+        capacity_handling.one_of("if_zero", IF_ZERO, default="skip")
+        reader.section("venue_selection", default={}).one_of("consider_by", CONSIDER_BY, default="count")
+        reader.section("fallback", default={}).one_of("strategy", FALLBACK_STRATEGIES, default="skip")
+        for case in each(reader.items("special_cases", default=None)):
+            cls._check_special_case(case)
+        priority = reader.section("eligibility", default={}).section("priority_allocation", default={})
+        enabled = priority.value("enabled", False)
+        if enabled is not FAILED and enabled:
+            for group in each(priority.items("groups", default=None)):
+                if isinstance(group.value("probability_config"), dict):
+                    cls._check_probability_config(group.section("probability_config"), reader.found_path)
 
     @staticmethod
-    def _check_probability_config(key, probability_config, config_path, report):
+    def _check_probability_config(probability, config_path):
         """A file-based probability gate: no retired keys, both settings set, files present (not opened)."""
-        if not isinstance(probability_config, dict) or probability_config.get("type") != "file":
+        if probability.value("type") != "file":
             return
         for retired_key in RETIRED_PROBABILITY_KEYS:
-            if retired_key in probability_config:
-                report.problem(f"{key}.{retired_key}", (
-                    "retired; probability files must cover the loaded geography, remove the key"
-                ))
-        if not probability_config.get("probability_column"):
-            report.problem(f"{key}.probability_column", "not set; there is no default")
-        file_path = probability_config.get("file_path")
+            if retired_key in probability.keys():
+                probability.problem(
+                    "retired; probability files must cover the loaded geography, remove the key",
+                    at=retired_key,
+                )
+        probability.name("probability_column", give="the CSV column holding the probability")
+        file_path = probability.value("file_path")
         if not file_path:
-            report.problem(f"{key}.file_path", "not set; give a CSV path or a list of them")
+            probability.problem("not set; give a CSV path or a list of them", at="file_path")
             return
         try:
-            paths = as_path_list(file_path, f"{key}.file_path")
+            paths = as_path_list(file_path, "file_path")
         except DataFileSpecError as error:
-            report.problem(f"{key}.file_path", str(error))
+            probability.problem(str(error), at="file_path")
             return
         missing = [path for path in paths if not Path(resolve_data_path(path, config_path)).exists()]
         if missing:
-            report.problem(f"{key}.file_path", f"file(s) not found: {missing}")
+            probability.problem(f"file(s) not found: {missing}", at="file_path")
 
-    @classmethod
-    def _check_special_case(cls, key, case, report):
-        rule = cls._section(case, "allocation_rule", report)
-        rule_key = f"{key}.allocation_rule"
-        strategy = rule.get("strategy")
-        match_by = config_entry(rule, "match_by", f"{rule_key}.match_by", report)
+    @staticmethod
+    def _check_special_case(case):
+        rule = case.section("allocation_rule", default={})
+        strategy = rule.one_of("strategy", SPECIAL_CASE_STRATEGIES, default=None)
+        match_by = rule.items("match_by", default=None)
         # Allocation reads `strategy` or `match_by`, never both.
-        if strategy and match_by:
-            report.problem(rule_key, "sets both 'strategy' and 'match_by'; only one is applied, choose one")
-        if strategy:
-            check_value(f"{rule_key}.strategy", strategy, SPECIAL_CASE_STRATEGIES, report)
-        check_value(f"{rule_key}.if_no_match", rule.get("if_no_match", "error"), IF_NO_MATCH, report)
-        for position, criterion in cls._mappings(f"{rule_key}.match_by", match_by, report):
-            check_value(f"{rule_key}.match_by[{position}].match_type",
-                         criterion.get("match_type", "exact"), MATCH_TYPES, report)
+        if strategy not in (None, FAILED) and match_by not in (None, FAILED) and match_by:
+            rule.problem("sets both 'strategy' and 'match_by'; only one is applied, choose one")
+        rule.one_of("if_no_match", IF_NO_MATCH, default="error")
+        for criterion in each(match_by):
+            criterion.one_of("match_type", MATCH_TYPES, default="exact")
 
-    def __init__(self, config_file: str = None, config_dict: Dict = None):
+    def __init__(self, config_dict: Dict, config_path=None):
         """
-        Initialize VenueDistributor.
+        Initialise VenueDistributor.
 
         Args:
-            config_file: Path to YAML config file
-            config_dict: Dictionary config (alternative to file)
+            config_dict: The distributor config mapping
+            config_path: Where the config file was found
         """
-        super().__init__(config_file, config_dict)
+        super().__init__(config_dict, config_path)
 
         # Initialize core attributes
         self.venue_type = self.config.get("venue_type", "unknown")
@@ -256,7 +245,7 @@ class VenueDistributor(BaseDistributor):
         if not self.config_path:
             logger.warning(
                 f"Cannot resolve relative path '{file_path}' for a probability "
-                f"file without a config_file path. Assuming absolute path."
+                f"file without a config path. Assuming absolute path."
             )
         return resolve_data_path(file_path, self.config_path)
 

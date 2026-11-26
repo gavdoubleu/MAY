@@ -10,11 +10,12 @@ import pytest
 import yaml
 
 from may.population.person import Person
-from may.venue_distributor import DISTRIBUTOR_TYPES, distributor_from_yaml
+from may.venue_distributor import DISTRIBUTOR_TYPES
 from may.venue_distributor._allocation import (
     FALLBACK_STRATEGIES, SELECT_VENUE_STRATEGIES, SPECIAL_CASE_STRATEGIES,
 )
 from may.venue_distributor.venue_distributor import VenueDistributor
+from tests.test_unit.may.venue_distributor.distributor_checks import from_config
 
 
 class _Venue:
@@ -38,7 +39,7 @@ def test_error_lists_every_dispatched_type(tmp_path):
     path = _write(tmp_path, {"distributor_type": "nonesuch", "venue_type": "company"})
 
     with pytest.raises(ValueError) as excinfo:
-        distributor_from_yaml(str(path))
+        from_config(str(path))
 
     assert len(DISTRIBUTOR_TYPES) == 6
     for name in DISTRIBUTOR_TYPES:
@@ -48,7 +49,7 @@ def test_error_lists_every_dispatched_type(tmp_path):
 def test_absent_distributor_type_still_means_single_venue(tmp_path):
     path = _write(tmp_path, {"venue_type": "company"})
 
-    assert type(distributor_from_yaml(str(path))) is VenueDistributor
+    assert type(from_config(str(path))) is VenueDistributor
 
 
 # --- #12: allocation.strategy -----------------------------------------------------

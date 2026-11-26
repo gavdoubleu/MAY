@@ -81,7 +81,7 @@ def pool_config(tmp_path):
 
 @pytest.fixture
 def dist(pool_config):
-    return RouteDistributor(config_file=str(pool_config))
+    return RouteDistributor(config_dict=yaml.safe_load(pool_config.read_text()), config_path=str(pool_config))
 
 
 def test_journey_inside_one_lgu_uses_an_origin_keyed_pool(dist, world):
@@ -176,7 +176,7 @@ def catchment_dist(tmp_path):
     }
     p = tmp_path / "catch.yaml"
     p.write_text(yaml.safe_dump(cfg))
-    d = RouteDistributor(config_file=str(p))
+    d = RouteDistributor(config_dict=cfg, config_path=str(p))
     # A table serving only M1 <-> M3.
     leg = {"leg_idx": 0, "line_id": "L1", "board_mgu": "M1",
            "alight_mgu": "M3", "t_board_min": 0, "t_alight_min": 20}

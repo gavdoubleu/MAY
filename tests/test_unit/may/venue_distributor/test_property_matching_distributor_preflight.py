@@ -1,13 +1,13 @@
 """
-`PropertyMatchingDistributor.preflight` reports every problem in a property-matching
-distributor YAML without building anything; `from_config` parses the same way and raises
-on the same problems.
+`PropertyMatchingDistributor.check_config` records every problem in a property-matching
+distributor YAML without building anything; `DistributorStep.from_config` raises
+on the same problems, then builds it.
 """
 import pytest
 
-from may.preflight.context import PreflightContext
 from may.venue_distributor import DistributorConfigError
 from may.venue_distributor.property_matching_distributor import PropertyMatchingDistributor
+from tests.test_unit.may.venue_distributor.distributor_checks import UNKNOWN_GEOGRAPHY, check_config, from_config, keys, write
 
 VALID = (
     "distributor_type: property_matching\n"
@@ -16,18 +16,8 @@ VALID = (
 )
 
 
-def keys(findings):
-    return [finding.key for finding in findings]
-
-
-def write(tmp_path, text, name="distributor.yaml"):
-    path = tmp_path / name
-    path.write_text(text)
-    return str(path)
-
-
-def preflight(path, context=PreflightContext()):
-    return PropertyMatchingDistributor.preflight(path, context)
+def preflight(path, context=UNKNOWN_GEOGRAPHY):
+    return check_config(PropertyMatchingDistributor, path, context)
 
 
 def test_a_valid_file_has_no_findings(tmp_path):
@@ -73,7 +63,7 @@ def test_several_problems_in_one_file_are_all_reported(tmp_path):
 def test_the_shipped_residence_config_passes():
     path = "configs/1911/residence_distribution_config.yaml"
 
-    assert PropertyMatchingDistributor.preflight(path, PreflightContext()).problems == []
+    assert check_config(PropertyMatchingDistributor, path).problems == []
 
 
 @pytest.mark.parametrize("text", [
@@ -83,10 +73,10 @@ def test_the_shipped_residence_config_passes():
 ], ids=["empty", "no_activity_name", "target_not_name"])
 def test_from_config_raises_where_preflight_reports_a_problem(tmp_path, text):
     path = write(tmp_path, text)
-    report = PropertyMatchingDistributor.preflight(path, PreflightContext())
+    report = check_config(PropertyMatchingDistributor, path)
 
     with pytest.raises(DistributorConfigError) as excinfo:
-        PropertyMatchingDistributor.from_config(path, {})
+        from_config(path)
 
     assert report.problems
     for finding in report.problems:
@@ -94,6 +84,6 @@ def test_from_config_raises_where_preflight_reports_a_problem(tmp_path, text):
 
 
 def test_from_config_builds_a_valid_file(tmp_path):
-    distributor = PropertyMatchingDistributor.from_config(write(tmp_path, VALID), {})
+    distributor = from_config(write(tmp_path, VALID))
 
     assert distributor.target_venue_types == ["household", "prison"]

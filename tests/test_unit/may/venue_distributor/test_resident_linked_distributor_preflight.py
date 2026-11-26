@@ -1,28 +1,18 @@
 """
-`ResidentLinkedDistributor.preflight` reports every problem in a resident-linked distributor
-YAML without building anything; `from_config` parses the same way and raises on the same problems.
+`ResidentLinkedDistributor.check_config` records every problem in a resident-linked distributor
+YAML without building anything; `DistributorStep.from_config` raises on the same problems, then builds it.
 """
 import pytest
 
-from may.preflight.context import PreflightContext
 from may.venue_distributor import DistributorConfigError
 from may.venue_distributor.resident_linked_distributor import ResidentLinkedDistributor
+from tests.test_unit.may.venue_distributor.distributor_checks import KNOWN_GEOGRAPHY, UNKNOWN_GEOGRAPHY, check_config, from_config, keys, write
 
 VALID = "distributor_type: resident_linked\ntarget_venue_type: care_home\n"
 
 
-def keys(findings):
-    return [finding.key for finding in findings]
-
-
-def write(tmp_path, text, name="distributor.yaml"):
-    path = tmp_path / name
-    path.write_text(text)
-    return str(path)
-
-
-def preflight(path, context=PreflightContext()):
-    return ResidentLinkedDistributor.preflight(path, context)
+def preflight(path, context=UNKNOWN_GEOGRAPHY):
+    return check_config(ResidentLinkedDistributor, path, context)
 
 
 def test_a_valid_file_has_no_findings(tmp_path):
@@ -42,7 +32,7 @@ def test_an_unknown_link_level_is_a_problem(tmp_path):
     report = preflight(write(tmp_path, VALID + "link_level: households\n"))
 
     assert keys(report.problems) == ["link_level"]
-    assert "expected one of" in report.problems[0].message
+    assert "must be one of" in report.problems[0].message
 
 
 @pytest.mark.parametrize("multiplier", ["-1", "two", "true"])
@@ -57,7 +47,7 @@ def test_a_fractional_multiplier_is_accepted(tmp_path):
 
 
 def test_an_unknown_geography_level_is_a_problem(tmp_path):
-    context = PreflightContext(geo_levels=frozenset({"SGU", "MGU"}))
+    context = KNOWN_GEOGRAPHY
 
     report = preflight(write(tmp_path, VALID + "geography_level: LSOA\n"), context)
 
@@ -95,7 +85,7 @@ def test_several_problems_in_one_file_are_all_reported(tmp_path):
 def test_the_shipped_care_home_visits_config_passes():
     path = "configs/2021/distributors/care_home_visits_distributor.yaml"
 
-    assert ResidentLinkedDistributor.preflight(path, PreflightContext()).problems == []
+    assert check_config(ResidentLinkedDistributor, path).problems == []
 
 
 @pytest.mark.parametrize("text", [
@@ -106,10 +96,10 @@ def test_the_shipped_care_home_visits_config_passes():
 ], ids=["empty", "link_level", "multiplier", "filter_type"])
 def test_from_config_raises_where_preflight_reports_a_problem(tmp_path, text):
     path = write(tmp_path, text)
-    report = ResidentLinkedDistributor.preflight(path, PreflightContext())
+    report = check_config(ResidentLinkedDistributor, path)
 
     with pytest.raises(DistributorConfigError) as excinfo:
-        ResidentLinkedDistributor.from_config(path, {})
+        from_config(path)
 
     assert report.problems
     for finding in report.problems:
@@ -117,14 +107,14 @@ def test_from_config_raises_where_preflight_reports_a_problem(tmp_path, text):
 
 
 def test_from_config_builds_a_valid_file(tmp_path):
-    distributor = ResidentLinkedDistributor.from_config(write(tmp_path, VALID), {})
+    distributor = from_config(write(tmp_path, VALID))
 
     assert distributor.target_venue_type == "care_home"
 
 
 @pytest.mark.parametrize("value", ["[MGU]", "{name: MGU}"], ids=["list", "mapping"])
 def test_a_geography_level_that_is_not_a_name_is_a_problem(tmp_path, value):
-    context = PreflightContext(geo_levels=frozenset({"SGU", "MGU"}))
+    context = KNOWN_GEOGRAPHY
 
     report = preflight(write(tmp_path, VALID + f"geography_level: {value}\n"), context)
 

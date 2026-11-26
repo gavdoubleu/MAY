@@ -1,32 +1,22 @@
 """
-`VenueDistributor.preflight` reports every problem in a single-venue distributor YAML
-without building anything; `from_config` parses the same way and raises on the same problems.
+`VenueDistributor.check_config` records every problem in a single-venue distributor YAML
+without building anything; `DistributorStep.from_config` raises on the same problems, then builds it.
 """
 import glob
 
 import pytest
 import yaml
 
-from may.preflight.context import PreflightContext
 from may.utils import path_resolver as pr
 from may.venue_distributor import DistributorConfigError
 from may.venue_distributor.venue_distributor import VenueDistributor
+from tests.test_unit.may.venue_distributor.distributor_checks import KNOWN_GEOGRAPHY, UNKNOWN_GEOGRAPHY, check_config, from_config, keys, write
 
 VALID = "venue_type: school\nactivity_map_key: primary_activity\n"
 
 
-def keys(findings):
-    return [finding.key for finding in findings]
-
-
-def write(tmp_path, text, name="distributor.yaml"):
-    path = tmp_path / name
-    path.write_text(text)
-    return str(path)
-
-
-def preflight(path, context=PreflightContext()):
-    return VenueDistributor.preflight(path, context)
+def preflight(path, context=UNKNOWN_GEOGRAPHY):
+    return check_config(VenueDistributor, path, context)
 
 
 def test_a_valid_file_has_no_findings(tmp_path):
@@ -49,7 +39,7 @@ def test_any_venue_type_name_is_accepted(tmp_path):
 
 @pytest.mark.parametrize("key", ["venue_geo_level", "batch_geo_level"])
 def test_an_unknown_geo_level_is_a_problem(tmp_path, key):
-    context = PreflightContext(geo_levels=frozenset({"SGU", "MGU"}))
+    context = KNOWN_GEOGRAPHY
     text = VALID + f"venue_selection:\n  {key}: LSOA\n"
 
     report = preflight(write(tmp_path, text), context)
@@ -116,7 +106,7 @@ def test_an_unknown_value_names_the_valid_ones(tmp_path, text, key):
     report = preflight(write(tmp_path, VALID + text))
 
     assert keys(report.problems) == [key]
-    assert "expected one of" in report.problems[0].message
+    assert "must be one of" in report.problems[0].message
 
 
 @pytest.mark.parametrize("text, key", [
@@ -128,7 +118,7 @@ def test_a_closed_vocabulary_value_that_is_a_list_or_mapping_is_a_problem(tmp_pa
     report = preflight(write(tmp_path, VALID + text))
 
     assert keys(report.problems) == [key]
-    assert "expected one of" in report.problems[0].message
+    assert "must be one of" in report.problems[0].message
 
 
 def test_capacity_proportional_needs_batching_by_geo_unit(tmp_path):
@@ -229,7 +219,7 @@ def scenario_roots():
 def test_shipped_single_venue_configs_pass(path, scenario_roots):
     scenario_roots("data" if path.startswith("configs/2021") else None)
 
-    assert VenueDistributor.preflight(path, PreflightContext()).problems == []
+    assert check_config(VenueDistributor, path).problems == []
 
 
 def test_several_problems_in_one_file_are_all_reported(tmp_path):
@@ -260,10 +250,10 @@ def test_several_problems_in_one_file_are_all_reported(tmp_path):
 ], ids=["empty", "no_venue_type", "strategy", "filter_type", "if_no_match", "probability_file"])
 def test_from_config_raises_where_preflight_reports_a_problem(tmp_path, text):
     path = write(tmp_path, text)
-    report = VenueDistributor.preflight(path, PreflightContext())
+    report = check_config(VenueDistributor, path)
 
     with pytest.raises(DistributorConfigError) as excinfo:
-        VenueDistributor.from_config(path, {})
+        from_config(path)
 
     assert report.problems
     for finding in report.problems:
@@ -271,7 +261,7 @@ def test_from_config_raises_where_preflight_reports_a_problem(tmp_path, text):
 
 
 def test_from_config_builds_a_valid_file(tmp_path):
-    distributor = VenueDistributor.from_config(write(tmp_path, VALID), {})
+    distributor = from_config(write(tmp_path, VALID))
 
     assert distributor.venue_type == "school"
 
@@ -279,7 +269,7 @@ def test_from_config_builds_a_valid_file(tmp_path):
 @pytest.mark.parametrize("key", ["venue_geo_level", "batch_geo_level"])
 @pytest.mark.parametrize("value", ["[MGU]", "{name: MGU}"], ids=["list", "mapping"])
 def test_a_geo_level_that_is_not_a_name_is_a_problem(tmp_path, key, value):
-    context = PreflightContext(geo_levels=frozenset({"SGU", "MGU"}))
+    context = KNOWN_GEOGRAPHY
 
     report = preflight(write(tmp_path, VALID + f"venue_selection:\n  {key}: {value}\n"), context)
 

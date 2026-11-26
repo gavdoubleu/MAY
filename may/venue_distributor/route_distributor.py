@@ -32,9 +32,9 @@ from typing import Dict, List, Optional, Tuple, Any
 import numpy as np
 import pandas as pd
 
-from .base_distributor import BaseDistributor, check_value, resolve_data_path
-from may.preflight.context import check_geo_level
-from may.preflight.report import not_mapping_message
+from .base_distributor import BaseDistributor, check_venue_type, resolve_data_path
+from may.geography.geography import check_geo_level
+from may.preflight.config_reader import FAILED
 from may.utils.attribute_access import get_attribute
 
 logger = logging.getLogger("route_distributor")
@@ -56,54 +56,44 @@ class RouteDistributor(BaseDistributor):
     """Generic route-table-driven distributor (see module docstring)."""
 
     @classmethod
-    def _check_config(cls, config, config_path, context, report):
-        super()._check_config(config, config_path, context, report)
-        cls._check_venue_type(
-            "leg_venue_type", config.get("leg_venue_type", "transport_line"), report
-        )
+    def check_config(cls, reader, context):
+        super().check_config(reader, context)
+        check_venue_type(reader, "leg_venue_type", default="transport_line")
         for key in ("origin_source", "destination_source"):
-            source = config.get(key)
+            source = reader.section(key, default=None)
             if source is None:
                 continue
-            if not isinstance(source, dict):
-                report.problem(key, not_mapping_message(source))
-                continue
-            check_value(f"{key}.type", source.get("type", "ancestor"), SOURCE_TYPES, report)
-            check_geo_level(f"{key}.level", source.get("level"), context, report)
-        origin_source = config.get("origin_source")
-        if origin_source is None or (isinstance(origin_source, dict) and origin_source.get("level") is None):
-            report.problem(
-                "origin_source.level",
-                "not set; line venues are placed in the rider's unit at this level",
+            source.one_of("type", SOURCE_TYPES, default="ancestor")
+            check_geo_level(source, "level", context)
+        origin_source = reader.value("origin_source")
+        # A blank or wrong-type `origin_source` is already a problem.
+        if "origin_source" not in reader.keys() or (
+            isinstance(origin_source, dict) and origin_source.get("level") is None
+        ):
+            reader.problem(
+                "not set; line venues are placed in the rider's unit at this level", at="origin_source.level"
             )
-        pool_rule = config.get("pool_rule") or None
-        if pool_rule is not None:
-            if "legs_table" in config:
-                report.problem("legs_table", "set beside pool_rule, which replaces it; remove one")
-            pool_rule = cls._section(config, "pool_rule", report)
-            cls._check_numbers("pool_rule", pool_rule, POOL_RULE_NUMBERS, report)
-            check_geo_level("pool_rule.corridor_level", pool_rule.get("corridor_level"), context, report)
+        if reader.value("pool_rule"):
+            if "legs_table" in reader.keys():
+                reader.problem("set beside pool_rule, which replaces it; remove one", at="legs_table")
+            pool_rule = reader.section("pool_rule")
+            cls._check_numbers(pool_rule, POOL_RULE_NUMBERS)
+            check_geo_level(pool_rule, "corridor_level", context)
         else:
-            legs_table = config.get("legs_table", DEFAULT_LEGS_TABLE)
-            if not isinstance(legs_table, str):
-                report.problem("legs_table", f"must be a file path; got {legs_table!r}")
-            elif not Path(resolve_data_path(legs_table, config_path)).exists():
-                report.problem("legs_table", f"file not found: {legs_table}")
-        if config.get("catchment"):
-            cls._check_numbers("catchment", cls._section(config, "catchment", report), CATCHMENT_NUMBERS, report)
+            legs_table = reader.text("legs_table", default=DEFAULT_LEGS_TABLE)
+            if legs_table is not FAILED and not Path(resolve_data_path(legs_table, reader.found_path)).exists():
+                reader.problem(f"file not found: {legs_table}", at="legs_table")
+        if reader.value("catchment"):
+            cls._check_numbers(reader.section("catchment"), CATCHMENT_NUMBERS)
 
     @staticmethod
-    def _check_numbers(key, section, names, report):
+    def _check_numbers(section, names):
         """Each setting in `names` is required and read as a number."""
         for name in names:
-            value = section.get(name)
-            if value is None:
-                report.problem(f"{key}.{name}", "not set; there is no default")
-            elif isinstance(value, bool) or not isinstance(value, (int, float)):
-                report.problem(f"{key}.{name}", f"must be a number; got {value!r}")
+            section.number(name)
 
-    def __init__(self, config_file: str = None, config_dict: Dict = None):
-        super().__init__(config_file, config_dict)
+    def __init__(self, config_dict: Dict, config_path=None):
+        super().__init__(config_dict, config_path)
 
         c = self.config
         self.activity_map_key = c.get("activity_map_key", "commute")

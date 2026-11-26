@@ -1,32 +1,22 @@
 """
-`MultiVenueDistributor.preflight` reports every problem in a multi-venue distributor YAML
-without building anything; `from_config` parses the same way and raises on the same problems.
+`MultiVenueDistributor.check_config` records every problem in a multi-venue distributor YAML
+without building anything; `DistributorStep.from_config` raises on the same problems, then builds it.
 """
 import glob
 
 import pytest
 import yaml
 
-from may.preflight.context import PreflightContext
 from may.utils import path_resolver as pr
 from may.venue_distributor import DistributorConfigError
 from may.venue_distributor.multi_venue_distributor import MultiVenueDistributor
+from tests.test_unit.may.venue_distributor.distributor_checks import UNKNOWN_GEOGRAPHY, check_config, from_config, keys, write
 
 VALID = "distributor_type: multi_venue\nactivity_map_key: leisure\nvenue_types: [cinema, gym]\n"
 
 
-def keys(findings):
-    return [finding.key for finding in findings]
-
-
-def write(tmp_path, text, name="distributor.yaml"):
-    path = tmp_path / name
-    path.write_text(text)
-    return str(path)
-
-
-def preflight(path, context=PreflightContext()):
-    return MultiVenueDistributor.preflight(path, context)
+def preflight(path, context=UNKNOWN_GEOGRAPHY):
+    return check_config(MultiVenueDistributor, path, context)
 
 
 def participation(tmp_path, lines):
@@ -71,7 +61,7 @@ def test_an_unknown_consider_by_is_a_problem(tmp_path):
     report = preflight(write(tmp_path, VALID + "venue_selection:\n  consider_by: distance\n"))
 
     assert keys(report.problems) == ["venue_selection.consider_by"]
-    assert "expected one of" in report.problems[0].message
+    assert "must be one of" in report.problems[0].message
 
 
 @pytest.mark.parametrize("consider_by, strategy", [("geo_unit", "random"), ("geo_unit", "closest_balanced")])
@@ -150,7 +140,7 @@ def _multi_venue_configs():
 def test_shipped_multi_venue_configs_pass(path, scenario_roots):
     scenario_roots("data" if path.startswith("configs/2021") else None)
 
-    assert MultiVenueDistributor.preflight(path, PreflightContext()).problems == []
+    assert check_config(MultiVenueDistributor, path).problems == []
 
 
 @pytest.mark.parametrize("text", [
@@ -162,10 +152,10 @@ def test_shipped_multi_venue_configs_pass(path, scenario_roots):
 ], ids=["empty", "no_activity_map_key", "consider_by", "stray_type_config", "participation_file"])
 def test_from_config_raises_where_preflight_reports_a_problem(tmp_path, text):
     path = write(tmp_path, text)
-    report = MultiVenueDistributor.preflight(path, PreflightContext())
+    report = check_config(MultiVenueDistributor, path)
 
     with pytest.raises(DistributorConfigError) as excinfo:
-        MultiVenueDistributor.from_config(path, {})
+        from_config(path)
 
     assert report.problems
     for finding in report.problems:
@@ -173,6 +163,6 @@ def test_from_config_raises_where_preflight_reports_a_problem(tmp_path, text):
 
 
 def test_from_config_builds_a_valid_file(tmp_path):
-    distributor = MultiVenueDistributor.from_config(write(tmp_path, VALID), {})
+    distributor = from_config(write(tmp_path, VALID))
 
     assert distributor.venue_types == ["cinema", "gym"]

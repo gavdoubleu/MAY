@@ -11,11 +11,7 @@ The activity allows disease modeling to track visits to contacts' homes.
 import logging
 from pathlib import Path
 from typing import Dict, Any
-from may.preflight.config_file import load_config_mapping
-from may.preflight.report import PreflightReport, config_entry
-from may.utils.yaml_loader import load_yaml
-
-from .base_distributor import BaseDistributor, DistributorConfigError
+from may.preflight.config_reader import FAILED
 
 logger = logging.getLogger(__name__)
 
@@ -35,65 +31,34 @@ class SocialContactVisitDistributor:
     not by direct venue allocation.
     """
 
-    @staticmethod
-    def parse_config(config_path, context=None):
-        """Parse a social contact visit YAML into its config mapping, or `None` if any problem."""
-        report = PreflightReport()
-        config = load_config_mapping(config_path, report)
-        if config is None:
-            return None, report
-        # Outside the `BaseDistributor` hierarchy, but its section and list readers fit as-is.
-        source = BaseDistributor._section(config, "source", report)
-        if "property_key" in source and not source["property_key"]:
-            report.problem("source.property_key", "empty; name the person property holding contact ids")
-        max_contacts = config.get("max_contacts")
-        if max_contacts is not None and (
-            isinstance(max_contacts, bool) or not isinstance(max_contacts, int) or max_contacts < 1
-        ):
-            report.problem("max_contacts", f"must be a whole number, 1 or more; got {max_contacts!r}")
-        eligibility = BaseDistributor._section(config, "eligibility", report)
-        key = "eligibility.global_filters"
-        for position, rule in BaseDistributor._mappings(key, config_entry(eligibility, "global_filters", key, report), report):
-            if not rule.get("attribute"):
-                report.problem(f"{key}[{position}].attribute", "not set")
-            elif not any(condition in rule for condition in FILTER_CONDITIONS):
-                report.problem(f"{key}[{position}]", (
-                    f"sets none of {list(FILTER_CONDITIONS)}, so it filters nobody out"
-                ))
-        if report.has_problems:
-            return None, report
-        return config, report
-
     @classmethod
-    def preflight(cls, config_path, context):
-        """Check a social contact visit YAML without building anything."""
-        _, report = cls.parse_config(config_path, context)
-        return report
+    def check_config(cls, reader, context):
+        """Its own schema, recorded through `reader`; it shares no checks with `BaseDistributor`."""
+        reader.section("source", default={}).name(
+            "property_key", default="social_contacts", give="the person property holding contact ids"
+        )
+        max_contacts = reader.whole_number("max_contacts", default=None)
+        if max_contacts not in (None, FAILED) and max_contacts < 1:
+            reader.problem(f"must be a whole number, 1 or more; got {max_contacts!r}", at="max_contacts")
+        eligibility = reader.section("eligibility", default={})
+        filter_readers = eligibility.items("global_filters", default=None)
+        for rule in [] if filter_readers is None or filter_readers is FAILED else filter_readers:
+            attribute = rule.name("attribute", give="the attribute the filter reads")
+            if attribute is not FAILED and not any(condition in rule.keys() for condition in FILTER_CONDITIONS):
+                rule.problem(f"sets none of {list(FILTER_CONDITIONS)}, so it filters nobody out")
 
-    @classmethod
-    def from_config(cls, config_path, world_config=None):
-        """Build from a social contact visit YAML; `DistributorConfigError` on any problem."""
-        _, report = cls.parse_config(config_path)
-        report.raise_if_problems(DistributorConfigError, f"Distributor config {config_path} cannot be used.")
-        return cls(config_path)
-
-    def __init__(self, config_file: str = None, config_dict: Dict = None):
+    def __init__(self, config_dict: Dict, config_path=None):
         """
-        Initialize SocialContactVisitDistributor.
+        Initialise SocialContactVisitDistributor from a parsed config mapping; reads no file.
 
         Args:
-            config_file: Path to YAML config file
-            config_dict: Dictionary config (alternative to file)
+            config_dict: The distributor config mapping
+            config_path: Where the config file was found
         """
-        # Load config
-        if config_file:
-            self.config = load_yaml(config_file)
-            self.config_path = Path(config_file)
-        elif config_dict:
-            self.config = config_dict
-            self.config_path = None
-        else:
-            raise ValueError("Must provide either config_file or config_dict")
+        if config_dict is None:
+            raise ValueError("Must provide config_dict")
+        self.config = config_dict
+        self.config_path = Path(config_path) if config_path is not None else None
 
         # Core configuration
         self.activity_map_key = self.config.get(
