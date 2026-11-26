@@ -380,6 +380,35 @@ def test_whole_number_marginal_data_source_is_read_as_text(tmp_path):
     assert partner_assignment(parsed.config_mapping)["marginal_data_source"] == "2021"
 
 
+def test_whole_number_logic_data_source_is_read_as_text(tmp_path):
+    config = valid_config(tmp_path)
+    config["data_sources"][2021] = config["data_sources"].pop("geo")
+    first_assignment(config)["data_source"] = 2021
+    child_rule(config, [{"when": {"unique_count": 1}, "then": {"strategy": "probabilistic", "data_source": 2021}}])
+    path = write(tmp_path, config)
+
+    parsed, report = AttributeAssignmentConfig.preflight(path, KNOWN_GEOGRAPHY, key_path=KEY_PATH)
+
+    assert report.problems == []
+    child_assignment = parsed.config_mapping["assignment_rules"]["Family"]["rules"][2]["assignment"]
+    assert child_assignment["logic"][0]["then"]["data_source"] == "2021"
+
+
+def test_whole_number_venue_rule_data_source_is_read_as_text(tmp_path):
+    config = valid_config(tmp_path)
+    config["data_sources"][2021] = config["data_sources"].pop("geo")
+    first_assignment(config)["data_source"] = 2021
+    config["venue_assignment_rules"] = [
+        {"venue_type": "care_home", "assignment": {"strategy": "probabilistic", "data_source": 2021}}
+    ]
+    path = write(tmp_path, config)
+
+    parsed, report = AttributeAssignmentConfig.preflight(path, KNOWN_GEOGRAPHY, key_path=KEY_PATH)
+
+    assert report.problems == []
+    assert parsed.config_mapping["venue_assignment_rules"][0]["assignment"]["data_source"] == "2021"
+
+
 def test_a_venue_assignment_rule_is_checked(tmp_path):
     config = valid_config(tmp_path)
     config["venue_assignment_rules"] = [{"venue_type": "care_home", "assignment": {"strategy": "nope"}}]
@@ -525,6 +554,38 @@ def test_whole_number_attribute_and_source_names_are_read_as_text(tmp_path):
     assert "5" in mapping["data_sources"]
     assert first_assignment(mapping)["data_source"] == "5"
 
+
+
+WHOLE_NUMBER_LEVELS = geography_context(levels=("1", "2"))
+
+
+def test_whole_number_geo_levels_reach_the_build_as_text(tmp_path):
+    config = valid_config(tmp_path)
+    geo_file(config)["destination_level"] = 2
+    geo_file(config)["geographical_unit_column"] = {"name": "sgu", "level": 1}
+    geo_file(config)["key_columns"]["sgu"]["level"] = 1
+    path = write(tmp_path, config)
+
+    parsed, report = AttributeAssignmentConfig.preflight(path, WHOLE_NUMBER_LEVELS, key_path=KEY_PATH)
+
+    assert report.problems == []
+    file_config = geo_file(parsed.config_mapping)
+    assert file_config["destination_level"] == "2"
+    assert file_config["geographical_unit_column"]["level"] == "1"
+    assert file_config["key_columns"]["sgu"]["level"] == "1"
+
+
+def test_whole_number_data_file_path_reaches_the_build_as_text(tmp_path, monkeypatch):
+    config = valid_config(tmp_path)
+    (tmp_path / "2021").write_text("geo_unit,W\nA,1\n")
+    monkeypatch.chdir(tmp_path)
+    geo_file(config)["path"] = 2021
+    path = write(tmp_path, config)
+
+    parsed, report = AttributeAssignmentConfig.preflight(path, KNOWN_GEOGRAPHY, key_path=KEY_PATH)
+
+    assert report.problems == []
+    assert geo_file(parsed.config_mapping)["path"] == "2021"
 
 def test_several_problems_in_one_file_are_all_reported(tmp_path):
     config = valid_config(tmp_path)

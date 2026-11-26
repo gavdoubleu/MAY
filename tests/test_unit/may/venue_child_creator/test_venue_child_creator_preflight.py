@@ -196,6 +196,13 @@ def test_member_filters_keep_their_written_settings(tmp_path):
     assert settings["member_filters"] == [{"attribute": "age", "min": 3}]
 
 
+def test_whole_number_member_filter_attribute_reaches_the_build_as_text(tmp_path):
+    settings, report = preflight(write(tmp_path, VALID + "member_filters:\n  - attribute: 7\n    min: 3\n"))
+
+    assert report.problems == []
+    assert settings["member_filters"] == [{"attribute": "7", "min": 3}]
+
+
 def test_exclude_and_include_subset_keys_together_is_a_problem(tmp_path):
     path = write(tmp_path, VALID + "exclude_subset_keys: [guest]\ninclude_subset_keys: [student]\n")
 

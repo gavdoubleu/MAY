@@ -751,3 +751,92 @@ def test_config_file_empty_path_is_problem(tmp_path):
     reader, report = reader_over({"config": ""}, data_dir=str(tmp_path))
     assert reader.config_file("config").failed
     assert problems(report) == [("block.config", "must not be empty; give a value")]
+
+
+# --- whole numbers read as text are written back as text --------------------------------
+
+
+@pytest.mark.parametrize("method", ["text", "name", "path"])
+def test_whole_number_read_as_text_is_written_back(method):
+    reader, _ = reader_over({"key": 2021})
+    getattr(reader, method)("key")
+    assert reader.value("key") == "2021"
+
+
+def test_one_of_whole_number_written_back():
+    reader, _ = reader_over({"key": 1})
+    reader.one_of("key", ("1", "2"))
+    assert reader.value("key") == "1"
+
+
+def test_written_back_through_child_readers():
+    reader, _ = reader_over({"outer": {"level": 1}, "rows": [{"attribute": 7}]})
+    reader.section("outer").name("level")
+    reader.items("rows")[0].name("attribute")
+    assert reader.value() == {"outer": {"level": "1"}, "rows": [{"attribute": "7"}]}
+
+
+def test_names_items_written_back():
+    reader, _ = reader_over({"key": [2021, "msoa"]})
+    reader.names("key")
+    assert reader.value("key") == ["2021", "msoa"]
+
+
+def test_entries_whole_number_names_written_back_in_order():
+    reader, _ = reader_over({"types": {"school": {"size": 3}, 2021: {"size": 4}, "office": {}}})
+    reader.entries("types")
+    assert list(reader.value("types")) == ["school", "2021", "office"]
+
+
+def test_entries_duplicate_name_left_as_written():
+    reader, _ = reader_over({"types": {1: {"size": 3}, "1": {"size": 4}}})
+    reader.entries("types")
+    assert list(reader.value("types")) == [1, "1"]
+
+
+def test_data_file_whole_numbers_written_back_unresolved(tmp_path):
+    write(tmp_path / "2021", "x")
+    write(tmp_path / "7", "x")
+    reader, _ = reader_over({"one": 2021, "many": ["7", 2021]})
+    reader.data_file("one", str(tmp_path))
+    reader.data_file("many", str(tmp_path))
+    assert reader.value() == {"one": "2021", "many": ["7", "2021"]}
+
+
+def test_config_file_whole_number_path_written_back(tmp_path):
+    write(tmp_path / "2021", "key: 1\n")
+    reader, _ = reader_over({"config": 2021}, data_dir=str(tmp_path))
+    reader.config_file("config")
+    assert reader.value("config") == "2021"
+
+
+def test_whole_number_read_as_number_not_written_back():
+    reader, _ = reader_over({"size": 3, "share": 2})
+    reader.whole_number("size")
+    reader.number("share")
+    assert reader.value() == {"size": 3, "share": 2}
+
+
+def test_default_not_written_back():
+    reader, _ = reader_over({})
+    reader.name("key", default="msoa")
+    assert reader.value() == {}
+
+
+def test_path_written_back_unresolved(monkeypatch):
+    from may.utils import path_resolver as pr
+
+    monkeypatch.setattr(pr, "_resolver", pr.PathResolver("/cfg", "/data", "/out"))
+    reader, _ = reader_over({"key": "${data_root}/file.csv"})
+    assert reader.path("key") == "/data/file.csv"
+    assert reader.value("key") == "${data_root}/file.csv"
+
+
+def test_root_reader_copies_so_written_config_untouched():
+    written = {"levels": [1, 2], "filter": {"level": 1}}
+    reader, _ = reader_over({})
+    block = reader.root_reader("geography", written)
+    block.names("levels")
+    block.section("filter").name("level")
+    assert written == {"levels": [1, 2], "filter": {"level": 1}}
+    assert block.value() == {"levels": ["1", "2"], "filter": {"level": "1"}}

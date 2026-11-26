@@ -8,7 +8,6 @@ Simplified attribute assignment configuration:
 - Cleaner, more user-friendly configuration format
 """
 
-import copy
 import logging
 from collections import defaultdict
 from typing import Dict, List, Any, Optional
@@ -992,9 +991,9 @@ class AttributeAssignmentConfig(ConfigStage):
 
     @classmethod
     def parse(cls, reader, context):
-        """The checked mapping, whole-number names read as text, and the found path."""
+        """The checked mapping, whole-number names written back as text, and the found path."""
         _check_config(reader, context)
-        return ParsedAttributeConfig(_with_names_as_text(reader.value()), reader.found_path)
+        return ParsedAttributeConfig(reader.value(), reader.found_path)
 
     @classmethod
     def build(cls, parsed, **live):
@@ -1033,7 +1032,7 @@ def _check_config(reader, context):
     _check_assignment_rules(reader, source_names)
     venue_rules = reader.items("venue_assignment_rules", default=None)
     for rule in [] if venue_rules is None or venue_rules is FAILED else venue_rules:
-        _forward(rule, _assignment_problems(rule.value("assignment", {}), source_names))
+        _forward(rule, _assignment_problems(rule, source_names))
 
 
 def _check_attributes(reader):
@@ -1099,7 +1098,7 @@ def _check_assignment_rules(reader, source_names):
             continue
         rules_readable = len(rule_readers) == len(structure.value("rules"))
         for rule in rule_readers:
-            problems = _assignment_problems(rule.value("assignment", {}), source_names)
+            problems = _assignment_problems(rule, source_names)
             _check_role_references(rule.value(), problems)
             _forward(rule, problems)
             rules_readable = rules_readable and not problems.has_problems
@@ -1167,73 +1166,36 @@ def _check_role_references(rule, report):
             ))
 
 
-def _source_references(assignment, key="assignment"):
-    """Every source reference in an assignment as (key path, block, block key): its
+def _source_references(rule):
+    """Every source reference in a rule's assignment as (block reader, block key): its
     `data_source` and `marginal_data_source`, and each `logic[].then.data_source`."""
+    assignment = rule.section("assignment")
     references = [
-        (f"{key}.{block_key}", assignment, block_key)
-        for block_key in ("data_source", "marginal_data_source") if block_key in assignment
+        (assignment, block_key)
+        for block_key in ("data_source", "marginal_data_source") if block_key in assignment.keys()
     ]
-    for position, entry in enumerate(_mappings_in(assignment.get("logic")), start=1):
-        then = entry.get("then")
-        if isinstance(then, dict) and "data_source" in then:
-            references.append((f"{key}.logic[{position}].then.data_source", then, "data_source"))
+    logic_readers = assignment.items("logic", default=None)
+    for entry in [] if logic_readers is None or logic_readers is FAILED else logic_readers:
+        if isinstance(entry.value("then"), dict) and "data_source" in entry.value("then"):
+            references.append((entry.section("then"), "data_source"))
     return references
 
 
-def _assignment_problems(assignment, source_names):
-    """Problems in one assignment block, keyed from its rule, and that each source
+def _assignment_problems(rule, source_names):
+    """Problems in one rule's assignment block, keyed from the rule, and that each source
     reference names a declared data source; a whole-number source name is read as text."""
     report = PreflightReport()
     key = "assignment"
-    validate_assignment_config(assignment, report, key)
+    validate_assignment_config(rule.value(key, {}), report, key)
     if report.has_problems or source_names is None:
         return report
-    for source_key, block, block_key in _source_references(assignment, key):
-        source_name = _text_if_whole_number(block[block_key])
-        if source_name is not None and not isinstance(source_name, str):
-            report.problem(source_key, f"must be a data source name; got {source_name!r}")
-        elif source_name is not None and source_name not in source_names:
-            report.problem(source_key, (
-                f"unknown data source {source_name!r}; declared: {sorted(source_names)}"
-            ))
+    for block, block_key in _source_references(rule):
+        source_name = block.name(block_key, give="a data source name")
+        if source_name is not FAILED and source_name not in source_names:
+            block.problem(f"unknown data source {source_name!r}; declared: {sorted(source_names)}", at=block_key)
     return report
-
-
-def _text_if_whole_number(value):
-    return str(value) if isinstance(value, int) and not isinstance(value, bool) else value
 
 
 def _mappings_in(value):
     """The mappings in a list, skipping anything else; nothing when not a list."""
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
-
-
-def _assignments(config):
-    """Every assignment mapping, structure rules then venue rules; tolerates bad shapes,
-    since the parsed result of a config with problems is discarded."""
-    structures = config.get("assignment_rules")
-    rules = []
-    for structure in structures.values() if isinstance(structures, dict) else []:
-        if isinstance(structure, dict):
-            rules += _mappings_in(structure.get("rules"))
-    rules += _mappings_in(config.get("venue_assignment_rules"))
-    return [rule["assignment"] for rule in rules if isinstance(rule.get("assignment"), dict)]
-
-
-def _with_names_as_text(config):
-    """A copy of the config with whole-number attribute and data source names as text, so
-    names and the references to them match."""
-    config = copy.deepcopy(config)
-    for key in ("attributes", "required_attributes"):
-        for entry in _mappings_in(config.get(key)):
-            if "name" in entry:
-                entry["name"] = _text_if_whole_number(entry["name"])
-    if isinstance(config.get("data_sources"), dict):
-        config["data_sources"] = {
-            _text_if_whole_number(name): source for name, source in config["data_sources"].items()
-        }
-    for assignment in _assignments(config):
-        for _, block, block_key in _source_references(assignment):
-            block[block_key] = _text_if_whole_number(block[block_key])
-    return config

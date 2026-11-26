@@ -5,11 +5,14 @@ Blank, absent and wrong-type values mean the same thing at every key in every st
 
 - blank (`key:`, `null`, `~`) is always a problem;
 - absent takes the default silently, or is a problem when no `default=` is given;
-- wrong type is a problem; the only coercion is a whole number read as text.
+- wrong type is a problem; the only coercion is a whole number read as text, which is
+  written back as text, so the build gets what preflight accepted.
 
 A key with a problem reads as `FAILED`. A failed section or config file gives an inert
 reader whose reads return `FAILED` and record nothing, so one mistake gives one finding.
 """
+
+import copy
 
 import yaml
 
@@ -60,7 +63,7 @@ def _is_whole_number(value) -> bool:
 
 
 def _whole_numbers_as_text(spec):
-    """A data-file spec with whole-number paths (alone or in a list) read as text."""
+    """A value read as text, alone or in a list, with its whole numbers as text."""
     if _is_whole_number(spec):
         return str(spec)
     if isinstance(spec, list):
@@ -146,8 +149,10 @@ class ConfigReader:
 
     # --- the read shared by every primitive --------------------------------------------
 
-    def _read(self, key, default, give, convert, convert_default=False):
-        """Inert → FAILED; absent → default or problem; blank → problem; else `convert`."""
+    def _read(self, key, default, give, convert, convert_default=False, text_form=False):
+        """Inert → FAILED; absent → default or problem; blank → problem; else `convert`.
+
+        `text_form`: a written value read as text has its whole numbers written back as text."""
         if self.failed:
             return FAILED
         key_path = self._child_path(key)
@@ -168,7 +173,10 @@ class ConfigReader:
                     key_path, f"left blank; give {_DEFAULT_NOUN}, or remove the key to use the default"
                 )
             return FAILED
-        return convert(raw, key_path)
+        result = convert(raw, key_path)
+        if text_form and result is not FAILED:
+            self._value[key] = _whole_numbers_as_text(raw)
+        return result
 
     def _wrong(self, key_path: str, expected: str, value, hint: str = None):
         self._record(key_path, _wrong_type(expected, value, hint))
@@ -233,6 +241,7 @@ class ConfigReader:
             if not isinstance(raw, dict):
                 return self._wrong(key_path, "a mapping", raw)
             readers = {}
+            renamed = set()
             entry_parent = self._reader_at(raw, key_path)
             for name, entry in raw.items():
                 entry_path = entry_parent._child_path(name)
@@ -243,8 +252,14 @@ class ConfigReader:
                     self._record(entry_path, "named twice; give each entry a different name")
                 elif isinstance(entry, dict):
                     readers[str(name)] = self._reader_at(entry, entry_path)
+                    if _is_whole_number(name) and str(name) not in raw:
+                        renamed.add(name)
                 else:
                     self._wrong(entry_path, "a mapping", entry)
+            if renamed:
+                entries_as_written = list(raw.items())
+                raw.clear()
+                raw.update((str(name) if name in renamed else name, entry) for name, entry in entries_as_written)
             return readers
 
         return self._read(key, default, give, convert, convert_default=True)
@@ -323,18 +338,20 @@ class ConfigReader:
         if not isinstance(value, dict):
             self._record(key_path, _wrong_type("a mapping", value))
             return self._reader_at(_INERT, key_path)
-        return self._reader_at(value, key_path)
+        # Reads write text back; the written config stays as written.
+        return self._reader_at(copy.deepcopy(value), key_path)
 
     # --- leaves ------------------------------------------------------------------------
 
     def text(self, key, default=_REQUIRED, give=None):
         """Text; a whole number is read as text."""
-        return self._read(key, default, give, self._to_text)
+        return self._read(key, default, give, self._to_text, text_form=True)
 
     def name(self, key, default=_REQUIRED, give=None):
         """Non-empty text; a whole number is read as text."""
         return self._read(
-            key, default, give, lambda raw, key_path: self._to_name(raw, key_path, give or _DEFAULT_NOUN)
+            key, default, give, lambda raw, key_path: self._to_name(raw, key_path, give or _DEFAULT_NOUN),
+            text_form=True,
         )
 
     def names(self, key, default=_REQUIRED, give=None):
@@ -354,7 +371,7 @@ class ConfigReader:
                     good_names.append(name)
             return good_names
 
-        return self._read(key, default, give, convert)
+        return self._read(key, default, give, convert, text_form=True)
 
     def true_or_false(self, key, default=_REQUIRED, give=None):
         def convert(raw, key_path):
@@ -389,7 +406,7 @@ class ConfigReader:
             self._record(key_path, f"must be one of {choices}; got {_shown(raw)}")
             return FAILED
 
-        return self._read(key, default, give, convert)
+        return self._read(key, default, give, convert, text_form=True)
 
     def path(self, key, default=_REQUIRED, give=None):
         """Text with `${...}` roots resolved."""
@@ -398,7 +415,7 @@ class ConfigReader:
             text = self._to_text(raw, key_path)
             return FAILED if text is FAILED else pr.resolve(text)
 
-        return self._read(key, default, give, convert)
+        return self._read(key, default, give, convert, text_form=True)
 
     def data_file(self, key, data_dir, default=_REQUIRED, give=None):
         """Paths of the data file(s) `key` names: one path or a list, relative ones under
@@ -422,7 +439,7 @@ class ConfigReader:
                 self._record(key_path, str(error))
                 return FAILED
 
-        return self._read(key, default, give, convert, convert_default=True)
+        return self._read(key, default, give, convert, convert_default=True, text_form=True)
 
     def value(self, key=_WHOLE_VALUE, default=None):
         """Raw value at `key` (or this whole place), recording nothing; `FAILED` when inert."""
